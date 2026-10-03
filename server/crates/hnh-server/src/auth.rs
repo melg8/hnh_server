@@ -219,6 +219,9 @@ fn mix128(mut v: u64) -> u64 {
 }
 
 fn load_certs(cert_path: &str, key_path: &str) -> anyhow::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    if !std::path::Path::new(cert_path).exists() || !std::path::Path::new(key_path).exists() {
+        generate_dev_cert(cert_path, key_path)?;
+    }
     let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(
         std::fs::File::open(cert_path)?,
     ))
@@ -228,6 +231,27 @@ fn load_certs(cert_path: &str, key_path: &str) -> anyhow::Result<(Vec<Certificat
     ))?
     .ok_or_else(|| anyhow::anyhow!("no private key in {key_path}"))?;
     Ok((certs, key))
+}
+
+/// Generate a self-signed development certificate if the cert/key pair is
+/// missing. The legacy client pins a certificate only with
+/// `-Dhaven.pinnedcert`; the default local-dev client uses trustAll, so a
+/// fresh self-signed pair is safe. Production deployments should provide
+/// their own pair via --cert/--key.
+fn generate_dev_cert(cert_path: &str, key_path: &str) -> anyhow::Result<()> {
+    if let Some(dir) = std::path::Path::new(cert_path).parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let subject = rcgen::CertificateParams::new(vec!["localhost".to_owned()])?;
+    let key_pair = rcgen::KeyPair::generate()?;
+    let cert = subject.self_signed(&key_pair)?;
+    std::fs::write(cert_path, cert.pem())?;
+    std::fs::write(key_path, key_pair.serialize_pem())?;
+    tracing::warn!(
+        cert = cert_path,
+        "missing TLS pair: generated a self-signed development certificate"
+    );
+    Ok(())
 }
 
 impl AuthServer {
