@@ -241,14 +241,21 @@ impl Game {
     }
 
     fn report_perf(&self) {
+        let ph = self.world.perf.phase_us;
         info!(
             players = self.world.players.len(),
             animals = self.world.animal_gobs.len(),
             tick_us = self.world.perf.last_tick_us,
+            mean_tick_us = self.world.perf.mean_tick_us,
             max_tick_us = self.world.perf.max_tick_us,
             sessions = self.world.perf.active_sessions,
             gobs = self.world.gobs.alive.iter().filter(|a| **a).count(),
             spawned = self.world.perf.spawned_objects,
+            phase_mv_us = ph[0] as u64,
+            phase_ai_us = ph[1] as u64,
+            phase_combat_us = ph[2] as u64,
+            phase_vitals_us = ph[3] as u64,
+            phase_vis_us = ph[4] as u64,
             "perf"
         );
     }
@@ -1900,12 +1907,33 @@ impl Game {
 
     fn tick(&mut self) {
         self.world.tick += 1;
+        // Per-phase attribution keeps the data-oriented hot loops honest:
+        // regressions show up in the phase histogram, not just the total.
+        let mut phase_us = [0u128; 5];
+        let t0 = Instant::now();
         self.tick_movement();
+        phase_us[0] = t0.elapsed().as_micros();
+        let t1 = Instant::now();
         self.tick_animals();
+        phase_us[1] = t1.elapsed().as_micros();
+        let t2 = Instant::now();
         self.tick_combat();
+        phase_us[2] = t2.elapsed().as_micros();
+        let t3 = Instant::now();
         self.tick_vitals();
+        phase_us[3] = t3.elapsed().as_micros();
+        let t4 = Instant::now();
         self.update_visibility();
-        self.world.perf.active_sessions = self.sessions.len();
+        phase_us[4] = t4.elapsed().as_micros();
+        let perf = &mut self.world.perf;
+        perf.active_sessions = self.sessions.len();
+        perf.phase_us = phase_us;
+        // Exponential moving average keeps a stable steady-state number.
+        perf.mean_tick_us = if perf.mean_tick_us == 0 {
+            perf.last_tick_us as u64
+        } else {
+            (perf.mean_tick_us * 49 + perf.last_tick_us as u64) / 50
+        };
     }
 
     fn tick_movement(&mut self) {

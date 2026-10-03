@@ -499,3 +499,11 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 - Session end 1791063100: verify with `cargo test` (32 green),
   `python3 server/scripts/test_client.py testuser` (WORLD ENTRY: OK),
   `python3 server/scripts/test_craft.py crafttest` (CRAFT/EAT: OK).
+
+---
+
+## Session end 1791062978
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+

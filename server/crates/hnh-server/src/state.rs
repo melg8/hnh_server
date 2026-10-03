@@ -426,9 +426,15 @@ pub struct World {
 pub struct Perf {
     pub last_tick_us: u128,
     pub max_tick_us: u128,
+    /// Exponential moving average of tick cost (stable steady-state number
+    /// for load reports; 50-tick half-life).
+    pub mean_tick_us: u64,
     pub active_sessions: usize,
     pub visible_total: usize,
     pub spawned_objects: usize,
+    /// Per-phase microseconds of the last tick: [movement, ai, combat,
+    /// vitals, visibility]. Load-test hot-loop attribution.
+    pub phase_us: [u128; 5],
 }
 
 impl World {
