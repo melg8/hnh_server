@@ -125,3 +125,27 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 - Load: 724 bots / 19 ms tick. Numbers above.
 - Commits: "Add Rust server...", "Remove build artifacts...",
   "Client: local dev server support".
+
+---
+
+## Session end 1791053403
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791053436
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791053595
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
