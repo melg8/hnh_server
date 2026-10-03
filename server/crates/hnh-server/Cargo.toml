@@ -1,0 +1,27 @@
+[package]
+name = "hnh-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hnh-server"
+path = "src/main.rs"
+
+[dependencies]
+hnh-proto = { path = "../hnh-proto" }
+hnh-world = { path = "../hnh-world" }
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal", "fs"] }
+rustls.workspace = true
+rustls-pemfile.workspace = true
+rustls-pki-types.workspace = true
+flate2.workspace = true
+rand.workspace = true
+anyhow = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal", "test-util"] }

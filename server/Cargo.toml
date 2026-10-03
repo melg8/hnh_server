@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/hnh-proto", "crates/hnh-world", "crates/hnh-server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0"
+
+[workspace.dependencies]
+flate2 = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal"] }
+rustls-pki-types = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
