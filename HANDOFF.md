@@ -527,3 +527,20 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 - Next: `git pull` + `windows\start-server.bat` should now build and
   run on Windows. Remaining roadmap unchanged (dirty-cell visibility,
   farming/livestock, party/chat, station crafting).
+
+## Session end 1791063500 (JOGL natives fix)
+
+- Windows client launch failed: `UnsatisfiedLinkError: no jogl in
+  java.library.path` (the later `Shutdown in progress` resource error
+  was a cascade). JOGL 1.1 loads natives via System.loadLibrary which
+  searches java.library.path only; the committed x86-64 DLLs in
+  `build/` were never on it.
+- Fix: `windows/run-client.bat` passes
+  `-Djava.library.path=%CD%\build`, prepends `build` to PATH (dependent
+  DLL resolution), and adds `--enable-native-access=ALL-UNNAMED`
+  (JDK 21+ restricted-method warning). README Notes document the
+  manual-launch variant.
+- Verified: all 4 DLLs are git-tracked in `build/` and `dll/64/`;
+  `file` confirms PE32+ x86-64, matching x64 JDKs.
+- Next: `git pull` + `windows\run-client.bat` should reach the login
+  screen and connect to the local server.
