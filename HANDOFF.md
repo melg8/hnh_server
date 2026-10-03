@@ -544,3 +544,39 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
   `file` confirms PE32+ x86-64, matching x64 JDKs.
 - Next: `git pull` + `windows\run-client.bat` should reach the login
   screen and connect to the local server.
+
+---
+
+## Session end 1791066034
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791066083
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+## Session end 1791064200 (resource server hardening)
+
+- Client-side symptom: after successful login, resource fetches from
+  http://127.0.0.1:1872/ got Connection refused while auth/game worked;
+  the Window.<clinit> NPE on gfx/hud/fbtn was a cascade.
+- Root causes covered: (1) res bind failure only logged a background
+  error - now fatal at startup with actionable messages (missing gameres
+  dir, taken port); (2) transient accept/recv errors (Windows
+  WSAECONNRESET class) killed service loops - auth accept, res accept
+  and UDP shard recv_from now log-and-continue; (3) new startup
+  self-check TCP-probes 1871+1872 on loopback and aborts if unreachable,
+  so a half-alive server is impossible.
+- res_http unit tests added (200/404/403-traversal over loopback).
+- Verified: 35 tests green, clippy -D warnings, fmt clean; live boot
+  shows both self-check OK lines, curl serves gfx/hud/fbtn (HTTP 200);
+  test_client WORLD ENTRY OK, test_craft EAT FLOW OK. Commit 89b0881.
+- Next: user git pull + rebuild via start-server.bat; if the server
+  console previously showed "resource server failed"/"resource accept
+  error", this commit removes that failure mode.
