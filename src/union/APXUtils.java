@@ -773,6 +773,8 @@ public class APXUtils {
 	/* Exception Handling */
 	public static void handleException(Thread th, final Throwable ex) {
 		if (th instanceof JSThread) return;
+		// Local dev: always print the full trace so headless runs are debuggable.
+		ex.printStackTrace();
 		new Thread(new Runnable() {
 			@Override
 			public void run() {

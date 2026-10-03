@@ -162,7 +162,7 @@ public class Config {
 			authserv = getprop("haven.authserv", null);
 			defserv = getprop("haven.defserv", null);
 			if (!(p = getprop("haven.resurl",
-					"http://www.havenandhearth.com/res/")).equals(""))
+					"http://127.0.0.1:1872/")).equals(""))
 				resurl = new URL(p);
 			if (!(p = getprop("haven.mapurl",
 					"http://www.havenandhearth.com/mm/")).equals(""))

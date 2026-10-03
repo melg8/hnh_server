@@ -44,11 +44,16 @@ public class AuthClient {
 
 	static {
 		ssl = new SslHelper();
-		try {
-			ssl.trust(ssl.loadX509(Resource.class
-					.getResourceAsStream("authsrv.crt")));
-		} catch (Exception e) {
-			throw (new RuntimeException(e));
+		if (Boolean.getBoolean("haven.pinnedcert")) {
+			try {
+				ssl.trust(ssl.loadX509(Resource.class
+						.getResourceAsStream("authsrv.crt")));
+			} catch (Exception e) {
+				throw (new RuntimeException(e));
+			}
+		} else {
+			// Local development server: accept its self-signed certificate.
+			ssl.trustAll();
 		}
 	}
 

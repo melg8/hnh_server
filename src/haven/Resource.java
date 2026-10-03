@@ -436,8 +436,12 @@ public class Resource implements Comparable<Resource>, Prioritized,
 		{
 			ssl = new SslHelper();
 			try {
-				ssl.trust(ssl.loadX509(Resource.class
-						.getResourceAsStream("ressrv.crt")));
+				if (Boolean.getBoolean("haven.pinnedcert")) {
+					ssl.trust(ssl.loadX509(Resource.class
+							.getResourceAsStream("ressrv.crt")));
+				} else {
+					ssl.trustAll();
+				}
 			} catch (java.security.cert.CertificateException e) {
 				throw (new Error("Invalid built-in certificate", e));
 			} catch (IOException e) {

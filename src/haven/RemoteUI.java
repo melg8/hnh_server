@@ -65,6 +65,17 @@ public class RemoteUI implements UI.Receiver {
 							c = MainFrame.getCenterPoint().add(-415, -300);
 					} else if (type.equals("charlist") && args.length >= 1) {
 						c = MainFrame.getCenterPoint().add(-380, -50);
+						// Auto-play hook for headless dev/load-test sessions:
+						// -Dhaven.autoplay=<name> selects the character
+						// as soon as the server shows the list.
+						String auto = System.getProperty("haven.autoplay", "");
+						if (!auto.isEmpty() && sess != null) {
+							Message play = new Message(Message.RMSG_WDGMSG);
+							play.adduint16(id);
+							play.addstring("play");
+							play.addlist(new Object[] { auto });
+							sess.queuemsg(play);
+						}
 					} else if (type.equals("ibtn") && args.length >= 2) {
 						if (((String) args[0]).equals("gfx/hud/buttons/ncu")
 								&& ((String) args[1])
