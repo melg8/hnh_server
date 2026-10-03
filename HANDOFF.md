@@ -72,46 +72,74 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 ```
 `gameres/` is NOT in git (repo size); it is reproducible from the repo.
 
-## Verified (this session)
+## Verified (session 2)
 
 - Unit tests: protocol roundtrips, reliability in-order/out-of-order/dup,
   MAPDATA shape (reinflate == 10000 tiles + plots), fragmentation,
   JavaRandom == JDK 21 reference values, mkrandoom == JDK, worldgen
-  determinism/variety, SHA-256 vectors, bootstrap RESID ordering.
+  determinism/variety, SHA-256 vectors, bootstrap RESID ordering,
+  persistence roundtrip + seed-mismatch reset, frv uimsg encoding,
+  predator engagement in saturated worlds. 25 tests green.
 - Integration: `scripts/test_client.py` performs TLS auth -> MSG_SESS ->
   charlist -> play -> full bootstrap -> 9x MAPREQ -> MAPDATA (9 fragments)
   -> OBJDATA stream (player + trees + animals) -> walk click. Prints
   `WORLD ENTRY: OK`.
-- Load: 724 concurrent bot sessions (this container's fork/thread cap,
-  not the server's) all walking simultaneously; steady-state tick
-  ~19 ms vs 100 ms budget (max 44 ms) => 5x headroom; linear projection
-  ~26 ms at 1000 players. Single-process design holds.
+- Load (session 2): 1000/1000 async bot sessions in a saturated world
+  (3300+ animals) with live fights; steady-state tick ~37 ms vs 100 ms
+  budget (max 76 ms) at worst-case single-area crowding; RSS ~190 MB.
+  Bots run as tokio tasks (thread-per-bot hit the 748-thread ulimit at
+  547 sessions in session 1's design).
+- Sharding: `--shards N` opens N SO_REUSEPORT UDP sockets; kernel
+  4-tuple hash pins each peer to one shard; `WORLD ENTRY: OK` passes
+  through a shard.
+
+## Architecture changes (session 2)
+
+- `net.rs`: free fn `spawn(game_tx, shards)` binds N UDP sockets with
+  SO_REUSEPORT via socket2; each shard owns a private recv loop and
+  session table; accept log carries `shard=` for occupancy histograms.
+- `persist.rs`: `SaveStore` keeps per-character snapshots in
+  `../save/world.json` (version 1, atomic tmp+rename writes). Snapshots
+  update on session close + 30 s autosave; SIGINT/SIGTERM follow a
+  graceful shutdown path (`Cmd::Shutdown`) that flushes the file. Seed
+  mismatch or corrupt file starts fresh characters. `HNH_SAVE_FILE`
+  env var overrides the path.
+- `fight.rs`: Fightview (frv) openings combat. One frv widget per
+  session created on first engagement (destroyed when relations empty).
+  Per-opponent relations carry balance -5..+5, intensity, two-bit give,
+  IP both sides, offence/defence bars scaled x100. uimsg: new/del/upd/
+  updod/cur/atkc/offdef; client wdgmsg click/give handled. Damage lands
+  only through openings (defence broken), scaled by str and advantage.
+- `bots.rs`: fully async (tokio tasks, no threads). Bots spread over
+  home tile areas near the spawn, request their 3x3 grids with raw
+  MAPREQ datagrams, walk, and get engaged by predators under
+  `--saturated` (aggro radius widened to 900 subtiles there).
+- `auth.rs`: self-signed dev certificate generated with rcgen at boot
+  when certs/authsrv.key.pem is absent (fresh-clone one-command start).
+- `main.rs`: `--shards N` flag; graceful SIGTERM/SIGINT shutdown.
 
 ## Known gaps / next steps (priority order)
 
-1. **10k scale-out**: single UDP socket is the next bottleneck. Shard
-   sockets with SO_REUSEPORT (session -> shard by hash), consider
-   splitting visibility into grid-owner tasks. The SoA layout and
-   per-session queues were designed for this; see `state.rs` comments.
-2. **frv combat window**: fights use HP auto-attack; the Fightview
-   relation protocol (offence/defence bars, IP) from
-   docs/mechanics/combat-system.md is not implemented yet.
-3. **Crafting**: paginae actions and the Makewindow flow
+1. **Crafting**: paginae actions and the Makewindow flow
    (`act("craft", ...)` -> make widget -> `make 0/1`) are stubbed
    (`on_menu_action` logs); fep.conf/curio.conf parsing not done.
-4. **Farming/livestock**: crop growth stages via sdt + OD_RES are
+2. **Grid-owner partitioning**: UDP shards are done; the game task is
+   still the single simulation owner. Next scale-out step is splitting
+   visibility/AI into grid-owner tasks (SoA layout ready, see state.rs).
+3. **Farming/livestock**: crop growth stages via sdt + OD_RES are
    designed (see encode_gob_block) but no planting flow yet.
-5. **Persistence**: world is seed-deterministic but player/character
-   state (LP, attributes, inventory) is in-memory only. Add a save file
-   (JSON or SQLite) + load on login.
-6. **Headless client GL**: the client runs on a real display; under
-   Xvfb JOGL 1.1 throws `GLDrawableFactory.chooseGraphicsConfiguration`
-   (known old-JOGL/X11 issue). Wire-protocol correctness is covered by
-   scripts/test_client.py instead.
-7. **flavor objects**: client-side flavor replication needs the tileset
+4. **Combat polish**: frv relations stream balance/intensity only
+   passively (no move selection UI: attack/maneuver resources are not
+   settable yet); IP accrues per swing, no move costs.
+5. **Headless client GL**: the client runs on a real display; under
+   Xvfb JOGL 1.1 needs Linux natives that this repo does not ship
+   (Windows .dll only; Debian headless JRE also lacks libawt_xawt --
+   use a full Temurin JDK for client smoke tests). Wire-protocol
+   correctness is covered by scripts/test_client.py.
+6. **flavor objects**: client-side flavor replication needs the tileset
    flavobjs tables + randoom parity; server gobs already cover clickable
    objects, so this is cosmetic-only for now.
-8. **Party/buffs/chat**: wire builders exist (`wdg::` helpers), gameplay
+7. **Party/buffs/chat**: wire builders exist (`wdg::` helpers), gameplay
    wiring pending.
 
 ## Session log
@@ -145,6 +173,110 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 ---
 
 ## Session end 1791053595
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791055108
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791055108
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791055198
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791055265
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791055376
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791055525
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791055637
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791055726
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791055845
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791055940
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791056136
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791056246
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791056388
 
 - Server exited cleanly (seed 42).
 - See HANDOFF.md top section for current state.
