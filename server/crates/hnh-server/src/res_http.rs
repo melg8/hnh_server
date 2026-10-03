@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::info;
+use tracing::{info, warn};
 
 pub const RES_PORT: u16 = 1872;
 
@@ -45,6 +45,7 @@ pub async fn serve(listener: TcpListener, res_dir: PathBuf) {
 }
 
 async fn handle(mut stream: TcpStream, dir: Arc<PathBuf>) -> anyhow::Result<()> {
+    let peer = stream.peer_addr().ok();
     let mut buf = Vec::with_capacity(2048);
     let mut chunk = [0u8; 1024];
     // Read until end of headers.
@@ -67,6 +68,7 @@ async fn handle(mut stream: TcpStream, dir: Arc<PathBuf>) -> anyhow::Result<()> 
         .to_owned();
     // Map "gfx/foo" -> dir/gfx/foo.res; reject path traversal.
     if path.contains("..") || path.contains('\\') {
+        warn!(?peer, path = %path, "res 403 (path traversal)");
         stream
             .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
             .await?;
@@ -75,11 +77,13 @@ async fn handle(mut stream: TcpStream, dir: Arc<PathBuf>) -> anyhow::Result<()> 
     let file = dir.join(format!("{path}.res"));
     match tokio::fs::read(&file).await {
         Ok(data) => {
+            info!(?peer, path = %path, bytes = data.len(), "res 200");
             let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n", data.len());
             stream.write_all(head.as_bytes()).await?;
             stream.write_all(&data).await?;
         }
         Err(_) => {
+            warn!(?peer, path = %path, "res 404 (missing resource)");
             stream
                 .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
                 .await?;

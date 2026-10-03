@@ -25,6 +25,10 @@ REM 3. Ensure the save directory exists.
 if not exist "save" mkdir "save"
 
 REM 4. Run. Extra args pass through, e.g.: start-server.bat --bots 300 --perf
+REM    HNH_REV stamps every server log line with the exact source revision,
+REM    which makes bug reports reproducible.
+set "HNH_REV="
+for /f %%i in ('git rev-parse --short HEAD 2^>nul') do set "HNH_REV=%%i"
 echo Starting hnh-server (seed 42)...
 echo   auth: tcp/1871  game: udp/1870  resources: tcp/1872
 server\target\release\hnh-server.exe --seed 42 %*

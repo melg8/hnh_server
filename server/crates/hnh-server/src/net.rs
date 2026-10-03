@@ -132,6 +132,39 @@ pub async fn spawn(game_tx: mpsc::UnboundedSender<NetCmd>, shards: usize) -> any
     Ok(())
 }
 
+/// Collapse bursts of identical recv errors into one line per window.
+/// Windows repeats WSAECONNRESET on every keepalive after a client
+/// disappears (once per outbound datagram), which previously spammed the
+/// log at the keepalive cadence; the deduper keeps one line per 30 s plus
+/// a suppressed count.
+#[derive(Default)]
+struct ErrorDeduper {
+    last: Option<(String, Instant)>,
+    suppressed: u64,
+}
+
+const DEDUPE_WINDOW: Duration = Duration::from_secs(30);
+
+impl ErrorDeduper {
+    /// True when this error should be logged now.
+    fn should_log(&mut self, msg: &str) -> bool {
+        match &self.last {
+            Some((m, t)) if *m == msg && t.elapsed() < DEDUPE_WINDOW => {
+                self.suppressed += 1;
+                false
+            }
+            _ => {
+                self.last = Some((msg.to_owned(), Instant::now()));
+                true
+            }
+        }
+    }
+
+    fn take_suppressed(&mut self) -> u64 {
+        std::mem::take(&mut self.suppressed)
+    }
+}
+
 async fn recv_loop(
     socket: Arc<UdpSocket>,
     game_tx: mpsc::UnboundedSender<NetCmd>,
@@ -139,16 +172,24 @@ async fn recv_loop(
 ) -> anyhow::Result<()> {
     let mut sessions: HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>> = HashMap::new();
     let mut buf = vec![0u8; 65536];
+    let mut deduper = ErrorDeduper::default();
     loop {
         // Windows surfaces stale ICMP port-unreachable replies (e.g. from a
         // send to a client that just disconnected) as WSAECONNRESET on the
         // next recv_from. These are per-datagram noise, not shard failures;
-        // log and continue so one reset cannot kill every session on the
-        // shard.
+        // log (rate-limited) and continue so one reset cannot kill every
+        // session on the shard.
         let (n, peer) = match socket.recv_from(&mut buf).await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(error = %e, shard, "udp recv error");
+                let msg = e.to_string();
+                if deduper.should_log(&msg) {
+                    let suppressed = deduper.take_suppressed();
+                    if suppressed > 0 {
+                        tracing::warn!(shard, suppressed, "udp recv errors suppressed");
+                    }
+                    tracing::warn!(error = %msg, shard, "udp recv error");
+                }
                 continue;
             }
         };
@@ -411,3 +452,21 @@ fn dispatch_rmsg(d: &mut Driver, rtype: u8, payload: &[u8]) {
 // Keep Game import used (doc reference for command shapes).
 #[allow(unused)]
 fn _assert_shapes(_: &Game) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deduper_collapses_identical_bursts() {
+        let mut d = ErrorDeduper::default();
+        assert!(d.should_log("os error 10054"));
+        assert!(!d.should_log("os error 10054"));
+        assert!(!d.should_log("os error 10054"));
+        assert_eq!(d.take_suppressed(), 2);
+        // A different error message is always logged.
+        assert!(d.should_log("os error 10049"));
+        // take_suppressed resets the counter.
+        assert_eq!(d.take_suppressed(), 0);
+    }
+}

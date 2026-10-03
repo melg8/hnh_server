@@ -1,7 +1,7 @@
 @echo off
-REM Build and run the Java client against the local dev server.
-REM Requirements: JDK 21+ (Temurin/Liberica), Apache Ant 1.10.x
-REM The client auto-connects to 127.0.0.1 (auth 1871, game 1870, res 1872).
+REM One command: make sure the local server is up, then start the client.
+REM Everything is logged: server -> logs\server.log, client -> logs\client.log.
+REM When something breaks, run collect-logs.bat and send the single zip file.
 setlocal
 cd /d "%~dp0.."
 
@@ -17,7 +17,34 @@ if not exist "build\haven.jar" (
     if errorlevel 1 exit /b 1
 )
 
+REM 1. Start the server if it is not answering yet.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wait-server.ps1" -TimeoutSec 3 >nul 2>nul
+if errorlevel 1 (
+    echo hnh-server is not running - starting it in a new window...
+    start "hnh-server" cmd /k ""%~dp0start-server.bat""
+)
+
+REM 2. Wait until auth (1871) and resources (1872) actually answer. Starting
+REM    the client earlier made it cache "connection refused" for resources
+REM    like gfx/hud/fbtn and crash after login with a delayed load error.
+echo Waiting for the local server (auth tcp/1871, resources tcp/1872)...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wait-server.ps1" -TimeoutSec 300
+if errorlevel 1 (
+    echo [ERROR] server did not come up within 300 s.
+    echo Check the server window output or logs\server.log, then try again.
+    exit /b 1
+)
+
+REM 3. Client: console output goes to logs\client.log (overwritten each run).
+if not exist "logs" mkdir "logs"
+set "CLOG=%CD%\logs\client.log"
+set "HNH_REV="
+for /f %%i in ('git rev-parse --short HEAD 2^>nul') do set "HNH_REV=%%i"
+>"%CLOG%" echo === client start %DATE% %TIME% rev %HNH_REV% ===
+
 echo Starting Haven client (localhost server)...
+echo   client log: %CLOG%
+echo   bug report: windows\collect-logs.bat
 REM JOGL 1.1 loads its natives (jogl.dll, jogl_awt.dll, jogl_cg.dll,
 REM gluegen-rt.dll) via System.loadLibrary, which searches only
 REM java.library.path. Point it at the committed DLLs in build\ and
@@ -25,5 +52,10 @@ REM also prepend them to PATH so Windows can resolve dependent DLLs.
 set "JOGL_NATIVE=%CD%\build"
 set "PATH=%JOGL_NATIVE%;%PATH%"
 REM Optional: add -Dhaven.autoplay=Player to skip the character list.
-java --enable-native-access=ALL-UNNAMED -Djava.library.path="%JOGL_NATIVE%" -cp "build\haven.jar;lib\*;build\res" haven.MainFrame %*
-endlocal
+java --enable-native-access=ALL-UNNAMED -Djava.library.path="%JOGL_NATIVE%" -cp "build\haven.jar;lib\*;build\res" haven.MainFrame %* >>"%CLOG%" 2>&1
+set "RC=%errorlevel%"
+if not "%RC%"=="0" (
+    echo [WARN] client exited with code %RC%. Last log lines:
+    powershell -NoProfile -Command "Get-Content -Tail 30 -LiteralPath $env:CLOG"
+)
+endlocal & exit /b %RC%

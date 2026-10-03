@@ -16,13 +16,23 @@ pack automatically on first start.
 
 | Script | What it does |
 | --- | --- |
+| `run-client.bat` | **The one command.** Builds `build/haven.jar` if missing, auto-starts the server in its own window when it is not answering, waits until auth (1871) and resources (1872) respond, then starts the Java client. Client console output is captured to `logs/client.log`. |
+| `start-server.bat` | Server only: builds, generates `gameres/` if needed, creates `save/`, runs the seed-42 server. Extra arguments pass through. Log file: `logs/server.log` (append). |
+| `collect-logs.bat` | Bundles `logs/server.log` + `logs/client.log` + environment info (git rev, java/cargo versions) into `logs/bugreport-<timestamp>.zip`. Run this and send the single zip when something breaks. |
 | `build-server.bat` | `cargo build --release` for the Rust server. |
 | `make-gameres.ps1` | Extracts `lib/haven-res.jar` into `gameres/` and overlays `res/compiled/` (auto-invoked by the start script when `gameres/` is missing). |
-| `start-server.bat` | Builds if needed, generates `gameres/` if needed, creates `save/`, then runs the seed-42 server. Extra arguments pass through. |
-| `run-client.bat` | Builds `build/haven.jar` with Ant if missing and starts the Java client against `127.0.0.1` (auth tcp/1871, game udp/1870, resources tcp/1872). |
+| `wait-server.ps1` | Helper used by `run-client.bat`: blocks until ports 1871+1872 answer (prevents the client racing a still-booting server). |
 | `loadtest.bat` | Same as start but with 600 in-process bots in a saturated world and the 5-second `--perf` report. |
 
 ## Typical flow
+
+One command - the server starts automatically if it is not running:
+
+```bat
+windows\run-client.bat
+```
+
+Prefer to control the server yourself? Keep using two terminals:
 
 ```bat
 :: 1. terminal 1 - the server
@@ -31,6 +41,16 @@ windows\start-server.bat
 :: 2. terminal 2 - the client
 windows\run-client.bat
 ```
+
+## When something breaks
+
+```bat
+windows\collect-logs.bat
+```
+
+then send the single `logs/bugreport-<timestamp>.zip` it prints. The zip
+contains the server log (append-only across restarts, every line stamped
+with the source revision), the last client run log, and version info.
 
 Log in with any username/password: the dev auth auto-provisions
 characters. Fresh characters carry a starter kit (branches, stones,

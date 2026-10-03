@@ -691,3 +691,51 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
   Commit 6b09503.
 - Next: user git pull; start-server.bat now self-corrects. Remaining
   roadmap unchanged (dirty-cell visibility, farming, party/chat).
+
+---
+
+## Session end 1791069287
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791069316
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+## 2026-10-04 - One command for the user + single-file bug reports
+
+- User report: client crashed after login with "Delayed error in resource
+  gfx/hud/fbtn ... Connection refused (1872)". Root cause: the client was
+  started before the server answered; the resource loader cached the
+  refusal and the deferred error surfaced in Window.<clinit> post-login.
+  The server side was healthy (self-check OK at boot, session accepted).
+- Fix: run-client.bat is now the single entry point - it auto-starts
+  start-server.bat in a new window when ports 1871/1872 do not answer,
+  waits for both ports (windows/wait-server.ps1), and only then launches
+  Java. The startup race is gone; server-first ordering is enforced by
+  the script instead of the user's memory.
+- Logging for one-file bug reports: server logs to logs/server.log
+  (append across restarts, exe-anchored dir, stdout kept; HNH_REV stamps
+  the source rev, set by start-server.bat). Client console output is
+  captured to logs/client.log. windows/collect-logs.bat bundles both
+  plus environment info into logs/bugreport-<ts>.zip - the user sends
+  one file instead of copy-pasting console output.
+- Diagnostics: res_http logs every request (peer/path/bytes; 404/403 at
+  warn); TLS-handshake-EOF probes demoted to debug (self-check/watchdog
+  no longer warn); UDP recv error spam (WSAECONNRESET after a client
+  death, once per keepalive) collapsed by a 30 s deduper with a
+  suppressed count; new health watchdog probes both TCP listeners every
+  10 s and errors loudly if a listener dies mid-session.
+- Verified: 38 tests, clippy -D warnings, fmt clean; live run from repo
+  root (curl fbtn 200 logged with peer/bytes, 404 path logged, watchdog
+  silent over a 12 s window), test_client.py WORLD ENTRY: OK, graceful
+  SIGTERM flush.
+- Next: user git pull, then windows\run-client.bat is the only command
+  needed. Roadmap unchanged (dirty-cell visibility, farming/livestock,
+  party/chat, station crafting).

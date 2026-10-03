@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer as _};
 
 use auth::AuthServer;
 use game::Game;
@@ -117,10 +117,14 @@ fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("BUG: crypto provider install");
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
-    info!(seed = args.seed, "hnh-server starting");
+    // Keep the writer guard alive for the whole process: dropping it stops
+    // the background file writer and can lose the log tail on exit.
+    let _log_guard = init_logging();
+    info!(
+        seed = args.seed,
+        rev = ?std::env::var("HNH_REV").ok(),
+        "hnh-server starting"
+    );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -206,6 +210,9 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     // the console instead of as confusing client-side connection refusals.
     startup_probe().await?;
 
+    // Then keep watching those listeners for the whole process lifetime.
+    tokio::spawn(health_watchdog());
+
     // Perf reporter.
     if args.perf {
         let cmd_tx = cmd_tx.clone();
@@ -233,6 +240,59 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     auth_handle.abort();
     handoff::refresh(args.seed);
     Ok(())
+}
+
+/// stdout + append-only file logging (`logs/server.log`). The file is the
+/// support channel: it survives the console closing and is what
+/// `windows/collect-logs.bat` bundles into a single bug report. Returns the
+/// writer guard that must outlive every log call, or None when only stdout
+/// could be set up (log dir not creatable).
+fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let Some(dir) = log_dir() else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+        return None;
+    };
+    let appender = tracing_appender::rolling::never(&dir, "server.log");
+    let (writer, guard) = tracing_appender::non_blocking(appender);
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stdout)
+                .with_filter(filter.clone()),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(writer)
+                .with_filter(filter),
+        )
+        .init();
+    info!(dir = %dir.display(), "file logging enabled (append)");
+    Some(guard)
+}
+
+/// Pick the log directory, exe-anchored first so the location is stable
+/// across launch cwd: `server/target/<profile>/../../..` is the repo root
+/// for both `cargo run` and the packaged exe.
+fn log_dir() -> Option<std::path::PathBuf> {
+    let mut cands = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            cands.push(dir.join("../../../logs"));
+            cands.push(dir.join("../../logs"));
+        }
+    }
+    cands.push(std::path::PathBuf::from("../logs"));
+    cands.push(std::path::PathBuf::from("logs"));
+    for c in &cands {
+        // Use the first candidate we can create (or that already exists);
+        // creation is idempotent for an existing dir.
+        if std::fs::create_dir_all(c).is_ok() && c.is_dir() {
+            return Some(c.clone());
+        }
+    }
+    None
 }
 
 /// Verify every TCP listener is actually reachable on the loopback before
@@ -264,6 +324,36 @@ async fn startup_probe() -> anyhow::Result<()> {
         info!(service = name, port, "startup self-check OK");
     }
     Ok(())
+}
+
+/// Periodically verify every TCP listener still accepts on the loopback.
+/// A service that dies mid-session then produces a timestamped server-side
+/// error instead of only a client-side "connection refused" long after the
+/// actual failure. Probe connections are plain TCP (no TLS handshake),
+/// which auth logs at debug level - expected noise.
+async fn health_watchdog() {
+    let targets = [
+        ("auth", auth::AUTH_PORT),
+        ("resource http", res_http::RES_PORT),
+    ];
+    let mut tick = tokio::time::interval(Duration::from_secs(10));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await; // interval fires once immediately; skip that one
+    loop {
+        tick.tick().await;
+        for (name, port) in targets {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err()
+            {
+                tracing::error!(
+                    service = name,
+                    port,
+                    "health probe failed: listener is down"
+                );
+            }
+        }
+    }
 }
 
 /// Resolve when SIGTERM arrives.

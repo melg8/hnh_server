@@ -319,7 +319,15 @@ impl AuthServer {
             let accounts = Arc::clone(&self.accounts);
             tokio::spawn(async move {
                 if let Err(e) = handle_auth_conn(stream, config, accounts).await {
-                    warn!(?peer, error = %e, "auth connection failed");
+                    // Plain TCP probes (startup self-check, the health
+                    // watchdog) connect and close without a TLS handshake;
+                    // that surfaces as handshake EOF and is expected noise.
+                    let msg = e.to_string().to_lowercase();
+                    if msg.contains("eof") || msg.contains("closed") {
+                        tracing::debug!(?peer, error = %e, "auth probe closed");
+                    } else {
+                        warn!(?peer, error = %e, "auth connection failed");
+                    }
                 }
             });
         }

@@ -17,3 +17,6 @@ save/world.json
 # so keep them out of version control to avoid endless diffs.
 build/haven.jar
 docs/javadoc/
+
+# Runtime logs and bug reports (windows/collect-logs.bat)
+/logs/
