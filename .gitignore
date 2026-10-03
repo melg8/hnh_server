@@ -1,9 +1,19 @@
 /classes/
 /build/
 .idea
-*.imlserver/target/
-server/certs/authsrv.key.pem
+*.iml
 server/target/
+server/certs/authsrv.key.pem
+server/certs/authsrv.crt.pem
 gameres/
 save/world.json
-server/certs/authsrv.crt.pem
+
+# Generated at the repo root when the server is launched from there.
+/certs/
+/data.bin
+
+# Regenerable artifacts that churn with the local JDK: the client jar
+# (ant jar) and javadoc output (ant javadoc). Both are rebuilt locally,
+# so keep them out of version control to avoid endless diffs.
+build/haven.jar
+docs/javadoc/
