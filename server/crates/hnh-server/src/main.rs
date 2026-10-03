@@ -120,30 +120,45 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     let game_handle = tokio::spawn(game.run());
 
     // Network tasks: shard_count UDP sockets share the port via SO_REUSEPORT.
+    // Awaiting here makes shard bind failures fatal at startup instead of a
+    // background log line the user only notices when clients misbehave.
     let shard_count = args.shards.max(1);
     info!(shards = shard_count, "network sharding");
-    tokio::spawn(async move {
-        if let Err(e) = net::spawn(net_tx, shard_count).await {
-            tracing::error!(error = %e, "net failed");
-        }
-    });
+    net::spawn(net_tx, shard_count).await?;
     let (cert, key) = (args.cert.clone(), args.key.clone());
     let auth_handle = {
         let auth_inner = Arc::clone(&auth);
         tokio::spawn(async move { auth_inner.run(&cert, &key).await })
     };
 
+    // Resource HTTP server: fail fast on a missing resource pack or a taken
+    // port. A half-alive server is worse than no server - the client's only
+    // symptom would be a cascade of resource load errors after login.
     let res_dir = std::path::PathBuf::from(&args.res_dir);
-    let res_handle = tokio::spawn(async move {
-        if let Err(e) = res_http::spawn(res_dir).await {
-            tracing::error!(error = %e, "resource server failed");
-        }
-    });
+    if !res_dir.is_dir() {
+        return Err(anyhow::anyhow!(
+            "resource dir '{}' not found; generate it with \
+             powershell -File windows/make-gameres.ps1 (extracts lib/haven-res.jar)",
+            args.res_dir
+        ));
+    }
+    let res_listener = res_http::bind().await.map_err(|e| {
+        anyhow::anyhow!(
+            "cannot bind resource http port {}: {e:#}",
+            res_http::RES_PORT
+        )
+    })?;
+    tokio::spawn(res_http::serve(res_listener, res_dir));
 
     // Optional in-process bots (load testing).
     if args.bots > 0 {
         tokio::spawn(bots::run(args.bots));
     }
+
+    // Startup self-check: reach every TCP listener once before announcing
+    // readiness. Catches silent service death (bad cert, blocked port) at
+    // the console instead of as confusing client-side connection refusals.
+    startup_probe().await?;
 
     // Perf reporter.
     if args.perf {
@@ -170,8 +185,38 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     let _ = cmd_tx.send(game::Cmd::Shutdown {});
     let _ = game_handle.await;
     auth_handle.abort();
-    res_handle.abort();
     handoff::refresh(args.seed);
+    Ok(())
+}
+
+/// Verify every TCP listener is actually reachable on the loopback before
+/// the server announces readiness. A service that died at bind time (port
+/// taken, bad certificate) otherwise only surfaces as client-side
+/// "connection refused" errors long after startup.
+async fn startup_probe() -> anyhow::Result<()> {
+    let targets = [
+        ("auth", auth::AUTH_PORT),
+        ("resource http", res_http::RES_PORT),
+    ];
+    for (name, port) in targets {
+        let mut reachable = false;
+        for _ in 0..20 {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                reachable = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        if !reachable {
+            return Err(anyhow::anyhow!(
+                "startup self-check failed: {name} tcp/{port} not reachable"
+            ));
+        }
+        info!(service = name, port, "startup self-check OK");
+    }
     Ok(())
 }
 

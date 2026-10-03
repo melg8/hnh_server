@@ -140,7 +140,18 @@ async fn recv_loop(
     let mut sessions: HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>> = HashMap::new();
     let mut buf = vec![0u8; 65536];
     loop {
-        let (n, peer) = socket.recv_from(&mut buf).await?;
+        // Windows surfaces stale ICMP port-unreachable replies (e.g. from a
+        // send to a client that just disconnected) as WSAECONNRESET on the
+        // next recv_from. These are per-datagram noise, not shard failures;
+        // log and continue so one reset cannot kill every session on the
+        // shard.
+        let (n, peer) = match socket.recv_from(&mut buf).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, shard, "udp recv error");
+                continue;
+            }
+        };
         let data = &buf[..n];
         match data.first().copied() {
             Some(MSG_SESS) => {

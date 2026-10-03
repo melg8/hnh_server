@@ -304,7 +304,17 @@ impl AuthServer {
         let listener = TcpListener::bind(("0.0.0.0", AUTH_PORT)).await?;
         info!(port = AUTH_PORT, "auth server (TLS) listening");
         loop {
-            let (stream, peer) = listener.accept().await?;
+            // Transient accept errors (e.g. WSAECONNRESET on Windows when a
+            // peer resets before accept) must not kill the auth server;
+            // pause briefly and keep accepting.
+            let (stream, peer) = match listener.accept().await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(error = %e, "auth accept error");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
             let config = Arc::clone(&config);
             let accounts = Arc::clone(&self.accounts);
             tokio::spawn(async move {
