@@ -181,7 +181,7 @@
 		</copy>
 	</target>
 
-	<target name="docs">
+	<target name="docs" depends="haven-client">
 		<mkdir dir="docs/javadoc" />
 		<javadoc
 			Encoding="UTF-8"
@@ -190,6 +190,21 @@
 			stylesheetfile="docs/stylesheet.css"
 			charset="UTF-8"
 			access="public">
+			<!-- Resolve references to the client classes (haven.*, union.*)
+			     and bundled libraries; without these javadoc reports
+			     "cannot find symbol" errors for every referenced type.
+			     Client classes are resolved from the compiled classes/
+			     directory (not the source tree) so that javadoc keeps
+			     documenting only the union/jsbot packages. -->
+			<classpath>
+				<pathelement path="classes" />
+				<pathelement path="lib/jogl.jar" />
+				<pathelement path="lib/gluegen-rt.jar" />
+				<pathelement path="lib/jnlp.jar" />
+				<pathelement path="lib/jorbis.jar" />
+				<pathelement path="lib/jogg.jar" />
+				<pathelement path="lib/js-14.jar" />
+			</classpath>
 			<!-- Fileset instead of the wildcard sourcefiles attribute:
 			     portable across Windows and Unix, and works with modern javadoc. -->
 			<fileset dir="src/union/jsbot">
