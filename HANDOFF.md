@@ -281,3 +281,103 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 - Server exited cleanly (seed 42).
 - See HANDOFF.md top section for current state.
 
+
+---
+
+## Session end 1791056611
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791057259
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791057444
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791057583
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791057610
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791057624
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791057639
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791057653
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791057761
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+### Session 2 (2026-10-04, UTC+8)
+- One-command start fixed: self-signed dev cert generated at boot
+  (rcgen); the removed private key no longer wedges the auth server.
+- Zero-warning build: clippy --all-targets -D warnings clean; cargo fmt
+  applied repo-wide.
+- SO_REUSEPORT UDP shard sockets (--shards N): kernel 4-tuple hash pins
+  peers to shards; private recv loop + session table per shard.
+- Character persistence: ../save/world.json (atomic writes, seed-bound,
+  autosave 30 s + graceful SIGINT/SIGTERM shutdown flush); restore on
+  login verified end-to-end.
+- Fightview (frv) openings combat implemented per combat-system.md:
+  widget lifecycle, relations, upd/updod/offdef/cur/atkc wire messages,
+  client click/give handled; animals fight back; kill cycle proven by
+  unit test (stationary_player_kills_predator). Combat tempo constants
+  (OFF_REGEN 625/tick, ATKC 8) tuned so swings land between client
+  movement bursts; real players drive them normally.
+- Bots rewritten as tokio tasks (thread-per-bot hit the 748-thread
+  ulimit at 547 sessions); 1000/1000 sessions in a saturated world,
+  live predator fights, steady tick ~40 ms / 100 ms budget, RSS ~300 MB.
+- Bot home areas fixed to the spawn grid (was 100x off: tile vs grid
+  coords) so MAPREQ population and wildlife overlap the bots.
+- Verified: G1 one-command entry OK; G3 persistence roundtrip; G4 four
+  shards + entry OK; G5 1000 bots/100 ms budget/no tick overrun; 26
+  unit tests green; clippy -D warnings clean; ant jar builds with
+  Temurin 21 (client GUI still needs JOGL Linux natives, see gaps).
+- Commits: pushed to master through 9b4381f+ (see git log).

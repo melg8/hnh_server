@@ -21,8 +21,9 @@ use crate::resources::wdg;
 
 /// Offence/defence bars are percentages scaled by 100 (10000 = 100%).
 pub const BAR_FULL: i32 = 10000;
-/// Offence regenerated per tick while engaged (10 Hz ticks).
-pub const OFF_REGEN: i32 = 250;
+/// Offence regenerated per tick while engaged (10 Hz ticks). Half a bar
+/// per second keeps swings landing between client movement bursts.
+pub const OFF_REGEN: i32 = 625;
 /// Defence regenerated per tick toward full.
 pub const DEF_REGEN: i32 = 200;
 /// Offence spent per swing (half the bar).
@@ -32,7 +33,7 @@ pub const SWING_DEF_DMG: i32 = 3000;
 /// Defence below this counts as an opening: damage reaches HP.
 pub const OPENING_THRESHOLD: i32 = 2000;
 /// Attack cooldown ticks sent in `atkc` (legacy reads them as 1/60 s).
-pub const ATKC_TICKS: i32 = 20;
+pub const ATKC_TICKS: i32 = 8;
 
 /// Build one uimsg payload for the frv widget.
 ///
