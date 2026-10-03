@@ -34,6 +34,7 @@ struct Args {
     seed: u64,
     bots: usize,
     saturated: bool,
+    shards: usize,
     res_dir: String,
     cert: String,
     key: String,
@@ -41,7 +42,7 @@ struct Args {
 }
 
 fn usage() -> &'static str {
-    "hnh-server [--seed N] [--bots N] [--saturated] [--perf] [--res-dir DIR] [--cert P] [--key P]\n"
+    "hnh-server [--seed N] [--bots N] [--saturated] [--shards N] [--perf] [--res-dir DIR] [--cert P] [--key P]\n"
 }
 
 fn parse_args() -> Args {
@@ -49,6 +50,7 @@ fn parse_args() -> Args {
         seed: 42,
         bots: 0,
         saturated: false,
+        shards: 1,
         res_dir: "../gameres".to_owned(),
         cert: "certs/authsrv.crt.pem".to_owned(),
         key: "certs/authsrv.key.pem".to_owned(),
@@ -60,6 +62,7 @@ fn parse_args() -> Args {
             "--seed" => a.seed = it.next().and_then(|v| v.parse().ok()).unwrap_or(42),
             "--bots" => a.bots = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--saturated" => a.saturated = true,
+            "--shards" => a.shards = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
             "--perf" => a.perf = true,
             "--res-dir" => a.res_dir = it.next().unwrap_or_else(|| a.res_dir.clone()),
             "--cert" => a.cert = it.next().unwrap_or_else(|| a.cert.clone()),
@@ -105,9 +108,11 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     let game = Game::new(args.seed, cmd_rx, net_rx, args.saturated);
     let game_handle = tokio::spawn(game.run());
 
-    // Network tasks.
+    // Network tasks: shard_count UDP sockets share the port via SO_REUSEPORT.
+    let shard_count = args.shards.max(1);
+    info!(shards = shard_count, "network sharding");
     tokio::spawn(async move {
-        if let Err(e) = net::Net::spawn(net_tx).await {
+        if let Err(e) = net::spawn(net_tx, shard_count).await {
             tracing::error!(error = %e, "net failed");
         }
     });

@@ -1,10 +1,14 @@
 //! UDP networking: session accept (MSG_SESS), per-session reliability,
 //! and the command path into the game task.
 //!
-//! Architecture: one shared UDP socket (SO_REUSEPORT sharding is a future
-//! optimization; see HANDOFF.md). A single recv task parses datagrams and
-//! routes them into per-session driver tasks. Each driver owns its
-//! reliability state, a datagram inbox, and the game->session queue.
+//! Architecture: N UDP sockets share port 1870 via SO_REUSEPORT. The kernel
+//! hashes the UDP 4-tuple, so every peer maps to exactly one shard for its
+//! lifetime; each shard owns a private recv loop and its session table.
+//! Outbound traffic is sent through the owning shard's socket, which keeps
+//! per-shard work balanced by kernel hash rather than a central router.
+//! Session drivers are independent tasks; the game task remains the single
+//! simulation owner (grid-owner partitioning is the next scale-out step,
+//! see HANDOFF.md).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -76,124 +80,138 @@ impl From<NetCmd> for Cmd {
     }
 }
 
-pub struct Net {
-    // Read by the shard dispatch path once multi-socket sharding lands
-    // this session; the single-socket spawn path owns them directly.
-    #[allow(dead_code)]
-    game_tx: mpsc::UnboundedSender<NetCmd>,
-    #[allow(dead_code)]
-    sessions: HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>,
-    #[allow(dead_code)]
-    socket: Arc<UdpSocket>,
+/// Bind one UDP socket with SO_REUSEPORT so shard sockets can share the port.
+fn bind_shard_socket(port: u16) -> anyhow::Result<UdpSocket> {
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    sock.set_reuse_port(true)?;
+    sock.set_nonblocking(true)?;
+    sock.bind(&std::net::SocketAddr::from(([0, 0, 0, 0], port)).into())?;
+    let std_sock: std::net::UdpSocket = sock.into();
+    Ok(UdpSocket::from_std(std_sock)?)
 }
 
-impl Net {
-    pub async fn spawn(game_tx: mpsc::UnboundedSender<NetCmd>) -> anyhow::Result<()> {
-        let socket = Arc::new(UdpSocket::bind(("0.0.0.0", GAME_PORT)).await?);
-        info!(port = GAME_PORT, "game server (UDP) listening");
+/// Spawn `shards` UDP shard loops on the game port. Sessions distribute
+/// across shards by kernel 4-tuple hash; `shards = 1` degenerates to the
+/// original single-socket layout. The accept log carries the shard id,
+/// giving operations a direct per-shard occupancy histogram.
+pub async fn spawn(game_tx: mpsc::UnboundedSender<NetCmd>, shards: usize) -> anyhow::Result<()> {
+    let shard_count = shards.max(1);
+    for id in 0..shard_count {
+        let socket = Arc::new(bind_shard_socket(GAME_PORT)?);
+        info!(
+            shard = id,
+            port = GAME_PORT,
+            "game server (UDP) shard listening"
+        );
+        let game_tx = game_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = Net::recv_loop(socket, game_tx).await {
-                tracing::error!(error = %e, "udp recv loop died");
+            if let Err(e) = recv_loop(socket, game_tx, id).await {
+                tracing::error!(shard = id, error = %e, "udp shard loop died");
             }
         });
-        Ok(())
     }
+    Ok(())
+}
 
-    async fn recv_loop(
-        socket: Arc<UdpSocket>,
-        game_tx: mpsc::UnboundedSender<NetCmd>,
-    ) -> anyhow::Result<()> {
-        let mut sessions: HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>> = HashMap::new();
-        let mut buf = vec![0u8; 65536];
-        loop {
-            let (n, peer) = socket.recv_from(&mut buf).await?;
-            let data = &buf[..n];
-            match data.first().copied() {
-                Some(MSG_SESS) => {
-                    if let Some(dgram_tx) =
-                        Self::on_sess(data, peer, &socket, &game_tx, &mut sessions).await
-                    {
-                        // Route any immediate duplicates into the driver.
-                        let _ = dgram_tx;
-                    }
+async fn recv_loop(
+    socket: Arc<UdpSocket>,
+    game_tx: mpsc::UnboundedSender<NetCmd>,
+    shard: usize,
+) -> anyhow::Result<()> {
+    let mut sessions: HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>> = HashMap::new();
+    let mut buf = vec![0u8; 65536];
+    loop {
+        let (n, peer) = socket.recv_from(&mut buf).await?;
+        let data = &buf[..n];
+        match data.first().copied() {
+            Some(MSG_SESS) => {
+                if on_sess(data, peer, &socket, &game_tx, &mut sessions, shard)
+                    .await
+                    .is_some()
+                {
+                    // Route any immediate duplicates into the driver.
                 }
-                Some(_) => {
-                    if let Some(tx) = sessions.get(&peer) {
-                        let _ = tx.send(data.to_vec());
-                    }
-                    // Datagrams from unknown peers (other than SESS) are ignored.
-                }
-                None => {}
             }
+            Some(_) => {
+                if let Some(tx) = sessions.get(&peer) {
+                    let _ = tx.send(data.to_vec());
+                }
+                // Datagrams from unknown peers (other than SESS) are ignored.
+            }
+            None => {}
         }
     }
+}
 
-    /// Handle MSG_SESS: validate, reply, spawn a driver task.
-    async fn on_sess(
-        data: &[u8],
-        peer: SocketAddr,
-        socket: &Arc<UdpSocket>,
-        game_tx: &mpsc::UnboundedSender<NetCmd>,
-        sessions: &mut HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>,
-    ) -> Option<mpsc::UnboundedSender<Vec<u8>>> {
-        // Parse: uint16 flavour, string "Haven", uint16 PVER, string user, cookie.
-        let mut m = hnh_proto::MessageBuf::from_slice(&data[1..]);
-        let (Ok(_flavour), Ok(_game), Ok(pver), Ok(username)) =
-            (m.u16(), m.str(), m.u16(), m.str())
-        else {
-            return None;
-        };
-        let cookie = m.rest().to_vec();
-        let auth = crate::auth();
-        let err = if pver != PVER {
-            SESSERR_PVER
-        } else if sessions.contains_key(&peer) {
-            0 // idempotent re-accept of a live session
-        } else {
-            match auth.consume_cookie(&cookie) {
-                Some(_user) => 0,
-                None => SESSERR_AUTH,
-            }
-        };
-        let _ = socket.send_to(&[MSG_SESS, err], peer).await;
-        if err != 0 || sessions.contains_key(&peer) {
-            return None;
+/// Handle MSG_SESS: validate, reply, spawn a driver task.
+async fn on_sess(
+    data: &[u8],
+    peer: SocketAddr,
+    socket: &Arc<UdpSocket>,
+    game_tx: &mpsc::UnboundedSender<NetCmd>,
+    sessions: &mut HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>,
+    shard: usize,
+) -> Option<mpsc::UnboundedSender<Vec<u8>>> {
+    // Parse: uint16 flavour, string "Haven", uint16 PVER, string user, cookie.
+    let mut m = hnh_proto::MessageBuf::from_slice(&data[1..]);
+    let (Ok(_flavour), Ok(_game), Ok(pver), Ok(username)) = (m.u16(), m.str(), m.u16(), m.str())
+    else {
+        return None;
+    };
+    let cookie = m.rest().to_vec();
+    let auth = crate::auth();
+    let err = if pver != PVER {
+        SESSERR_PVER
+    } else if sessions.contains_key(&peer) {
+        0 // idempotent re-accept of a live session
+    } else {
+        match auth.consume_cookie(&cookie) {
+            Some(_user) => 0,
+            None => SESSERR_AUTH,
         }
-        // Ask the game task to allocate a sid and register the session.
-        let (gameq_tx, gameq_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if game_tx
-            .send(NetCmd::Accept {
-                game_tx: gameq_tx.clone(),
-                raw_tx: raw_tx.clone(),
-                reply: reply_tx,
-            })
-            .is_err()
-        {
-            return None;
-        }
-        let Ok(sid) = reply_rx.await else { return None };
-        let (dgram_tx, dgram_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<NetCmd>();
-        // Forward cmd_tx into the shared game channel.
-        let shared = game_tx.clone();
-        tokio::spawn(async move {
-            let mut cmd_rx = cmd_rx;
-            while let Some(c) = cmd_rx.recv().await {
-                if shared.send(c).is_err() {
-                    break;
-                }
-            }
-        });
-        sessions.insert(peer, dgram_tx.clone());
-        info!(%peer, sid, %username, "session accepted");
-        let sock = Arc::clone(socket);
-        tokio::spawn(async move {
-            run_session(peer, sid, dgram_rx, gameq_rx, raw_rx, cmd_tx, sock).await;
-        });
-        Some(dgram_tx)
+    };
+    let _ = socket.send_to(&[MSG_SESS, err], peer).await;
+    if err != 0 || sessions.contains_key(&peer) {
+        return None;
     }
+    // Ask the game task to allocate a sid and register the session.
+    let (gameq_tx, gameq_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if game_tx
+        .send(NetCmd::Accept {
+            game_tx: gameq_tx.clone(),
+            raw_tx: raw_tx.clone(),
+            reply: reply_tx,
+        })
+        .is_err()
+    {
+        return None;
+    }
+    let Ok(sid) = reply_rx.await else { return None };
+    let (dgram_tx, dgram_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<NetCmd>();
+    // Forward cmd_tx into the shared game channel.
+    let shared = game_tx.clone();
+    tokio::spawn(async move {
+        let mut cmd_rx = cmd_rx;
+        while let Some(c) = cmd_rx.recv().await {
+            if shared.send(c).is_err() {
+                break;
+            }
+        }
+    });
+    sessions.insert(peer, dgram_tx.clone());
+    info!(%peer, sid, shard, %username, "session accepted");
+    let sock = Arc::clone(socket);
+    tokio::spawn(async move {
+        run_session(peer, sid, dgram_rx, gameq_rx, raw_rx, cmd_tx, sock).await;
+    });
+    Some(dgram_tx)
 }
 
 struct Driver {
