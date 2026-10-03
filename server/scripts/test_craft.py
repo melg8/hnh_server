@@ -260,8 +260,11 @@ class CraftClient:
             self.pump(0.3)
             if self.charlist_id and not played:
                 played = True
+                # Play the per-run character so the starter kit is fresh
+                # regardless of what older sessions did to saved chars.
                 self.send_rel_subs([bytes([1]) + le16(self.charlist_id) + b"play\x00"
-                                    + bytes([2]) + b"Player\x00" + bytes([0])])
+                                    + bytes([2]) + self.username.encode() + b"\x00"
+                                    + bytes([0])])
             # The client opens the inventory window with `inv` on slen
             # (SlenHud button); the starter-kit item widgets stream then.
             if played and self.slen_id and not inv_requested:
@@ -278,7 +281,10 @@ class CraftClient:
 
 
 def main():
-    username = sys.argv[1] if len(sys.argv) > 1 else "crafttest"
+    # Default to a one-shot character: the starter kit is granted only on
+    # fresh creation, so a reused name would eventually run out of materials
+    # and fail the flow through no fault of the server. Pass a name to reuse.
+    username = sys.argv[1] if len(sys.argv) > 1 else "crafttest-%d" % int(time.time())
     c = CraftClient(username)
     if not c.connect():
         return 1

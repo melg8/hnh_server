@@ -130,7 +130,11 @@ def main():
             if charlist_id and not played:
                 played = True
                 play_sent_at = time.time()
-                send_rel_subs([bytes([1]) + le16(charlist_id) + b"play\x00" + bytes([2]) + b"Player\x00" + bytes([0])])
+                # Play a per-run character (dev auth auto-provisions any
+                # name): reusing a fixed name would eventually inherit a
+                # stale inventory from previous runs.
+                send_rel_subs([bytes([1]) + le16(charlist_id) + b"play\x00" + bytes([2])
+                              + username.encode() + b"\x00" + bytes([0])])
             continue
         stats["bytes"] += len(data)
         if data[0] == 2:  # ACK for our play

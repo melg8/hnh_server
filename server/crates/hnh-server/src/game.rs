@@ -71,12 +71,11 @@ impl Game {
         rx: tokio::sync::mpsc::UnboundedReceiver<Cmd>,
         net_rx: tokio::sync::mpsc::UnboundedReceiver<crate::net::NetCmd>,
         saturated: bool,
+        save_path: std::path::PathBuf,
     ) -> Self {
-        // Default save location keeps the one-command dev flow; tests pass
-        // through this path and simply never touch the store.
-        let save_path = std::env::var("HNH_SAVE_FILE")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("../save/world.json"));
+        // The save path is resolved by main (HNH_SAVE_FILE env or
+        // cwd-independent repo-root candidates); tests pass a throwaway path
+        // and simply never touch the store.
         let save = crate::persist::SaveStore::load(&save_path, seed);
         // fep.conf ships with the repo (repo-root etc/); HNH_FEP_CONF moves
         // it for tests. A missing file degrades to "no food resolves" rather
@@ -2667,7 +2666,13 @@ mod tests {
     async fn predator_engages_player_in_reach() {
         let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut g = Game::new(42, cmd_rx, net_rx, true);
+        let mut g = Game::new(
+            42,
+            cmd_rx,
+            net_rx,
+            true,
+            std::env::temp_dir().join("hnh-game-test-save.json"),
+        );
         let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
         let (raw_tx, _raw_rx) = tokio::sync::mpsc::unbounded_channel();
         g.session_connected(1, tx, raw_tx);
@@ -2721,7 +2726,13 @@ mod tests {
     async fn stationary_player_kills_predator() {
         let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut g = Game::new(42, cmd_rx, net_rx, true);
+        let mut g = Game::new(
+            42,
+            cmd_rx,
+            net_rx,
+            true,
+            std::env::temp_dir().join("hnh-game-test-save.json"),
+        );
         let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
         let (raw_tx, _raw_rx) = tokio::sync::mpsc::unbounded_channel();
         g.session_connected(1, tx, raw_tx);
@@ -2831,7 +2842,13 @@ mod tests {
     async fn bootstrap_announces_resids_first() {
         let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut g = Game::new(42, cmd_rx, net_rx, false);
+        let mut g = Game::new(
+            42,
+            cmd_rx,
+            net_rx,
+            false,
+            std::env::temp_dir().join("hnh-game-test-save.json"),
+        );
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (raw_tx, _raw_rx) = tokio::sync::mpsc::unbounded_channel();
         g.session_connected(1, tx, raw_tx);
