@@ -4,12 +4,12 @@ REM Ports: 1871/tcp TLS auth, 1870/udp game, 1872/tcp resources HTTP.
 setlocal enabledelayedexpansion
 cd /d "%~dp0.."
 
-REM 1. Build if the binary is missing.
-if not exist "server\target\release\hnh-server.exe" (
-    echo Binary missing, building...
-    call "%~dp0build-server.bat"
-    if errorlevel 1 exit /b 1
-)
+REM 1. Build. Always run cargo: it is incremental, so on an up-to-date
+REM    source tree this is a sub-second no-op, but after a git pull it
+REM    guarantees the binary matches the code instead of silently
+REM    running a stale one.
+call "%~dp0build-server.bat"
+if errorlevel 1 exit /b 1
 
 REM 2. Generate gameres\ from lib\haven-res.jar + res\compiled overlay.
 if not exist "gameres" (
