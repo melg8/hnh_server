@@ -9,6 +9,7 @@ mod bots;
 mod game;
 mod handoff;
 mod net;
+mod persist;
 mod res_http;
 mod resources;
 mod state;
@@ -147,11 +148,33 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         });
     }
 
-    tokio::signal::ctrl_c().await?;
+    // Stop on SIGINT or SIGTERM; both follow the graceful path so the game
+    // loop can flush character persistence.
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = wait_sigterm() => {}
+    }
     info!("shutting down");
-    game_handle.abort();
+    // Graceful path: let the game loop flush character persistence, then
+    // stop the remaining listeners.
+    let _ = cmd_tx.send(game::Cmd::Shutdown {});
+    let _ = game_handle.await;
     auth_handle.abort();
     res_handle.abort();
     handoff::refresh(args.seed);
     Ok(())
+}
+
+/// Resolve when SIGTERM arrives.
+async fn wait_sigterm() {
+    use tokio::signal::unix::{signal, SignalKind};
+    match signal(SignalKind::terminate()) {
+        Ok(mut term) => {
+            term.recv().await;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "sigterm handler unavailable");
+            std::future::pending::<()>().await;
+        }
+    }
 }

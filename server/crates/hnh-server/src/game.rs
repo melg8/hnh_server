@@ -41,6 +41,8 @@ pub enum Cmd {
         sid: SessionId,
     },
     ReportPerf {},
+    /// Graceful stop: flush persistence and exit the loop.
+    Shutdown {},
 }
 
 pub struct Game {
@@ -52,6 +54,8 @@ pub struct Game {
     next_sid: SessionId,
     /// Grids already populated with objects/animals.
     populated: HashSet<(i32, i32)>,
+    /// Character persistence store (loaded snapshots + live updates).
+    pub save: crate::persist::SaveStore,
 }
 
 impl Game {
@@ -61,6 +65,12 @@ impl Game {
         net_rx: tokio::sync::mpsc::UnboundedReceiver<crate::net::NetCmd>,
         saturated: bool,
     ) -> Self {
+        // Default save location keeps the one-command dev flow; tests pass
+        // through this path and simply never touch the store.
+        let save_path = std::env::var("HNH_SAVE_FILE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("../save/world.json"));
+        let save = crate::persist::SaveStore::load(&save_path, seed);
         Game {
             world: World::new(seed),
             sessions: HashMap::new(),
@@ -69,6 +79,7 @@ impl Game {
             saturated,
             next_sid: 1,
             populated: HashSet::new(),
+            save,
         }
     }
 
@@ -82,11 +93,17 @@ impl Game {
         let mut tick_timer = tokio::time::interval(Duration::from_millis(TICK_MS));
         tick_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_glob = 0u64;
+        let mut autosave = tokio::time::interval(Duration::from_secs(30));
+        autosave.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         info!(hz = TICK_HZ, "game loop started");
         loop {
             tokio::select! {
+                _ = autosave.tick() => {
+                    self.autosave();
+                }
                 cmd = self.rx.recv() => {
                     match cmd {
+                        Some(Cmd::Shutdown {}) => break,
                         Some(c) => self.handle_cmd(c),
                         None => break,
                     }
@@ -122,6 +139,41 @@ impl Game {
             }
         }
         info!("game loop stopping");
+        self.save_all_and_flush();
+    }
+
+    /// Snapshot every online player, then write the save file. Called on the
+    /// 30 s autosave cadence and at shutdown.
+    fn autosave(&mut self) {
+        self.save_all_and_flush();
+    }
+
+    fn save_all_and_flush(&mut self) {
+        let seed = self.world.seed;
+        for p in &self.world.players {
+            if let Some(slot) = self.world.gobs.get(p.gob) {
+                let pos = self.world.gobs.pos[slot];
+                let inv_named: Vec<(String, u32, u8)> = p
+                    .inv
+                    .iter()
+                    .map(|(idx, count, ql)| {
+                        (
+                            self.world
+                                .res
+                                .name(*idx)
+                                .unwrap_or("gfx/invobjs/unknown")
+                                .to_owned(),
+                            *count,
+                            *ql,
+                        )
+                    })
+                    .collect();
+                self.save.snapshot(p, pos, inv_named);
+            }
+        }
+        if let Err(e) = self.save.flush(seed) {
+            tracing::warn!(error = %e, "autosave failed");
+        }
     }
 
     fn handle_cmd(&mut self, cmd: Cmd) {
@@ -136,6 +188,9 @@ impl Game {
             Cmd::ObjAck { sid, acks } => self.on_objack(sid, acks),
             Cmd::SessionClosed { sid } => self.on_session_closed(sid),
             Cmd::ReportPerf {} => self.report_perf(),
+            // Handled in the run loop; reaching handle_cmd means no loop is
+            // running (e.g. during tests), so this is a no-op.
+            Cmd::Shutdown {} => {}
         }
     }
 
@@ -298,8 +353,56 @@ impl Game {
                 out.send(wdg::dst_wdg(id));
             }
         }
-        // Spawn the player gob near origin on a walkable tile.
-        let spawn_pos = self.find_spawn_position();
+        // Restore the persisted character when one exists for this name;
+        // the saved world position overrides the fresh-spawn search.
+        let saved_state = self.save.players.get(&name).map(|saved| {
+            let mut restored_inv = Vec::with_capacity(saved.inv.len());
+            for (resname, count, ql) in &saved.inv {
+                let idx = self.world.res.intern(leak_static(resname));
+                restored_inv.push((idx, *count, *ql));
+            }
+            (
+                saved.pos,
+                saved.hp,
+                saved.energy,
+                saved.stamina,
+                saved.lp,
+                saved.attrs.clone(),
+                restored_inv,
+            )
+        });
+        let (spawn_pos, hp, energy, stamina, lp, attrs, inv) = match &saved_state {
+            Some((pos, hp, energy, stamina, lp, attrs, inv)) => {
+                info!(sid, %name, "restoring persisted character");
+                (
+                    *pos,
+                    *hp,
+                    *energy,
+                    *stamina,
+                    *lp,
+                    attrs.clone(),
+                    inv.clone(),
+                )
+            }
+            None => {
+                let mut fresh = HashMap::new();
+                fresh.insert("str".to_owned(), 10);
+                fresh.insert("agi".to_owned(), 10);
+                fresh.insert("int".to_owned(), 10);
+                fresh.insert("hp".to_owned(), 100);
+                fresh.insert("energy".to_owned(), 100);
+                fresh.insert("lp".to_owned(), 0);
+                (
+                    self.find_spawn_position(),
+                    100,
+                    100,
+                    100,
+                    100,
+                    fresh,
+                    Vec::new(),
+                )
+            }
+        };
         let res_body = self.world.res.intern("gfx/borka/body");
         let _res_head = self.world.res.intern("gfx/borka/head");
         let _res_hair = self.world.res.intern("gfx/borka/hair");
@@ -307,30 +410,23 @@ impl Game {
             Kind::Player { player: usize::MAX },
             spawn_pos,
             res_body,
-            100,
+            hp.max(1),
             BASE_SPEED,
         );
         let player_idx = self.world.players.len();
         if let Some(slot) = self.world.gobs.get(gob) {
             self.world.gobs.kind[slot] = Kind::Player { player: player_idx };
         }
-        let mut attrs = HashMap::new();
-        attrs.insert("str".to_owned(), 10);
-        attrs.insert("agi".to_owned(), 10);
-        attrs.insert("int".to_owned(), 10);
-        attrs.insert("hp".to_owned(), 100);
-        attrs.insert("energy".to_owned(), 100);
-        attrs.insert("lp".to_owned(), 0);
         self.world.players.push(Player {
             name: name.clone(),
             gob,
             session: sid,
-            hp: 100,
-            energy: 100,
-            stamina: 100,
-            lp: 100,
+            hp,
+            energy,
+            stamina,
+            lp,
             attrs,
-            inv: Vec::new(),
+            inv,
             fight_target: None,
             atk_cd: 0,
         });
@@ -1431,9 +1527,39 @@ impl Game {
         }
     }
 
+    /// Snapshot a player into the save store (position from the gob slot,
+    /// inventory translated from process-local indices to resource names).
+    fn persist_player(&mut self, gob: crate::state::GobId) {
+        let Some(slot) = self.world.gobs.get(gob) else {
+            return;
+        };
+        let pos = self.world.gobs.pos[slot];
+        let Some(pidx) = self.world.players.iter().position(|p| p.gob == gob) else {
+            return;
+        };
+        let p = &self.world.players[pidx];
+        let inv_named: Vec<(String, u32, u8)> = p
+            .inv
+            .iter()
+            .map(|(idx, count, ql)| {
+                (
+                    self.world
+                        .res
+                        .name(*idx)
+                        .unwrap_or("gfx/invobjs/unknown")
+                        .to_owned(),
+                    *count,
+                    *ql,
+                )
+            })
+            .collect();
+        self.save.snapshot(p, pos, inv_named);
+    }
+
     fn on_session_closed(&mut self, sid: SessionId) {
         if let Some(out) = self.sessions.remove(&sid) {
             if let Some(gob) = out.player_gob {
+                self.persist_player(gob);
                 self.broadcast_retract(gob);
                 self.world.gobs.kill(gob);
             }
