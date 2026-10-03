@@ -176,6 +176,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
 }
 
 /// Resolve when SIGTERM arrives.
+#[cfg(unix)]
 async fn wait_sigterm() {
     use tokio::signal::unix::{signal, SignalKind};
     match signal(SignalKind::terminate()) {
@@ -187,4 +188,11 @@ async fn wait_sigterm() {
             std::future::pending::<()>().await;
         }
     }
+}
+
+/// Windows has no SIGTERM; the ctrl_c branch of the select covers the
+/// console Ctrl+C path, so this future simply never resolves.
+#[cfg(not(unix))]
+async fn wait_sigterm() {
+    std::future::pending::<()>().await
 }

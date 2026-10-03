@@ -80,14 +80,29 @@ impl From<NetCmd> for Cmd {
     }
 }
 
-/// Bind one UDP socket with SO_REUSEPORT so shard sockets can share the port.
+/// Bind one UDP socket so shard sockets can share the game port.
 fn bind_shard_socket(port: u16) -> anyhow::Result<UdpSocket> {
     let sock = socket2::Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::DGRAM,
         Some(socket2::Protocol::UDP),
     )?;
-    sock.set_reuse_port(true)?;
+    #[cfg(unix)]
+    {
+        // SO_REUSEPORT lets every shard bind the same port; the kernel
+        // spreads peers across sockets by 4-tuple hash.
+        sock.set_reuse_port(true)?;
+    }
+    #[cfg(windows)]
+    {
+        // Windows has no SO_REUSEPORT. SO_REUSEADDR still permits the
+        // rebind so extra shards never fail at startup, but the kernel
+        // may deliver every peer to a single socket. Correctness holds
+        // regardless (all shards feed the same game channel and each
+        // session is owned end-to-end by whichever socket accepted it);
+        // only per-shard distribution is less even.
+        sock.set_reuse_address(true)?;
+    }
     sock.set_nonblocking(true)?;
     sock.bind(&std::net::SocketAddr::from(([0, 0, 0, 0], port)).into())?;
     let std_sock: std::net::UdpSocket = sock.into();

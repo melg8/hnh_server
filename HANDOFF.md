@@ -507,3 +507,23 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 - Server exited cleanly (seed 42).
 - See HANDOFF.md top section for current state.
 
+
+## Session end 1791063200 (Windows compile fix)
+
+- Windows release build failed: `tokio::signal::unix` import (main.rs)
+  and `set_reuse_port` (net.rs) are Unix-only and were not cfg-gated.
+- Fixed: `wait_sigterm` split into `#[cfg(unix)]` (SIGTERM via tokio)
+  and `#[cfg(not(unix))]` (pending future; ctrl_c covers Windows).
+  `bind_shard_socket` now sets `SO_REUSEPORT` under `#[cfg(unix)]` and
+  `SO_REUSEADDR` under `#[cfg(windows)]` (no REUSEPORT on Windows:
+  rebind still succeeds, kernel may funnel peers to one socket;
+  correctness holds since all shards feed the same game channel).
+- Verified: Linux `cargo test` 32 green, clippy -D warnings clean,
+  fmt clean; the exact Windows branches compile via a mirror crate
+  checked against x86_64-pc-windows-gnu (aws-lc-sys blocks a full
+  cross-check in this sandbox, but all deps already built on the
+  user's Windows host per their error log — only our two spots were
+  broken).
+- Next: `git pull` + `windows\start-server.bat` should now build and
+  run on Windows. Remaining roadmap unchanged (dirty-cell visibility,
+  farming/livestock, party/chat, station crafting).
