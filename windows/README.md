@@ -69,3 +69,11 @@ Both print `OK` lines and exit 0 on success.
   generated at boot when absent and are gitignored.
 - `gameres/` is a generated artifact (gitignored); regenerate any time
   with `powershell -File windows\make-gameres.ps1`.
+- JOGL 1.1 natives (`jogl.dll`, `jogl_awt.dll`, `jogl_cg.dll`,
+  `gluegen-rt.dll`, x86-64, committed in `build/`) are loaded through
+  `java.library.path`, which `run-client.bat` sets for you. If you
+  start the client manually, pass
+  `-Djava.library.path=build` (and prepend `build` to `PATH`) or the
+  JVM fails with `UnsatisfiedLinkError: no jogl`. On JDK 21+ add
+  `--enable-native-access=ALL-UNNAMED` to silence the restricted-method
+  warning from JOGL's `System::loadLibrary` call.
