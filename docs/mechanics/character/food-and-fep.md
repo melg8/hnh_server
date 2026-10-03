@@ -144,6 +144,31 @@ The client displays whatever the server pushes - there is no eating-specific buf
 7. **Buffs**: catalog food/symbel buffs as resources; push `set`/`rm`/`clear` with correct `cticks` scaling (0.06 s per tick) and `major` flags.
 8. **Rounding discipline**: the client's visible predictions (`FEP * qmult` tooltips) must match server grants; keep the same float-to-int rounding as `Item.calcFEP` (`Item.java:284-285`).
 
+## Server implementation notes (this repo, session 3)
+
+- fep.conf is parsed at boot (Config.loadFEP format, lowercase keys,
+  HHP special-cased); the table is resolved through cwd- and
+  exe-relative candidates so the binary boots from anywhere.
+- Eat transaction: item `iact` -> `sm` widget with a server-defined
+  "Eat" petal -> `cl 0` -> consume one unit, add energy (server policy
+  fill = clamp(10 + 1.5*FEP-total, ..., 60) into the 0..100 pool),
+  apply HHP as direct hard-pool points (doc note 10 assumption),
+  grant FEPs scaled by sqrt(q/10) into integer-tenth accumulators.
+- Requirement check: cap = highest of the eight base attributes
+  (tenths x10); on reaching it a weighted draw over accumulator shares
+  picks the attribute (+1) and the accumulators reset (overflow lost),
+  matching the Fandom loop.
+- The `food` uimsg is pushed to the chr widget as (cap-tenths, then
+  (id, tenths, RGBA color) triples) - exactly CharWnd.FoodMeter.update's
+  contract; ids are the lowercase attribute ids also used by CATTR.
+- Per-species meat labels double as fep.conf keys: Cow/Aurochs "Beef",
+  Deer "Raw Deer Meat", Boar "Boar Meat", Fox "Fox Meat", Hare "Rabbit
+  Meat". Wolf meat has no legacy entry, so it carries no label and
+  resolves no FEPs (nothing invented).
+- Server-side satiation/variety and activity-driven decay are NOT
+  modeled yet (open questions 2/5 below still stand); the energy pool
+  drains via the existing vitals tick.
+
 ## Open questions
 
 1. **Legacy hunger-fill values per food.** `fep.conf` carries FEPs and HHP but not the energy fill; the legacy per-food satiation/energy table (current-world RoB "Food Satiations"/food pages have replacement data) must be reconstructed from legacy-era pages or the reference server.

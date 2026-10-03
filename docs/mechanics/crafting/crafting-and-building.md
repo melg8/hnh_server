@@ -180,6 +180,27 @@ All of them share the same server shape: an inventory (per-gob item store), a fu
 - **Client trust boundary.** Everything here is replayable by bots (this repo ships a scripting layer that presses Craft automatically). Treat every incoming `act`, `make`, `place`, `click`, and `itemact` as hostile until validated.
 - **Quality bookkeeping.** Snapshot ingredient qualities at consumption time (crafting) or delivery time (building); do not re-derive from stacks. The items domain document ([items and quality](../items/items-and-quality.md)) defines the quality attribute itself, the inner-quality tooltip override (`Item.q2`), and the quality multiplier conventions.
 
+## Server implementation notes (this repo, session 3)
+
+- The making choreography is live: `act("craft", <id>)` on the menugrid
+  opens a `make` widget whose `pop` carries (session-local wire id,
+  count) pairs with the documented -1 terminator; `make 0/1` loops the
+  validate-consume-produce step (batch caps at 64) and stops after the
+  last success, per the batch section.
+- Consumption takes lowest-quality stacks first and snapshots quality at
+  consumption time; output quality is the weighted average
+  `sum(q*w)/sum(w)` with w = units per input, softcapped by the
+  crafter's relevant attribute as the skill stand-in (no skill tree
+  yet), halving when the attribute is below the average.
+- Recipe data this session: `stone axe` = branch x1 + stone x1 ->
+  axe x1 (pagina ad id "axe"); `roasted meat` is a dynamic recipe keyed
+  by the raw item's server label through the ROAST_MAP table
+  (paginae/craft/roastmeat, ad = ["craft", "roast"]).
+- Labels travel with the item: the server tooltip string is the
+  fep.conf lookup key end-to-end (inventory widget, ground drop, back).
+- Starter kit policy: fresh characters spawn with branch x2, stone x2,
+  beef x1 so the loop is playable; the legacy server granted nothing.
+
 ## Open questions
 
 - **Build-menu action verb.** The exact `ad` strings for build paginae (presumably a `build`/`place` verb plus object id) are not recoverable from this client; determine by capturing a live legacy session's menugrid `act` messages, or by diffing a fuller legacy resource pack's `paginae/act/*`/`paginae/build*` resources.

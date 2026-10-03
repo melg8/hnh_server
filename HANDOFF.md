@@ -453,3 +453,49 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 - Server exited cleanly (seed 42).
 - See HANDOFF.md top section for current state.
 
+
+---
+
+### Session 3 (2026-10-04, UTC+8)
+
+- Crafting implemented per crafting-and-building.md: `craft.rs` module
+  (fep.conf parser mirroring Config.loadFEP, recipe registry, roast map,
+  FEP accumulator state), makewindow choreography
+  (act("craft",id) -> make widget + pop with (wire,count) pairs
+  terminated by -1, make 0/1 batch loop, lowest-ql-first consumption,
+  loftar weighted-average quality with attribute softcap). Recipes:
+  stone axe (branch+stone -> axe), dynamic roast (any raw meat ->
+  roasted variant via fep-name mapping). Paginae pushed at login
+  (paginae/craft/axe, paginae/craft/roastmeat).
+- Food/FEP per food-and-fep.md: item iact -> FlowerMenu("sm") with
+  "Eat" -> cl 0 -> energy fill, HHP hard-pool heal, FEP grant scaled by
+  sqrt(q/10) in tenths, weighted attribute draw at cap = max base attr,
+  cattr push. `food` uimsg on chr (id, tenths, RGBA color triples)
+  verified against CharWnd.FoodMeter.update. Per-species meat labels
+  match fep.conf keys (Cow->Beef, Deer->Raw Deer Meat, ...); Wolf has
+  no entry and grants nothing (no invented numbers).
+- Parallel tick phases: tick_animals split into a pure intent pass
+  (rayon par_chunks over SoA, --workers N) and serial apply;
+  update_visibility split into parallel scan_visible + serial apply.
+  Deterministic (tick,slot) splitmix hash replaces the shared RNG in
+  the decision pass. Grid-region buckets are the seam for future
+  cross-process grid owners.
+- Load (this box: 2 cores / 4 GB cgroup): --bots 1000 -> tick 35-40 ms
+  vs 100 ms budget, RSS ~194 MB, all sessions stable. --saturated
+  --bots 600 -> 10890 fights, tick 13-15 ms. NOTE: 1000 bots +
+  --saturated SIGKILLs on this 4 GB sandbox (memory cgroup), not on
+  larger hosts (session 2 ran 1000 saturated bots at ~300 MB).
+- scripts/test_craft.py: wire-level end-to-end craft+eat verification
+  (auth -> entry -> starter kit -> act(craft,axe) -> make+pop -> make 0
+  -> item iact -> Eat -> food uimsg). Both OK against a fresh boot.
+- Starter kit for fresh characters (2 branch, 2 stone, 1 beef) so the
+  craft/eat loop works immediately; dev policy, documented.
+- windows/: build-server.bat, start-server.bat (build + gameres
+  generation via make-gameres.ps1 + save dir + run), run-client.bat
+  (ant jar + java), loadtest.bat (600 bots saturated + --perf), README.
+- fep.conf resolved through path candidates (cwd + exe-relative) so the
+  binary boots from any working directory; gitignore now covers the
+  generated gameres/ and boot-generated dev certificate.
+- Session end 1791063100: verify with `cargo test` (32 green),
+  `python3 server/scripts/test_client.py testuser` (WORLD ENTRY: OK),
+  `python3 server/scripts/test_craft.py crafttest` (CRAFT/EAT: OK).
