@@ -2010,7 +2010,7 @@ mod tests {
         // Populate the player's grid with saturated wildlife.
         g.on_mapreq(1, (0, 0));
         // Find a wolf or boar and teleport the player into melee reach.
-        let predator = (0..g.world.animal_gobs.len())
+        let _predator = (0..g.world.animal_gobs.len())
             .map(|i| g.world.animal_gobs[i])
             .find(|&id| {
                 let slot = g.world.gobs.get(id).unwrap();
