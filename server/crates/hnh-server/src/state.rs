@@ -269,6 +269,14 @@ pub struct Player {
     pub atk_cd: i32,
 }
 
+/// Live combat bars for one animal engaged with a player.
+pub struct AnimalFight {
+    /// Animal's offence bar toward the player (scaled percentage).
+    pub off: i32,
+    /// Animal's defence bar against player attacks (scaled percentage).
+    pub def: i32,
+}
+
 /// A connected, in-world client's outbound message sinks.
 ///
 /// Two channels mirror the legacy split: widget/control traffic rides the
@@ -293,6 +301,8 @@ pub struct SessionOut {
     pub mapreqs: HashSet<(i32, i32)>,
     /// Session-local resource id table.
     pub res: ResTable,
+    /// Fightview window state (widget id + per-opponent relations).
+    pub fight: crate::fight::FightState,
 }
 
 impl SessionOut {
@@ -346,6 +356,8 @@ pub struct World {
     pub by_session: HashMap<SessionId, usize>,
     /// Animals by gob id for quick lookup.
     pub animal_gobs: Vec<GobId>,
+    /// Live animal engagements: offence/defence bars toward their target.
+    pub animal_fights: HashMap<GobId, AnimalFight>,
     /// Tick counter for deterministic scheduling.
     pub tick: u64,
     /// Deterministic RNG for AI (seeded from world seed).
@@ -374,6 +386,7 @@ impl World {
             players: Vec::new(),
             by_session: HashMap::new(),
             animal_gobs: Vec::new(),
+            animal_fights: HashMap::new(),
             tick: 0,
             rng: hnh_world::JavaRandom::new(seed as i64),
             start_instant: Instant::now(),

@@ -92,16 +92,21 @@ async fn bot_session(idx: usize) -> bool {
         return false;
     };
 
-    // Each bot owns a home quadrant so the cohort spreads across distinct
+    // Each bot owns a home tile area so the cohort spreads across distinct
     // grids (realistic MAPREQ streaming, per-grid population, and fights
-    // with the local wildlife population). Request the 3x3 grids around it
-    // like a real client (raw MAPREQ datagrams).
-    let home_x = 550 + (rng.next_bounded(21) - 10) * 3;
-    let home_y = 550 + (rng.next_bounded(21) - 10) * 3;
+    // with the local wildlife population). home_* are tile coordinates; the
+    // grids covering them are requested like a real client (raw MAPREQ
+    // datagrams) and clicks target subtiles within the same area.
+    let home_tx = 60 + (rng.next_bounded(21) - 10) * 3;
+    let home_ty = 60 + (rng.next_bounded(21) - 10) * 3;
+    let home_gx = home_tx.div_euclid(100);
+    let home_gy = home_ty.div_euclid(100);
     for gx in -1..=1 {
         for gy in -1..=1 {
             let mut req = hnh_proto::MessageBuf::new();
-            req.uint8(MSG_MAPREQ).int32(home_x + gx).int32(home_y + gy);
+            req.uint8(MSG_MAPREQ)
+                .int32(home_gx + gx)
+                .int32(home_gy + gy);
             let _ = sock.send_to(&req.finish(), server).await;
         }
     }
@@ -132,8 +137,8 @@ async fn bot_session(idx: usize) -> bool {
         let now = Instant::now();
         if now >= next_action {
             next_action = now + Duration::from_millis(400 + rng.next_bounded(800) as u64);
-            let jx = home_x * 11 + rng.next_bounded(600) - 300;
-            let jy = home_y * 11 + rng.next_bounded(600) - 300;
+            let jx = home_tx * 11 + rng.next_bounded(600) - 300;
+            let jy = home_ty * 11 + rng.next_bounded(600) - 300;
             let mut click = hnh_proto::MessageBuf::new();
             click
                 .uint8(RMSG_WDGMSG)

@@ -196,6 +196,8 @@ impl Game {
 
     fn report_perf(&self) {
         info!(
+            players = self.world.players.len(),
+            animals = self.world.animal_gobs.len(),
             tick_us = self.world.perf.last_tick_us,
             max_tick_us = self.world.perf.max_tick_us,
             sessions = self.world.perf.active_sessions,
@@ -229,6 +231,7 @@ impl Game {
             widgets: HashMap::new(),
             mapreqs: HashSet::new(),
             res: crate::resources::ResTable::new(),
+            fight: crate::fight::FightState::default(),
         };
         // Character selection UI (session-lifecycle.md 3.1).
         let w_bg = out.new_wid("img");
@@ -324,6 +327,9 @@ impl Game {
                     .filter_map(|a| a.as_str().map(str::to_owned))
                     .collect();
                 self.on_menu_action(sid, &action);
+            }
+            (Some("frv"), "click") | (Some("frv"), "give") => {
+                self.on_frv_msg(sid, name, &args);
             }
             (Some("sm"), "cl") => {
                 let choice = args.first().and_then(|a| a.as_int()).unwrap_or(-1);
@@ -1006,7 +1012,134 @@ impl Game {
             p.fight_target = Some(target);
             p.atk_cd = 0;
         }
+        self.fight_open(sid, target);
+        self.world
+            .animal_fights
+            .entry(target)
+            .or_insert_with(|| crate::state::AnimalFight {
+                off: 0,
+                def: crate::fight::BAR_FULL,
+            });
         info!(sid, target, ?species, "fight started");
+    }
+
+    // ------------------------------------------------------------------
+    // Fightview (frv) widget protocol
+    // ------------------------------------------------------------------
+
+    /// Send one frv uimsg to the session (no-op without a fight widget).
+    fn fight_uimsg(&mut self, sid: SessionId, name: &str, args: &[i32]) {
+        if let Some(out) = self.sessions.get_mut(&sid) {
+            if let Some(w) = out.fight.widget {
+                let b = crate::fight::uimsg(w, name, args);
+                out.send(b);
+            }
+        }
+    }
+
+    /// Open (or reuse) the fight window and add a relation for `target`.
+    fn fight_open(&mut self, sid: SessionId, target: GobId) {
+        let existing = self.sessions.get(&sid).and_then(|out| out.fight.widget);
+        let widget = match existing {
+            Some(w) => Some(w),
+            None => self.sessions.get_mut(&sid).map(|out| {
+                let w = out.new_wid("frv");
+                out.fight.widget = Some(w);
+                let b = wdg::new_wdg(w, "frv", 0, 0, 0, &[]);
+                out.send(b);
+                w
+            }),
+        };
+        let Some(widget) = widget else { return };
+        let exists = self
+            .sessions
+            .get(&sid)
+            .map(|out| out.fight.rel(target).is_some())
+            .unwrap_or(false);
+        if !exists {
+            let rel = crate::fight::FightRel::new(target);
+            let args = vec![
+                rel.gob,
+                rel.balance,
+                rel.intensity,
+                rel.give,
+                rel.ip_self,
+                rel.ip_other,
+                rel.offence,
+                rel.defence,
+            ];
+            if let Some(out) = self.sessions.get_mut(&sid) {
+                out.fight.rels.push(rel);
+                out.send(crate::fight::uimsg(widget, "new", &args));
+            }
+        }
+        // Focus the fresh relation.
+        self.fight_uimsg(sid, "cur", &[target]);
+    }
+
+    /// Remove one relation; destroy the widget when the list empties.
+    fn fight_del(&mut self, sid: SessionId, gob: GobId) {
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        let Some(widget) = out.fight.widget else {
+            return;
+        };
+        out.fight.rels.retain(|r| r.gob != gob);
+        out.send(crate::fight::uimsg(widget, "del", &[gob]));
+        if out.fight.rels.is_empty() {
+            let w = out.fight.widget.take();
+            if let Some(w) = w {
+                out.send(wdg::dst_wdg(w));
+            }
+        }
+    }
+
+    /// Handle client->server frv wdgmsg (click / give).
+    fn on_frv_msg(&mut self, sid: SessionId, name: &str, args: &[hnh_proto::ListArg]) {
+        let ints: Vec<i32> = args.iter().filter_map(|a| a.as_int()).collect();
+        match name {
+            "click" => {
+                // Select that opponent; answer with `cur`.
+                if let Some(&gob) = ints.first() {
+                    if let Some(p) = self.world.player_mut(sid) {
+                        p.fight_target = Some(gob);
+                    }
+                    if let Some(out) = self.sessions.get_mut(&sid) {
+                        if let Some(w) = out.fight.widget {
+                            let b = crate::fight::uimsg(w, "cur", &[gob]);
+                            out.send(b);
+                        }
+                    }
+                }
+            }
+            "give" => {
+                // Toggle one bit of the two-bit handshake; echo via upd.
+                let (Some(gob), Some(button)) = (ints.first().copied(), ints.get(1).copied())
+                else {
+                    return;
+                };
+                let bit: i32 = if button != 0 { 2 } else { 1 };
+                if let Some(out) = self.sessions.get_mut(&sid) {
+                    if let Some(rel) = out.fight.rel_mut(gob) {
+                        rel.give ^= bit;
+                        let upd = vec![
+                            rel.gob,
+                            rel.balance,
+                            rel.intensity,
+                            rel.give,
+                            rel.ip_self,
+                            rel.ip_other,
+                        ];
+                        if let Some(w) = out.fight.widget {
+                            let b = crate::fight::uimsg(w, "upd", &upd);
+                            out.send(b);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn spawn_drop_near(&mut self, at: (i32, i32), resname: &'static str, _count: u8, _ql: u8) {
@@ -1214,20 +1347,26 @@ impl Game {
             if self.world.gobs.mv[slot].is_some() {
                 continue;
             }
-            // Find nearest player within perception.
+            // Find nearest player within perception. Saturated worlds widen
+            // the aggro radius so predators converge on the bot cohorts.
+            let perception = if self.saturated { 1500 } else { 400 };
+            let aggro = if self.saturated { 900 } else { 300 };
             let (ax, ay) = self.world.gobs.pos[slot];
             let mut nearest: Option<(GobId, i32)> = None;
             for p in &self.world.players {
                 if let Some(pslot) = self.world.gobs.get(p.gob) {
                     let (px, py) = self.world.gobs.pos[pslot];
                     let d = ((px - ax).abs() + (py - ay).abs()).min(i32::MAX - 1);
-                    if d < 400 && nearest.map(|(_, nd)| d < nd).unwrap_or(true) {
+                    if d < perception && nearest.map(|(_, nd)| d < nd).unwrap_or(true) {
                         nearest = Some((p.gob, d));
                     }
                 }
             }
             let action = match nearest {
-                Some((pgob, dist)) if species.aggressive() && dist < 300 => {
+                Some((pgob, dist)) if species.aggressive() && dist < aggro => {
+                    if self.saturated && tick.is_multiple_of(200) {
+                        info!(?species, id, ?pgob, dist, "predator chasing");
+                    }
                     AnimalAction::Chase(pgob)
                 }
                 Some((_pgob, dist)) if !species.aggressive() && dist < 200 => AnimalAction::Flee,
@@ -1259,15 +1398,33 @@ impl Game {
                 let Some(pslot) = self.world.gobs.get(pgob) else {
                     return;
                 };
+                let species = match self.world.gobs.kind[slot] {
+                    Kind::Animal { species } => species,
+                    _ => return,
+                };
                 let (px, py) = self.world.gobs.pos[pslot];
-                // Stop within ~1.5 tiles to attack.
+                // Stop within combat reach (~3 tiles) to attack.
                 let dx = px - sx;
                 let dy = py - sy;
                 let d = (dx.abs() + dy.abs()).max(1);
-                if d <= 22 {
+                if d <= 33 {
+                    // Engage: open the fight from both directions.
+                    let sid = self
+                        .world
+                        .players
+                        .iter()
+                        .find(|p| p.gob == pgob)
+                        .map(|p| p.session);
+                    if let Some(sid) = sid {
+                        self.start_fight(sid, id, species);
+                    }
                     return;
                 }
-                (px, py)
+                // Step a bounded distance toward the target so the animal
+                // re-evaluates frequently instead of walking past a moving
+                // player for a hundred ticks.
+                let cap = 200.min(d);
+                (sx + dx * cap / d, sy + dy * cap / d)
             }
             AnimalAction::Flee => {
                 // Run away from the nearest player (approximately: random
@@ -1328,32 +1485,43 @@ impl Game {
     }
 
     fn tick_combat(&mut self) {
-        // Player auto-attacks.
+        const REACH: i32 = 33; // ~3 tiles
+        const DISENGAGE: i32 = 300;
+        let tick = self.world.tick;
+
+        // --- player side: offence gen, swings, bar streaming ---
         let players: Vec<usize> = (0..self.world.players.len()).collect();
         for pidx in players {
-            let (target, can_hit, sid) = {
+            let (target, sid, pgob) = {
                 let p = &self.world.players[pidx];
-                (p.fight_target, p.atk_cd <= 0, p.session)
+                (p.fight_target, p.session, p.gob)
             };
             let Some(target) = target else { continue };
-            let Some(pslot) = self.world.gobs.get(self.world.players[pidx].gob) else {
+            let Some(pslot) = self.world.gobs.get(pgob) else {
                 continue;
             };
             let Some(tslot) = self.world.gobs.get(target) else {
                 self.world.players[pidx].fight_target = None;
+                self.fight_del(sid, target);
                 continue;
             };
             let (px, py) = self.world.gobs.pos[pslot];
             let (tx, ty) = self.world.gobs.pos[tslot];
-            if (px - tx).abs() > 33 || (py - ty).abs() > 33 {
-                // Out of reach: chase instead.
+            if (px - tx).abs() > DISENGAGE || (py - ty).abs() > DISENGAGE {
+                // Out of range entirely: clean disengagement.
+                self.world.players[pidx].fight_target = None;
+                self.world.animal_fights.remove(&target);
+                self.fight_del(sid, target);
+                continue;
+            }
+            if (px - tx).abs() > REACH || (py - ty).abs() > REACH {
+                // In engagement range but not swinging: chase instead.
                 if self.world.gobs.mv[pslot].is_none() {
                     let dist = (tx - px).abs() + (ty - py).abs();
                     let speed = self.world.gobs.speed[pslot].max(1);
                     let ms = (dist * 1000) / speed;
                     let steps = (ms / (TICK_MS as i32)).clamp(1, 600);
-                    let sx = px;
-                    let sy = py;
+                    let (sx, sy) = (px, py);
                     self.world.gobs.mv[pslot] = Some(LinMove {
                         sx,
                         sy,
@@ -1365,11 +1533,10 @@ impl Game {
                     self.world.gobs.frame[pslot] += 1;
                     self.world.gobs.pos[pslot] = (tx, ty);
                     let frame = self.world.gobs.frame[pslot];
-                    let gob = self.world.players[pidx].gob;
                     let viewers: Vec<SessionId> = self
                         .sessions
                         .iter()
-                        .filter(|(_, o)| o.visible.contains(&gob))
+                        .filter(|(_, o)| o.visible.contains(&pgob))
                         .map(|(s, _)| *s)
                         .collect();
                     for v in viewers {
@@ -1377,7 +1544,7 @@ impl Game {
                             let mut m = MessageBuf::new();
                             m.uint8(MSG_OBJDATA)
                                 .uint8(0)
-                                .int32(gob)
+                                .int32(pgob)
                                 .int32(frame as i32)
                                 .uint8(OD_LINBEG)
                                 .coord(sx, sy)
@@ -1386,66 +1553,266 @@ impl Game {
                                 .uint8(OD_END);
                             let b = m.finish();
                             out.send_raw(b.clone());
-                            out.unacked.entry(gob).or_default().insert(frame, b);
+                            out.unacked.entry(pgob).or_default().insert(frame, b);
                         }
                     }
                 }
                 continue;
             }
-            if !can_hit {
-                self.world.players[pidx].atk_cd -= 1;
-                continue;
-            }
-            // Hit: damage = basedamage(5) * ql(1.0) * str/10 (combat doc).
-            let str = *self.world.players[pidx].attrs.get("str").unwrap_or(&10);
-            let dmg = (5 * str / 10).max(1);
-            self.world.players[pidx].atk_cd = 20; // 2 s swing timer
-            self.world.players[pidx].stamina = (self.world.players[pidx].stamina - 2).max(0);
-            self.world.gobs.hp[tslot] -= dmg;
-            self.world.gobs.frame[tslot] += 1;
-            let frame = self.world.gobs.frame[tslot];
-            let quarters = ((self.world.gobs.hp[tslot] * 4) / self.world.gobs.max_hp[tslot].max(1))
-                .clamp(0, 4) as u8;
-            let viewers: Vec<SessionId> = self
-                .sessions
-                .iter()
-                .filter(|(_, o)| o.visible.contains(&target))
-                .map(|(s, _)| *s)
-                .collect();
-            for v in viewers {
-                if let Some(out) = self.sessions.get_mut(&v) {
-                    let mut m = MessageBuf::new();
-                    m.uint8(MSG_OBJDATA)
-                        .uint8(0)
-                        .int32(target)
-                        .int32(frame as i32)
-                        .uint8(OD_HEALTH)
-                        .uint8(quarters)
-                        .uint8(OD_END);
-                    let b = m.finish();
-                    out.send_raw(b.clone());
-                    out.unacked.entry(target).or_default().insert(frame, b);
-                }
-            }
-            if self.world.gobs.hp[tslot] <= 0 {
-                // Death: loot + LP + retract.
-                let Kind::Animal { species } = self.world.gobs.kind[tslot] else {
+            // Bar updates and swing decision inside a tight scope, so the
+            // session borrow is dropped before any self-facing call.
+            let mut swing = None;
+            {
+                let Some(out) = self.sessions.get_mut(&sid) else {
                     continue;
                 };
-                let pos = self.world.gobs.pos[tslot];
-                self.world.gobs.kill(target);
-                self.broadcast_retract(target);
-                self.world.animal_gobs.retain(|&g| g != target);
-                for (res, count) in species.loot() {
-                    for _ in 0..count {
-                        self.spawn_drop_near(pos, res, 1, 10);
+                // Own bar gen and cooldown first (own_off and rel are disjoint
+                // fields; touch rel only after own_off updates).
+                out.fight.own_off =
+                    (out.fight.own_off + crate::fight::OFF_REGEN).min(crate::fight::BAR_FULL);
+                if out.fight.atkc > 0 {
+                    out.fight.atkc -= 1;
+                }
+                if out.fight.own_off < crate::fight::SWING_SPEND || out.fight.atkc > 0 {
+                    continue;
+                }
+                // Swing: spend offence, chip defence, land damage on an opening.
+                out.fight.own_off -= crate::fight::SWING_SPEND;
+                out.fight.atkc = crate::fight::ATKC_TICKS;
+                let Some(rel) = out.fight.rel_mut(target) else {
+                    continue;
+                };
+                rel.ip_self += 1;
+                // Attack weight scales 0.5..2.0 with advantage (balance).
+                let weight = (rel.balance.clamp(-5, 5) as f32) * 0.1 + 1.0;
+                let def_chip = (crate::fight::SWING_DEF_DMG as f32 * weight) as i32;
+                let breaking = rel.defence <= crate::fight::OPENING_THRESHOLD;
+                rel.defence = (rel.defence - def_chip).max(0);
+                let landed = breaking || rel.defence <= crate::fight::OPENING_THRESHOLD;
+                if landed {
+                    rel.defence = crate::fight::BAR_FULL;
+                    let str = *self.world.players[pidx].attrs.get("str").unwrap_or(&10);
+                    swing = Some((5 * str / 10).max(1));
+                }
+            }
+            self.world.players[pidx].stamina = (self.world.players[pidx].stamina - 2).max(0);
+            if let Some(dmg) = swing {
+                self.damage_animal(pidx, sid, target, tslot, dmg);
+            }
+        }
+
+        // --- animal side: aggressive animals swing back ---
+        let animals: Vec<GobId> = self.world.animal_gobs.clone();
+        for id in animals {
+            let Some(slot) = self.world.gobs.get(id) else {
+                continue;
+            };
+            let Kind::Animal { species } = self.world.gobs.kind[slot] else {
+                continue;
+            };
+            let _ = species;
+            // Find the engaged player and re-check reach.
+            let Some(engaged) = self
+                .world
+                .players
+                .iter()
+                .enumerate()
+                .find(|(_, q)| q.fight_target == Some(id))
+                .map(|(i, q)| (i, q.session, q.gob))
+            else {
+                continue;
+            };
+            let (pidx, p_sid, p_gob) = engaged;
+            let Some(pslot) = self.world.gobs.get(p_gob) else {
+                continue;
+            };
+            let (ax, ay) = self.world.gobs.pos[slot];
+            let (px, py) = self.world.gobs.pos[pslot];
+            if (px - ax).abs() > 33 || (py - ay).abs() > 33 {
+                // Not in reach: animal defence regenerates.
+                if let Some(af) = self.world.animal_fights.get_mut(&id) {
+                    af.def = (af.def + crate::fight::DEF_REGEN).min(crate::fight::BAR_FULL);
+                }
+                continue;
+            }
+            let animal_off = self
+                .world
+                .animal_fights
+                .get(&id)
+                .map(|f| f.off)
+                .unwrap_or(0);
+            let own_def = self
+                .sessions
+                .get(&p_sid)
+                .map(|out| out.fight.own_def)
+                .unwrap_or(crate::fight::BAR_FULL);
+            // Animal offence builds; swing chips the player's defence.
+            let mut bite = None;
+            {
+                let Some(af) = self.world.animal_fights.get_mut(&id) else {
+                    continue;
+                };
+                if animal_off >= crate::fight::SWING_SPEND {
+                    af.off -= crate::fight::SWING_SPEND;
+                    let str = *self.world.players[pidx].attrs.get("str").unwrap_or(&10);
+                    // Animal bites are lighter than player swings.
+                    let dmg = (5 * str / 10).max(1) / 2;
+                    let new_def = (own_def - crate::fight::SWING_DEF_DMG).max(0);
+                    if new_def <= crate::fight::OPENING_THRESHOLD {
+                        bite = Some(dmg);
                     }
                 }
-                self.world.players[pidx].lp += 10;
-                self.push_cattr(sid);
-                self.world.players[pidx].fight_target = None;
-                info!(target, ?species, "animal killed");
             }
+            if let Some(dmg) = bite {
+                self.hurt_player(pidx, dmg, id);
+            }
+            // Mirror the animal bars into the player's relation view.
+            if let Some(out) = self.sessions.get_mut(&p_sid) {
+                if let Some(rel) = out.fight.rel_mut(id) {
+                    rel.ip_other += 1;
+                    rel.offence = animal_off;
+                    rel.defence = self
+                        .world
+                        .animal_fights
+                        .get(&id)
+                        .map(|f| f.def)
+                        .unwrap_or(0);
+                }
+                if bite.is_some() {
+                    out.fight.own_def = crate::fight::BAR_FULL;
+                }
+            }
+        }
+
+        // --- fast bar streaming: updod per relation + offdef, every 2 ticks ---
+        if tick.is_multiple_of(2) {
+            let sids: Vec<SessionId> = self.sessions.keys().copied().collect();
+            for sid in sids {
+                let Some(out) = self.sessions.get_mut(&sid) else {
+                    continue;
+                };
+                let Some(w) = out.fight.widget else { continue };
+                for rel in &out.fight.rels {
+                    let b = crate::fight::uimsg(w, "updod", &[rel.gob, rel.offence, rel.defence]);
+                    out.send(b.clone());
+                }
+                let b = crate::fight::uimsg(w, "offdef", &[out.fight.own_off, out.fight.own_def]);
+                out.send(b);
+                // Soft state on cooldown ticks.
+                if out.fight.atkc == crate::fight::ATKC_TICKS / 2 {
+                    for rel in &out.fight.rels {
+                        let b = crate::fight::uimsg(
+                            w,
+                            "upd",
+                            &[
+                                rel.gob,
+                                rel.balance,
+                                rel.intensity,
+                                rel.give,
+                                rel.ip_self,
+                                rel.ip_other,
+                            ],
+                        );
+                        let _ = b;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Apply player damage to an animal, handling death + loot.
+    fn damage_animal(
+        &mut self,
+        pidx: usize,
+        sid: SessionId,
+        target: GobId,
+        tslot: usize,
+        dmg: i32,
+    ) {
+        let spec_dmg = dmg;
+        if let Some(af) = self.world.animal_fights.get_mut(&target) {
+            af.def = af.def.clamp(0, crate::fight::BAR_FULL);
+        }
+        self.world.gobs.hp[tslot] -= spec_dmg;
+        self.world.gobs.frame[tslot] += 1;
+        let frame = self.world.gobs.frame[tslot];
+        let quarters = ((self.world.gobs.hp[tslot] * 4) / self.world.gobs.max_hp[tslot].max(1))
+            .clamp(0, 4) as u8;
+        let viewers: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, o)| o.visible.contains(&target))
+            .map(|(s, _)| *s)
+            .collect();
+        for v in viewers {
+            if let Some(out) = self.sessions.get_mut(&v) {
+                let mut m = MessageBuf::new();
+                m.uint8(MSG_OBJDATA)
+                    .uint8(0)
+                    .int32(target)
+                    .int32(frame as i32)
+                    .uint8(OD_HEALTH)
+                    .uint8(quarters)
+                    .uint8(OD_END);
+                let b = m.finish();
+                out.send_raw(b.clone());
+                out.unacked.entry(target).or_default().insert(frame, b);
+            }
+        }
+        if self.world.gobs.hp[tslot] <= 0 {
+            let Kind::Animal { species } = self.world.gobs.kind[tslot] else {
+                return;
+            };
+            let pos = self.world.gobs.pos[tslot];
+            self.world.gobs.kill(target);
+            self.broadcast_retract(target);
+            self.world.animal_gobs.retain(|&g| g != target);
+            self.world.animal_fights.remove(&target);
+            for (res, count) in species.loot() {
+                for _ in 0..count {
+                    self.spawn_drop_near(pos, res, 1, 10);
+                }
+            }
+            self.world.players[pidx].lp += 10;
+            self.push_cattr(sid);
+            self.world.players[pidx].fight_target = None;
+            self.fight_del(sid, target);
+            info!(target, ?species, "animal killed");
+        }
+    }
+
+    /// Apply animal damage to a player (health quarters stream too).
+    fn hurt_player(&mut self, pidx: usize, dmg: i32, from: GobId) {
+        let sid = self.world.players[pidx].session;
+        let pgob = self.world.players[pidx].gob;
+        let p = &mut self.world.players[pidx];
+        p.hp -= dmg;
+        p.stamina = (p.stamina - 2).max(0);
+        let hp = p.hp;
+        let frame = self.world.tick as u32;
+        let quarters = ((hp * 4) / 100).clamp(0, 4) as u8;
+        if hp <= 0 {
+            p.hp = 50;
+            p.energy = (p.energy - 10).max(0);
+            p.fight_target = None;
+            if let Some(out) = self.sessions.get_mut(&sid) {
+                out.fight.rels.clear();
+                out.fight.own_def = crate::fight::BAR_FULL;
+            }
+            self.world.animal_fights.remove(&from);
+            info!(sid, from, "player knocked out by animal");
+            return;
+        }
+        if let Some(out) = self.sessions.get_mut(&sid) {
+            let mut m = MessageBuf::new();
+            m.uint8(MSG_OBJDATA)
+                .uint8(0)
+                .int32(pgob)
+                .int32(frame as i32)
+                .uint8(OD_HEALTH)
+                .uint8(quarters)
+                .uint8(OD_END);
+            out.send_raw(m.finish());
         }
     }
 
@@ -1613,6 +1980,75 @@ impl Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Predators in a saturated world must engage the player: chase, open
+    /// the Fightview window and start swinging back.
+    #[tokio::test]
+    async fn predator_engages_player_in_reach() {
+        let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut g = Game::new(42, cmd_rx, net_rx, true);
+        let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, _raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        g.session_connected(1, tx, raw_tx);
+        // Select the character through the normal widget path.
+        let wid = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "charlist")
+            .map(|(k, _)| *k)
+            .expect("charlist widget");
+        g.on_wdgmsg(
+            1,
+            wid,
+            "play",
+            vec![hnh_proto::ListArg::Str("hunter".to_owned())],
+        );
+        // Populate the player's grid with saturated wildlife.
+        g.on_mapreq(1, (0, 0));
+        // Find a wolf or boar and teleport the player into melee reach.
+        let predator = (0..g.world.animal_gobs.len())
+            .map(|i| g.world.animal_gobs[i])
+            .find(|&id| {
+                let slot = g.world.gobs.get(id).unwrap();
+                matches!(g.world.gobs.kind[slot], Kind::Animal { species } if species.aggressive())
+            })
+            .expect("saturated grid spawns predators");
+        let pslot = predator_slot(&g);
+        let (ax, ay) = g.world.gobs.pos[pslot];
+        let pgob = g.world.players[0].gob;
+        let pslot2 = g.world.gobs.get(pgob).unwrap();
+        g.world.gobs.pos[pslot2] = (ax + 5, ay);
+        info!(?ax, ?ay, "teleported player next to predator");
+        // Run ticks until the engagement opens.
+        let mut fought = false;
+        for _ in 0..300 {
+            g.tick();
+            if !g.world.animal_fights.is_empty() {
+                fought = true;
+                break;
+            }
+        }
+        assert!(fought, "predator must engage a player in reach");
+    }
+
+    fn predator_slot(g: &Game) -> usize {
+        for &id in &g.world.animal_gobs {
+            if let Some(slot) = g.world.gobs.get(id) {
+                let aggro = matches!(
+                    g.world.gobs.kind[slot],
+                    Kind::Animal { species } if species.aggressive()
+                );
+                if aggro {
+                    return slot;
+                }
+            }
+        }
+        panic!("BUG: no predator");
+    }
 
     /// The bootstrap stream must announce avatar RESIDs before the
     /// charlist add (session-lifecycle.md 3.1).

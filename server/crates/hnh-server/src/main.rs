@@ -6,6 +6,7 @@
 
 mod auth;
 mod bots;
+mod fight;
 mod game;
 mod handoff;
 mod net;
