@@ -3,3 +3,4 @@
 .idea
 *.imlserver/target/
 server/certs/authsrv.key.pem
+server/target/
