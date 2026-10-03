@@ -753,3 +753,38 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
   instead of aborting the bug report. make-gameres.ps1 audited - no
   native calls, safe under Stop.
 - Next: user git pull, re-run windows\collect-logs.bat.
+
+## 2026-10-04 - Fix: collect-logs broken for real (git -C mangling, locked logs, false success)
+
+- User report: after the stderr fix the bat still failed twice. Three
+  distinct causes in collect-logs.ps1:
+  1) `cmd /c "git -C `"$root`" ..."` - PS 5.1 mangles embedded quotes
+     when passing arguments to native commands, git received -C with no
+     directory ("no directory given for '-C' option") and the info file
+     got no git data.
+  2) Compress-Archive opened the live server.log with FileShare.Read
+     while the server holds it open for writing -> IOException "file is
+     used by another process", zip never built. The normal bug-report
+     scenario is "server still running", so this had to work.
+  3) "Bug report ready" printed unconditionally - a missing/corrupt zip
+     was announced as success.
+- Rewrite (windows/collect-logs.ps1): no git -C and no quoted cmd
+  arguments at all (git runs after Push-Location; the only strings
+  reaching cmd are fixed literals like "java -version 2>&1"); every
+  logs/*.log is copied into a staging dir with FileShare ReadWrite|Delete
+  before zipping, so open files read cleanly while the server writes
+  them; the zip is built from the copies; success is only printed after
+  verifying the zip exists and is non-empty (exit 0/1, honest FAILED
+  message with the raw info file path on failure); repo root resolves
+  from -RepoRoot (passed by the bat), then $PSScriptRoot, then cwd; the
+  info file now also records OS/PS versions, ant version and whether
+  anything actually listens on 1870/1871/1872 ("server is DOWN" hint);
+  stale _stage-* leftovers are cleaned at start.
+- Verified under real PowerShell 7.4.6 on Linux (first tested -not
+  reviewed - version of this script): happy path with a background
+  writer actively appending to server.log while the report is built
+  (zip contains the live lines), rerun in the same repo, empty logs dir
+  (info-only zip), missing repo root (friendly FAILED + exit 1),
+  PSScriptRoot fallback without -RepoRoot.
+- Next: user git pull, re-run windows\collect-logs.bat (server may keep
+  running), send the printed zip.
