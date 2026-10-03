@@ -593,3 +593,101 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 - start-server.bat now always runs cargo build (incremental no-op when
   fresh) so a git pull can never launch a stale binary.
 - Commits 2af0ddd, 5353e8e. No Rust code changes.
+
+---
+
+## Session end 1791067281
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791067291
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791067297
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791067319
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791067378
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791067433
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791067510
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791067638
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791067721
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791067844
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+## Session end 1791068300 (cwd-independent paths)
+
+- User boot failure: start-server.bat runs from repo root while default
+  paths (../gameres, ../save/world.json, certs/) assumed cwd=server/ -
+  everything resolved outside the repo and the gameres check aborted.
+- Fix: default_repo_dir() resolves gameres/save/certs across all launch
+  layouts (cwd=server, cwd=root, exe-relative), converging on repo-root
+  copies; explicit --res-dir/--cert/--key and HNH_SAVE_FILE stay
+  verbatim; Game::new takes the resolved save path from main.
+- Wire-test drift: tests hardcoded play("Player"), inheriting stale
+  saved inventory (2 axes, no kit) - craft/eat checks failed through no
+  server fault. Both tests now play a per-run character name.
+- Verified: 37 tests, clippy -D warnings, fmt clean; boots from three
+  cwds converge on identical gameres/save/fep.conf; CRAFT/EAT flows OK.
+  Commit 6b09503.
+- Next: user git pull; start-server.bat now self-corrects. Remaining
+  roadmap unchanged (dirty-cell visibility, farming, party/chat).
