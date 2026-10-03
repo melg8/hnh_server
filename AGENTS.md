@@ -9,8 +9,45 @@ This repository contains two code areas:
    safe, well-tested, and performant. There is no such thing as "temporary"
    quality here.
 
+The repository also contains `docs/mechanics/`, the verified game mechanics
+reference for legacy Haven & Hearth; consulting and updating it is mandatory
+(see the section below).
+
 All code, comments, commit messages, and documentation you produce in this
 repository MUST be in English.
+
+---
+
+## MANDATORY: Use and Maintain docs/mechanics/ (Game Mechanics Reference)
+
+`docs/mechanics/` is the golden source of truth for game mechanics. Its index
+is `docs/mechanics/README.md`.
+
+1. **Search first.** BEFORE designing, writing, or reviewing any server-side
+   behavior, consult `docs/mechanics/README.md` and the domain docs it links
+   (network, world, objects, character, skills, items, crafting, livestock,
+   combat). Do not re-derive mechanics from client code or memory when a
+   documented answer exists; every documented claim cites its client files
+   and external sources.
+2. **What the folder is.** A verified behavioral blueprint of legacy Haven &
+   Hearth, distilled from the `src/haven/` client code, the legacy Ring of
+   Brodgar wiki, the fandom wiki, official forums/patch notes, and the repo
+   configs (`etc/needed/fep.conf`, `etc/needed/curio.conf`). The index maps
+   questions to documents and flags load-bearing constants shared across
+   domains.
+3. **Update rule (living document).** When implementation reveals a nuance
+   that contradicts, refines, or extends a doc, update that domain doc in
+   the same change set. Record uncertainty in the doc's `## Open questions`
+   section instead of inventing numbers. If the server deliberately changes
+   a documented behavior, update the doc to state both the legacy behavior
+   and the new decision. Keep docs English and ASCII, each under ~60KB;
+   prefer editing the specific domain doc over growing
+   `docs/mechanics/README.md`.
+4. **New coverage.** To document a domain not yet covered, create a new
+   subfolder under `docs/mechanics/` with the shared skeleton (H1,
+   `> **Sources:**` quote, `## Summary`, mechanics sections,
+   `## Server implementation notes`, `## Open questions`) and link it from
+   `docs/mechanics/README.md`.
 
 ---
 
