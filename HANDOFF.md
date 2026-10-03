@@ -580,3 +580,16 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 - Next: user git pull + rebuild via start-server.bat; if the server
   console previously showed "resource server failed"/"resource accept
   error", this commit removes that failure mode.
+
+## Session end 1791064800 (repo hygiene)
+
+- User-side git status noise blocked git pull: the server auto-appends
+  a Session end entry to HANDOFF.md on every shutdown (by design), and
+  build/haven.jar + docs/javadoc churn with every local JDK build.
+- Fixed: untracked build/haven.jar (ant jar), docs/javadoc/ (ant
+  javadoc) and save/world.json (runtime persistence committed by
+  accident in session 2); gitignore now also covers root /certs/ and
+  /data.bin and fixes a broken *.iml + server/target/ line.
+- start-server.bat now always runs cargo build (incremental no-op when
+  fresh) so a git pull can never launch a stale binary.
+- Commits 2af0ddd, 5353e8e. No Rust code changes.
