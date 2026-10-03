@@ -1,4 +1,5 @@
 /classes/
 /build/
 .idea
-*.iml
+*.imlserver/target/
+server/certs/authsrv.key.pem
