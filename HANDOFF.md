@@ -739,3 +739,17 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 - Next: user git pull, then windows\run-client.bat is the only command
   needed. Roadmap unchanged (dirty-cell visibility, farming/livestock,
   party/chat, station crafting).
+
+## 2026-10-04 - Fix: collect-logs.ps1 aborted by native stderr (PS 5.1)
+
+- User report: collect-logs.bat died at `java -version` with
+  NativeCommandError. Windows PowerShell 5.1 converts native stderr
+  lines redirected via 2>&1 into error records, which terminate the
+  script under -ErrorAction Stop - and java/cargo print their version
+  to stderr by design.
+- Fix: $ErrorActionPreference = 'Continue' and every native call runs
+  through cmd /c so stderr merges into stdout at the cmd level
+  (Get-MergedOutput helper); a missing tool degrades to an empty line
+  instead of aborting the bug report. make-gameres.ps1 audited - no
+  native calls, safe under Stop.
+- Next: user git pull, re-run windows\collect-logs.bat.
