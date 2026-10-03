@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use rayon::prelude::*;
 use tracing::{debug, info, trace, warn};
 
 use hnh_proto::consts::*;
@@ -79,25 +80,40 @@ impl Game {
         let save = crate::persist::SaveStore::load(&save_path, seed);
         // fep.conf ships with the repo (repo-root etc/); HNH_FEP_CONF moves
         // it for tests. A missing file degrades to "no food resolves" rather
-        // than wedging the boot (food-and-fep.md server note 1).
-        let fep_path = std::env::var("HNH_FEP_CONF")
-            .unwrap_or_else(|_| "../etc/needed/fep.conf".to_owned());
-        let fep = match std::fs::read_to_string(&fep_path) {
-            Ok(text) => match crate::craft::FepTable::parse(&text) {
-                Ok(t) => {
-                    info!(path = %fep_path, foods = t.len(), "fep.conf loaded");
-                    t
-                }
-                Err(e) => {
-                    tracing::warn!(path = %fep_path, error = %e, "invalid fep.conf: food grants disabled");
-                    crate::craft::FepTable::default()
-                }
-            },
-            Err(e) => {
-                tracing::warn!(path = %fep_path, error = %e, "fep.conf unreadable: food grants disabled");
-                crate::craft::FepTable::default()
+        // than wedging the boot (food-and-fep.md server note 1). Candidates
+        // cover both `cargo run` (cwd = server/) and direct binary launches.
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(env_path) = std::env::var("HNH_FEP_CONF") {
+            candidates.push(std::path::PathBuf::from(env_path));
+        }
+        candidates.push(std::path::PathBuf::from("../etc/needed/fep.conf"));
+        candidates.push(std::path::PathBuf::from("etc/needed/fep.conf"));
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                // target/release -> server/target/release/../../.. -> repo root
+                candidates.push(dir.join("../../../etc/needed/fep.conf"));
+                candidates.push(dir.join("../../etc/needed/fep.conf"));
             }
-        };
+        }
+        let mut fep = crate::craft::FepTable::default();
+        for cand in &candidates {
+            match std::fs::read_to_string(cand) {
+                Ok(text) => match crate::craft::FepTable::parse(&text) {
+                    Ok(t) => {
+                        info!(path = %cand.display(), foods = t.len(), "fep.conf loaded");
+                        fep = t;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(path = %cand.display(), error = %e, "invalid fep.conf: trying next candidate");
+                    }
+                },
+                Err(_) => continue,
+            }
+        }
+        if fep.len() == 0 {
+            tracing::warn!("no fep.conf found in candidates: food grants disabled");
+        }
         Game {
             world: World::new(seed),
             sessions: HashMap::new(),
@@ -197,11 +213,7 @@ impl Game {
                         )
                     })
                     .collect();
-                let labels: Vec<String> = p
-                    .inv
-                    .iter()
-                    .map(|s| s.label.to_owned())
-                    .collect();
+                let labels: Vec<String> = p.inv.iter().map(|s| s.label.to_owned()).collect();
                 self.save.snapshot(p, pos, inv_named, labels);
             }
         }
@@ -495,6 +507,26 @@ impl Game {
         });
         self.world.by_session.insert(sid, player_idx);
 
+        // Starter kit for fresh characters (server policy; legacy gave
+        // nothing but the dev flow needs craftable ingredients on hand).
+        // Labels on food keep the fep.conf identity for the eat flow.
+        if self.world.players[player_idx].inv.is_empty() {
+            let kit: &[(&str, u32, u8, &'static str)] = &[
+                ("gfx/invobjs/branch", 2, 10, ""),
+                ("gfx/invobjs/stone", 2, 10, ""),
+                ("gfx/invobjs/meat", 1, 10, "Beef"),
+            ];
+            for (resname, count, ql, label) in kit {
+                let gidx = self.world.res.intern(resname);
+                self.world.players[player_idx].inv.push(InvStack {
+                    res: gidx,
+                    count: *count,
+                    ql: *ql,
+                    label,
+                });
+            }
+        }
+
         // --- HUD + world bootstrap (order matters; lifecycle doc 3.2) ---
         let player_gob = gob;
         let Some(out) = self.sessions.get_mut(&sid) else {
@@ -589,7 +621,12 @@ impl Game {
         let (unix, dt, mp, yt) = self.world.astro();
         out.send(wdg::globlob(unix, dt, mp, yt, Some((255, 255, 255, 255))));
         // Snapshot attributes before pushing cattr (player borrows end here).
-        let attr = |k: &str| self.world.player(sid).and_then(|p| p.attrs.get(k).copied()).unwrap_or(10);
+        let attr = |k: &str| {
+            self.world
+                .player(sid)
+                .and_then(|p| p.attrs.get(k).copied())
+                .unwrap_or(10)
+        };
         out.send(wdg::cattr(&[
             ("pts", lp, lp),
             ("hp", 100, hp),
@@ -822,35 +859,46 @@ impl Game {
     }
 
     /// Per-tick visibility update: spawns, retractions, movement deltas.
+    /// Visibility: parallel in-range candidate scan (phase A, read-only
+    /// over the SoA columns), then serial spawn/move/retract application
+    /// (phase B, mutates session state and streams wire blocks).
     fn update_visibility(&mut self) {
-        // Gather positions first (avoid double borrow).
         let mut updates: Vec<(SessionId, Vec<GobId>)> = Vec::new();
         let session_ids: Vec<SessionId> = self.sessions.keys().copied().collect();
-        for sid in session_ids {
-            let Some(player_gob) = self.sessions[&sid].player_gob else {
-                continue;
-            };
-            let Some(pslot) = self.world.gobs.get(player_gob) else {
-                continue;
-            };
-            let (px, py) = self.world.gobs.pos[pslot];
-            // Everything within VIEW_RADIUS of the player.
+        // --- Phase A: pure distance filtering per session (parallel when
+        // multiple sessions are present; O(sessions x gobs) dominates). ---
+        let candidates: Vec<(SessionId, (i32, i32))> = session_ids
+            .iter()
+            .filter_map(|sid| {
+                let player_gob = self.sessions[sid].player_gob?;
+                let pslot = self.world.gobs.get(player_gob)?;
+                Some((*sid, self.world.gobs.pos[pslot]))
+            })
+            .collect();
+        let in_range: Vec<Vec<GobId>> = if self.workers > 1 && candidates.len() > 8 {
+            candidates
+                .par_iter()
+                .map(|(_sid, (px, py))| self.scan_visible(*px, *py))
+                .collect()
+        } else {
+            candidates
+                .iter()
+                .map(|(_sid, (px, py))| self.scan_visible(*px, *py))
+                .collect()
+        };
+        // --- Phase B: serial application per session. ---
+        for ((sid, (px, py)), cand) in candidates.into_iter().zip(in_range) {
             let mut moving: Vec<GobId> = Vec::new();
-            for slot in 0..self.world.gobs.alive.len() {
-                if !self.world.gobs.alive[slot] {
+            for id in cand {
+                let Some(slot) = self.world.gobs.get(id) else {
                     continue;
-                }
-                let (gx, gy) = self.world.gobs.pos[slot];
-                if (gx - px).abs() > VIEW_RADIUS || (gy - py).abs() > VIEW_RADIUS {
-                    continue;
-                }
-                let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
+                };
                 let mv = self.world.gobs.mv[slot];
                 let frame = self.world.gobs.frame[slot];
                 let is_new;
                 let needs_move;
                 {
-                    let out = self.sessions.get_mut(&sid).expect("BUG: sid from keys");
+                    let out = self.sessions.get_mut(&sid).expect("BUG: sid from cand");
                     is_new = out.visible.insert(id);
                     needs_move = !is_new
                         && mv.is_some()
@@ -921,6 +969,22 @@ impl Game {
                 out.unacked.entry(id).or_default().insert(frame, block);
             }
         }
+    }
+
+    /// Pure in-range gob scan around a point (no mutation; rayon-friendly).
+    fn scan_visible(&self, px: i32, py: i32) -> Vec<GobId> {
+        let mut out = Vec::new();
+        for slot in 0..self.world.gobs.alive.len() {
+            if !self.world.gobs.alive[slot] {
+                continue;
+            }
+            let (gx, gy) = self.world.gobs.pos[slot];
+            if (gx - px).abs() > VIEW_RADIUS || (gy - py).abs() > VIEW_RADIUS {
+                continue;
+            }
+            out.push(gob_id_from_slot(slot, self.world.gobs.gen[slot]));
+        }
+        out
     }
 
     fn on_objack(&mut self, sid: SessionId, acks: Vec<(GobId, u32)>) {
@@ -1332,7 +1396,11 @@ impl Game {
         }
         out.item_wids.clear();
         for (n, stack) in items.iter().enumerate() {
-            let res_name = self.world.res.name(stack.res).unwrap_or("gfx/invobjs/stone");
+            let res_name = self
+                .world
+                .res
+                .name(stack.res)
+                .unwrap_or("gfx/invobjs/stone");
             let wire = out.res.wire_named(stack.res, res_name);
             if let Some((name, ver)) = out.res.pending_announce(wire) {
                 out.send(wdg::resid(wire, name, ver));
@@ -1374,7 +1442,11 @@ impl Game {
             return;
         };
         let pos = self.world.gobs.pos[slot];
-        let name = self.world.res.name(stack.res).unwrap_or("gfx/invobjs/stone");
+        let name = self
+            .world
+            .res
+            .name(stack.res)
+            .unwrap_or("gfx/invobjs/stone");
         self.spawn_drop_near(pos, leak_static(name), stack.ql, stack.label);
         self.refresh_inventory(sid);
     }
@@ -1389,8 +1461,8 @@ impl Game {
             let recipe_id = action[1].as_str();
             // The roast pagina carries ad ["craft", "roast"]; it maps to a
             // dynamic recipe resolved per attempt (any raw meat in scope).
-            let known = recipe_id == "roast"
-                || crate::craft::RECIPES.iter().any(|r| r.id == recipe_id);
+            let known =
+                recipe_id == "roast" || crate::craft::RECIPES.iter().any(|r| r.id == recipe_id);
             if !known {
                 info!(sid, recipe = recipe_id, "unknown craft id: ignoring");
                 return;
@@ -1481,7 +1553,14 @@ impl Game {
             pop
         };
         let w = out.new_wid("make");
-        out.send(wdg::new_wdg(w, "make", 350, 200, 0, &[ListVal::S(title.to_owned())]));
+        out.send(wdg::new_wdg(
+            w,
+            "make",
+            350,
+            200,
+            0,
+            &[ListVal::S(title.to_owned())],
+        ));
         out.send(wdg::wdgmsg(w, "pop", &pop));
         out.craft_window = Some(w);
         out.craft_recipe = Some(recipe_id.to_owned());
@@ -1573,7 +1652,7 @@ impl Game {
         // Weighted-average output quality (loftar: sum(q*w)/sum(w)).
         let total_w: u32 = consumed.iter().map(|(_, w)| w).sum();
         let qsum: u32 = consumed.iter().map(|(q, w)| *q as u32 * w).sum();
-        let mut q = if total_w > 0 { (qsum / total_w) as i32 } else { 10 };
+        let mut q = (qsum.checked_div(total_w).unwrap_or(10) as i32).max(1);
         // Softcap by the crafter's relevant attribute (skill stand-in):
         // q = (q + attr)/2 when attr < q (crafting-and-building.md).
         let attr_val = self.world.players[pidx]
@@ -1605,9 +1684,7 @@ impl Game {
         let Some(pidx) = self.world.by_session.get(&sid).copied() else {
             return false;
         };
-        let pos = self
-            .world
-            .players[pidx]
+        let pos = self.world.players[pidx]
             .inv
             .iter()
             .position(|s| crate::craft::roast_result(s.label).is_some() && s.count > 0);
@@ -1664,7 +1741,14 @@ impl Game {
             out.send(wdg::dst_wdg(old));
         }
         let w = out.new_wid("sm");
-        out.send(wdg::new_wdg(w, "sm", -1, -1, 0, &[ListVal::S("Eat".to_owned())]));
+        out.send(wdg::new_wdg(
+            w,
+            "sm",
+            -1,
+            -1,
+            0,
+            &[ListVal::S("Eat".to_owned())],
+        ));
         out.item_menu = Some((w, stack_idx));
     }
 
@@ -1705,7 +1789,11 @@ impl Game {
             debug!(sid, label = stack.label, "eat: no fep entry");
             return;
         };
-        let total_fep: f32 = feps.iter().filter(|(a, _)| *a != FepAttr::Hhp).map(|(_, v)| v).sum();
+        let total_fep: f32 = feps
+            .iter()
+            .filter(|(a, _)| *a != FepAttr::Hhp)
+            .map(|(_, v)| v)
+            .sum();
         let hhp: f32 = feps
             .iter()
             .find(|(a, _)| *a == FepAttr::Hhp)
@@ -1845,55 +1933,95 @@ impl Game {
         }
     }
 
+    /// Animal AI: parallel intent pass over the SoA columns (read-only),
+    /// then serial application (writes stay on the game task). Intents are
+    /// computed per grid-region bucket so the same pure function maps to
+    /// true cross-process grid owners later.
     fn tick_animals(&mut self) {
         let tick = self.world.tick;
-        let mut decisions: Vec<(GobId, AnimalAction)> = Vec::new();
         let animal_ids: Vec<GobId> = self.world.animal_gobs.clone();
-        for &id in &animal_ids {
-            let Some(slot) = self.world.gobs.get(id) else {
-                continue;
-            };
-            let Kind::Animal { species } = self.world.gobs.kind[slot] else {
-                continue;
-            };
-            if self.world.gobs.mv[slot].is_some() {
-                continue;
-            }
-            // Find nearest player within perception. Saturated worlds widen
-            // the aggro radius so predators converge on the bot cohorts.
-            let perception = if self.saturated { 1500 } else { 400 };
-            let aggro = if self.saturated { 900 } else { 300 };
-            let (ax, ay) = self.world.gobs.pos[slot];
-            let mut nearest: Option<(GobId, i32)> = None;
-            for p in &self.world.players {
-                if let Some(pslot) = self.world.gobs.get(p.gob) {
-                    let (px, py) = self.world.gobs.pos[pslot];
-                    let d = ((px - ax).abs() + (py - ay).abs()).min(i32::MAX - 1);
-                    if d < perception && nearest.map(|(_, nd)| d < nd).unwrap_or(true) {
-                        nearest = Some((p.gob, d));
-                    }
-                }
-            }
-            let action = match nearest {
-                Some((pgob, dist)) if species.aggressive() && dist < aggro => {
-                    AnimalAction::Chase(pgob)
-                }
-                Some((_pgob, dist)) if !species.aggressive() && dist < 200 => AnimalAction::Flee,
-                _ if tick % 20 == (slot as u64) % 20 => {
-                    let r = self.world.next_ai_rand(4);
-                    if r == 0 {
-                        AnimalAction::Wander
-                    } else {
-                        AnimalAction::Idle
-                    }
-                }
-                _ => AnimalAction::Idle,
-            };
-            decisions.push((id, action));
-        }
+        // Phase A (parallel): pure intent computation over immutable SoA
+        // state. Randomness derives from (tick, slot) hashes so the pass is
+        // deterministic and race-free without a shared RNG.
+        let workers = self.workers.max(1);
+        let decisions: Vec<(GobId, AnimalAction)> = if workers > 1 && animal_ids.len() > 64 {
+            // Chunk ids into worker-sized buckets; rayon runs the pure
+            // decision function per bucket.
+            let bucket = animal_ids.len().div_ceil(workers);
+            animal_ids
+                .par_chunks(bucket)
+                .map(|chunk| {
+                    chunk
+                        .iter()
+                        .filter_map(|id| Self::animal_intent(id, &self.world, tick, self.saturated))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<Vec<_>>>()
+                .into_iter()
+                .flatten()
+                .collect()
+        } else {
+            animal_ids
+                .iter()
+                .filter_map(|id| Self::animal_intent(id, &self.world, tick, self.saturated))
+                .collect()
+        };
+        // Phase B (serial): apply writes; may use the shared RNG.
         for (id, action) in decisions {
             self.apply_animal_action(id, action);
         }
+    }
+
+    /// Pure per-animal decision (no mutation) — the unit that maps to a
+    /// grid-owner shard in the multi-node layout.
+    fn animal_intent(
+        id: &GobId,
+        world: &World,
+        tick: u64,
+        saturated: bool,
+    ) -> Option<(GobId, AnimalAction)> {
+        let slot = world.gobs.get(*id)?;
+        let Kind::Animal { species } = world.gobs.kind[slot] else {
+            return None;
+        };
+        if world.gobs.mv[slot].is_some() {
+            return None;
+        }
+        // Find nearest player within perception. Saturated worlds widen
+        // the aggro radius so predators converge on the bot cohorts.
+        let perception = if saturated { 1500 } else { 400 };
+        let aggro = if saturated { 900 } else { 300 };
+        let (ax, ay) = world.gobs.pos[slot];
+        let mut nearest: Option<(GobId, i32)> = None;
+        for p in &world.players {
+            if let Some(pslot) = world.gobs.get(p.gob) {
+                let (px, py) = world.gobs.pos[pslot];
+                let d = ((px - ax).abs() + (py - ay).abs()).min(i32::MAX - 1);
+                if d < perception && nearest.map(|(_, nd)| d < nd).unwrap_or(true) {
+                    nearest = Some((p.gob, d));
+                }
+            }
+        }
+        let action = match nearest {
+            Some((pgob, dist)) if species.aggressive() && dist < aggro => AnimalAction::Chase(pgob),
+            Some((_pgob, dist)) if !species.aggressive() && dist < 200 => AnimalAction::Flee,
+            _ if tick % 20 == (slot as u64) % 20 => {
+                // Deterministic (tick, slot) hash stands in for the shared
+                // RNG so the parallel pass stays race-free (splitmix32).
+                let h =
+                    (tick as u32).wrapping_mul(0x9E3779B9) ^ (slot as u32).wrapping_mul(0x85EBCA6B);
+                let h = h ^ (h >> 13);
+                let h = h.wrapping_mul(0xC2B2AE35);
+                let h = h ^ (h >> 16);
+                if h.is_multiple_of(4) {
+                    AnimalAction::Wander
+                } else {
+                    AnimalAction::Idle
+                }
+            }
+            _ => AnimalAction::Idle,
+        };
+        Some((*id, action))
     }
 
     fn apply_animal_action(&mut self, id: GobId, action: AnimalAction) {
@@ -2439,11 +2567,7 @@ impl Game {
                 )
             })
             .collect();
-        let labels: Vec<String> = p
-            .inv
-            .iter()
-            .map(|s| s.label.to_owned())
-            .collect();
+        let labels: Vec<String> = p.inv.iter().map(|s| s.label.to_owned()).collect();
         self.save.snapshot(p, pos, inv_named, labels);
     }
 

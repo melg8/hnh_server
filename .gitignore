@@ -4,3 +4,6 @@
 *.imlserver/target/
 server/certs/authsrv.key.pem
 server/target/
+gameres/
+save/world.json
+server/certs/authsrv.crt.pem

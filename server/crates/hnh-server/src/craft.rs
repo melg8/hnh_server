@@ -91,7 +91,10 @@ impl FepTable {
                 continue;
             }
             let Some((name, rest)) = line.split_once('=') else {
-                return Err(format!("fep.conf line {}: missing '=' separator", lineno + 1));
+                return Err(format!(
+                    "fep.conf line {}: missing '=' separator",
+                    lineno + 1
+                ));
             };
             let key = name.trim().to_lowercase();
             if key.is_empty() {
@@ -106,8 +109,9 @@ impl FepTable {
                         tok
                     ));
                 };
-                let attr = FepAttr::from_key(attr)
-                    .ok_or_else(|| format!("fep.conf line {}: unknown attribute {attr:?}", lineno + 1))?;
+                let attr = FepAttr::from_key(attr).ok_or_else(|| {
+                    format!("fep.conf line {}: unknown attribute {attr:?}", lineno + 1)
+                })?;
                 let val: f32 = val
                     .parse()
                     .map_err(|_| format!("fep.conf line {}: bad float {val:?}", lineno + 1))?;
@@ -127,7 +131,9 @@ impl FepTable {
     /// Look up a food by display name (case-insensitive, per Config.loadFEP
     /// lowercasing; Item.name() precedence documented in food-and-fep.md).
     pub fn get(&self, display_name: &str) -> Option<&[(FepAttr, f32)]> {
-        self.by_name.get(&display_name.to_lowercase()).map(|v| v.as_slice())
+        self.by_name
+            .get(&display_name.to_lowercase())
+            .map(|v| v.as_slice())
     }
 
     pub fn len(&self) -> usize {
@@ -157,16 +163,14 @@ pub struct Recipe {
 
 /// Recipes implemented this session. Ingredient/output resources must exist
 /// in the served resource pack (verified against lib/haven-res.jar).
-pub const RECIPES: &[Recipe] = &[
-    Recipe {
-        id: "axe",
-        name: "Stone axe",
-        inputs: &[("gfx/invobjs/branch", 1), ("gfx/invobjs/stone", 1)],
-        outputs: &[("gfx/invobjs/axe", 1)],
-        pagina: "paginae/craft/axe",
-        softcap_attr: "str",
-    },
-];
+pub const RECIPES: &[Recipe] = &[Recipe {
+    id: "axe",
+    name: "Stone axe",
+    inputs: &[("gfx/invobjs/branch", 1), ("gfx/invobjs/stone", 1)],
+    outputs: &[("gfx/invobjs/axe", 1)],
+    pagina: "paginae/craft/axe",
+    softcap_attr: "str",
+}];
 
 /// Raw -> roasted meat mapping for the `roast` recipe (paginae/craft/roastmeat,
 /// ad = ["craft", "roast"]). Keys are the raw item display labels; values the
@@ -305,8 +309,8 @@ Peapod=STR:0.1 PER:0.9
         let feps = [(FepAttr::Con, 5.0), (FepAttr::Hhp, 0.2)];
         st.grant(&feps, 10);
         assert_eq!(st.total(), 50);
-        assert!(st.acc.get("con").is_some());
-        assert!(st.acc.get("hhp").is_none());
+        assert!(st.acc.contains_key("con"));
+        assert!(!st.acc.contains_key("hhp"));
     }
 
     #[test]

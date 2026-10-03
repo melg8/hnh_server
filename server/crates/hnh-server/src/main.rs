@@ -38,6 +38,7 @@ struct Args {
     bots: usize,
     saturated: bool,
     shards: usize,
+    workers: usize,
     res_dir: String,
     cert: String,
     key: String,
@@ -45,7 +46,7 @@ struct Args {
 }
 
 fn usage() -> &'static str {
-    "hnh-server [--seed N] [--bots N] [--saturated] [--shards N] [--perf] [--res-dir DIR] [--cert P] [--key P]\n"
+    "hnh-server [--seed N] [--bots N] [--saturated] [--shards N] [--workers N] [--perf] [--res-dir DIR] [--cert P] [--key P]\n"
 }
 
 fn parse_args() -> Args {
@@ -54,6 +55,7 @@ fn parse_args() -> Args {
         bots: 0,
         saturated: false,
         shards: 1,
+        workers: 1,
         res_dir: "../gameres".to_owned(),
         cert: "certs/authsrv.crt.pem".to_owned(),
         key: "certs/authsrv.key.pem".to_owned(),
@@ -66,6 +68,7 @@ fn parse_args() -> Args {
             "--bots" => a.bots = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--saturated" => a.saturated = true,
             "--shards" => a.shards = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+            "--workers" => a.workers = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
             "--perf" => a.perf = true,
             "--res-dir" => a.res_dir = it.next().unwrap_or_else(|| a.res_dir.clone()),
             "--cert" => a.cert = it.next().unwrap_or_else(|| a.cert.clone()),
@@ -107,8 +110,13 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("auth initialized twice"));
     }
 
-    // Game task.
+    // Game task. Worker count sets the data-parallel tick fan-out (animal
+    // AI intents + visibility scans run on rayon's pool when > 1).
+    let workers = args.workers.max(1);
+    info!(workers, "tick workers");
     let game = Game::new(args.seed, cmd_rx, net_rx, args.saturated);
+    let mut game = game;
+    game.workers = workers;
     let game_handle = tokio::spawn(game.run());
 
     // Network tasks: shard_count UDP sockets share the port via SO_REUSEPORT.
