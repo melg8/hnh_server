@@ -7,7 +7,12 @@
 		<mkdir dir="build" />
 		<mkdir dir="classes" />
 		<mkdir dir="classes/haven" />
-		<javac srcdir="src" destdir="classes" debug="on" encoding="UTF-8" source="1.5" target="1.5" includeantruntime="no">
+		<!-- Build against the JDK 8 platform API. Modern JDKs (9+) no longer
+		     support -source/-target 5, and JDK 25 (JEP 504) removed the
+		     java.applet API entirely; the javac "release" switch compiles
+		     against the historical JDK 8 API signatures (ct.sym), keeping
+		     legacy code such as HavenApplet compilable on any JDK 9 to 25+. -->
+		<javac srcdir="src" destdir="classes" debug="on" encoding="UTF-8" release="8" includeantruntime="no">
 			<classpath>
 				<pathelement path="lib/jogl.jar" />
 				<pathelement path="lib/gluegen-rt.jar" />
@@ -184,8 +189,15 @@
 			destdir="docs/javadoc" 
 			stylesheetfile="docs/stylesheet.css"
 			charset="UTF-8"
-			sourcefiles="src\union\jsbot\*.java"
 			access="public">
+			<!-- Fileset instead of the wildcard sourcefiles attribute:
+			     portable across Windows and Unix, and works with modern javadoc. -->
+			<fileset dir="src/union/jsbot">
+				<include name="**/*.java" />
+			</fileset>
+			<!-- Old sources predate doclint; modern JDK javadoc (8+) would fail
+			     the build on legacy HTML comments. -->
+			<arg value="-Xdoclint:none" />
 		</javadoc>
 	</target>
 
