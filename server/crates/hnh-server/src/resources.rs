@@ -234,6 +234,8 @@ pub mod wdg {
         I(i32),
         S(String),
         C(i32, i32),
+        /// RGBA color list element (CharWnd.FoodMeter consumes these).
+        Col(u8, u8, u8, u8),
     }
 
     fn push_args(m: &mut MessageBuf, args: &[ListVal]) {
@@ -247,6 +249,9 @@ pub mod wdg {
                 }
                 ListVal::C(x, y) => {
                     m.lcoord(*x, *y);
+                }
+                ListVal::Col(r, g, b, a) => {
+                    m.lcolor(*r, *g, *b, *a);
                 }
             }
         }

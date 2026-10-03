@@ -26,6 +26,11 @@ pub struct SavedPlayer {
     pub attrs: HashMap<String, i32>,
     /// Inventory stacks as (resource name, count, quality).
     pub inv: Vec<(String, u32, u8)>,
+    /// Parallel display labels for `inv` (server-sent food names). Entries
+    /// may be shorter than `inv` or absent (v1 saves): missing labels load
+    /// as empty strings. Kept additive so v1 files stay readable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inv_labels: Vec<String>,
 }
 
 /// Top-level save container. Bump VERSION on incompatible changes.
@@ -100,8 +105,15 @@ impl SaveStore {
     }
 
     /// Snapshot one online player. `inv_named` carries the inventory already
-    /// translated from process-local indices to resource names.
-    pub fn snapshot(&mut self, p: &Player, pos: (i32, i32), inv_named: Vec<(String, u32, u8)>) {
+    /// translated from process-local indices to resource names, with the
+    /// display labels parallel to the stacks.
+    pub fn snapshot(
+        &mut self,
+        p: &Player,
+        pos: (i32, i32),
+        inv_named: Vec<(String, u32, u8)>,
+        inv_labels: Vec<String>,
+    ) {
         self.players.insert(
             p.name.clone(),
             SavedPlayer {
@@ -113,6 +125,7 @@ impl SaveStore {
                 lp: p.lp,
                 attrs: p.attrs.clone(),
                 inv: inv_named,
+                inv_labels,
             },
         );
     }
@@ -155,11 +168,13 @@ mod tests {
                 lp: 12,
                 attrs: HashMap::from([("str".to_owned(), 14)]),
                 inv: Vec::new(),
+                fep: crate::craft::FepState::default(),
                 fight_target: None,
                 atk_cd: 0,
             },
             (123, -456),
             vec![("gfx/invobjs/stone".to_owned(), 3, 7)],
+            vec![String::new()],
         );
         store.flush(42).unwrap();
 
@@ -169,6 +184,7 @@ mod tests {
         assert_eq!(p.hp, 77);
         assert_eq!(p.lp, 12);
         assert_eq!(p.inv[0].0, "gfx/invobjs/stone");
+        assert_eq!(p.inv_labels.len(), 1);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -190,10 +206,12 @@ mod tests {
                 lp: 0,
                 attrs: HashMap::new(),
                 inv: Vec::new(),
+                fep: crate::craft::FepState::default(),
                 fight_target: None,
                 atk_cd: 0,
             },
             (0, 0),
+            Vec::new(),
             Vec::new(),
         );
         store.flush(42).unwrap();

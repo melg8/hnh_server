@@ -74,17 +74,40 @@ impl Species {
         }
     }
 
-    /// Loot dropped on death: (resource name, count).
-    pub fn loot(self) -> Vec<(&'static str, u32)> {
+    /// Loot dropped on death: (resource name, count, display label).
+    pub fn loot(self) -> Vec<(&'static str, u32, &'static str)> {
         match self {
-            Species::Deer | Species::Aurochs => {
-                vec![("gfx/invobjs/meat", 3), ("gfx/invobjs/hide", 2)]
-            }
-            Species::Cow => vec![("gfx/invobjs/meat", 4), ("gfx/invobjs/hide", 3)],
-            Species::Boar => vec![("gfx/invobjs/meat", 3)],
-            Species::Fox => vec![("gfx/invobjs/meat", 1), ("gfx/invobjs/tail", 1)],
-            Species::Wolf => vec![("gfx/invobjs/meat", 2)],
-            Species::Hare => vec![("gfx/invobjs/meat", 1)],
+            Species::Deer | Species::Aurochs => vec![
+                ("gfx/invobjs/meat", 3, self.meat_label()),
+                ("gfx/invobjs/hide", 2, ""),
+            ],
+            Species::Cow => vec![
+                ("gfx/invobjs/meat", 4, self.meat_label()),
+                ("gfx/invobjs/hide", 3, ""),
+            ],
+            Species::Boar => vec![("gfx/invobjs/meat", 3, self.meat_label())],
+            Species::Fox => vec![
+                ("gfx/invobjs/meat", 1, self.meat_label()),
+                ("gfx/invobjs/tail", 1, ""),
+            ],
+            Species::Wolf => vec![("gfx/invobjs/meat", 2, self.meat_label())],
+            Species::Hare => vec![("gfx/invobjs/meat", 1, self.meat_label())],
+        }
+    }
+
+    /// Server-sent display name for this species' raw meat. Values match
+    /// fep.conf keys so eating resolves FEPs (food-and-fep.md: the server's
+    /// item tooltip names must match the table keys). Wolf meat has no
+    /// legacy fep.conf entry; the empty label falls back to the resource
+    /// tooltip and grants no FEPs rather than inventing numbers.
+    pub fn meat_label(self) -> &'static str {
+        match self {
+            Species::Deer => "Raw Deer Meat",
+            Species::Cow | Species::Aurochs => "Beef",
+            Species::Boar => "Boar Meat",
+            Species::Fox => "Fox Meat",
+            Species::Hare => "Rabbit Meat",
+            Species::Wolf => "",
         }
     }
 
@@ -118,10 +141,12 @@ pub enum Kind {
         harvests: u8,
     },
     Stone,
-    /// Item lying on the ground.
+    /// Item lying on the ground. `label` carries the display name so food
+    /// keeps its fep.conf identity from ground to inventory.
     Drop {
         resname_idx: u16,
         ql: u8,
+        label: &'static str,
     },
 }
 
@@ -245,6 +270,17 @@ pub fn split_gob_id(id: GobId) -> (usize, u32) {
     ((id & 0xFFFF) as usize, ((id >> 16) & 0xFFFF) as u32)
 }
 
+/// One inventory stack. `label` is the server-sent display name (item
+/// widget tooltip, Item.name() precedence in food-and-fep.md); empty for
+/// non-food items whose resource tooltip the client resolves locally.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InvStack {
+    pub res: u16,
+    pub count: u32,
+    pub ql: u8,
+    pub label: &'static str,
+}
+
 /// Character vitals and attributes (docs/mechanics/character/*).
 #[derive(Debug, Clone)]
 pub struct Player {
@@ -261,8 +297,10 @@ pub struct Player {
     pub lp: i32,
     /// Base attributes (docs: str/agi/int/vit/con/psy/emp...).
     pub attrs: HashMap<String, i32>,
-    /// Inventory stacks: (resname_idx, count, ql).
-    pub inv: Vec<(u16, u32, u8)>,
+    /// Inventory stacks.
+    pub inv: Vec<InvStack>,
+    /// Food Event Point accumulators (integer tenths per attribute).
+    pub fep: crate::craft::FepState,
     /// Currently open fight target (gob id) or none.
     pub fight_target: Option<GobId>,
     /// Attack cooldown in ticks.
@@ -303,9 +341,26 @@ pub struct SessionOut {
     pub res: ResTable,
     /// Fightview window state (widget id + per-opponent relations).
     pub fight: crate::fight::FightState,
+    /// Open makewindow recipe id (`craft.rs::Recipe::id`), if any.
+    pub craft_recipe: Option<String>,
+    /// Widget id of the open makewindow, paired with `craft_recipe`.
+    pub craft_window: Option<u16>,
+    /// Inventory stack index whose right-click opened the flower menu,
+    /// paired with the `sm` widget id (eat flow).
+    pub item_menu: Option<(u16, usize)>,
+    /// Item widget id -> inventory stack index (iact routing).
+    pub item_wids: HashMap<u16, usize>,
 }
 
 impl SessionOut {
+    /// Widget id of the character sheet window, if created.
+    pub fn chr_window(&self) -> Option<u16> {
+        self.widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "chr")
+            .map(|(id, _)| *id)
+    }
+
     pub fn new_wid(&mut self, tag: &str) -> u16 {
         let id = self.next_wid;
         self.next_wid = self.next_wid.wrapping_add(1).max(1);

@@ -13,6 +13,7 @@ use tracing::{debug, info, trace, warn};
 use hnh_proto::consts::*;
 use hnh_proto::MessageBuf;
 
+use crate::craft::FepAttr;
 use crate::resources::wdg::{self, ListVal};
 use crate::state::*;
 
@@ -56,6 +57,11 @@ pub struct Game {
     populated: HashSet<(i32, i32)>,
     /// Character persistence store (loaded snapshots + live updates).
     pub save: crate::persist::SaveStore,
+    /// Parsed etc/needed/fep.conf (food -> FEP vector).
+    pub fep: crate::craft::FepTable,
+    /// Number of parallel grid-owner workers used by the tick (data-parallel
+    /// intent computation over SoA columns; apply stays on the game task).
+    pub workers: usize,
 }
 
 impl Game {
@@ -71,6 +77,27 @@ impl Game {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("../save/world.json"));
         let save = crate::persist::SaveStore::load(&save_path, seed);
+        // fep.conf ships with the repo (repo-root etc/); HNH_FEP_CONF moves
+        // it for tests. A missing file degrades to "no food resolves" rather
+        // than wedging the boot (food-and-fep.md server note 1).
+        let fep_path = std::env::var("HNH_FEP_CONF")
+            .unwrap_or_else(|_| "../etc/needed/fep.conf".to_owned());
+        let fep = match std::fs::read_to_string(&fep_path) {
+            Ok(text) => match crate::craft::FepTable::parse(&text) {
+                Ok(t) => {
+                    info!(path = %fep_path, foods = t.len(), "fep.conf loaded");
+                    t
+                }
+                Err(e) => {
+                    tracing::warn!(path = %fep_path, error = %e, "invalid fep.conf: food grants disabled");
+                    crate::craft::FepTable::default()
+                }
+            },
+            Err(e) => {
+                tracing::warn!(path = %fep_path, error = %e, "fep.conf unreadable: food grants disabled");
+                crate::craft::FepTable::default()
+            }
+        };
         Game {
             world: World::new(seed),
             sessions: HashMap::new(),
@@ -80,6 +107,8 @@ impl Game {
             next_sid: 1,
             populated: HashSet::new(),
             save,
+            fep,
+            workers: 1,
         }
     }
 
@@ -156,19 +185,24 @@ impl Game {
                 let inv_named: Vec<(String, u32, u8)> = p
                     .inv
                     .iter()
-                    .map(|(idx, count, ql)| {
+                    .map(|s| {
                         (
                             self.world
                                 .res
-                                .name(*idx)
+                                .name(s.res)
                                 .unwrap_or("gfx/invobjs/unknown")
                                 .to_owned(),
-                            *count,
-                            *ql,
+                            s.count,
+                            s.ql,
                         )
                     })
                     .collect();
-                self.save.snapshot(p, pos, inv_named);
+                let labels: Vec<String> = p
+                    .inv
+                    .iter()
+                    .map(|s| s.label.to_owned())
+                    .collect();
+                self.save.snapshot(p, pos, inv_named, labels);
             }
         }
         if let Err(e) = self.save.flush(seed) {
@@ -232,6 +266,10 @@ impl Game {
             mapreqs: HashSet::new(),
             res: crate::resources::ResTable::new(),
             fight: crate::fight::FightState::default(),
+            craft_recipe: None,
+            craft_window: None,
+            item_menu: None,
+            item_wids: HashMap::new(),
         };
         // Character selection UI (session-lifecycle.md 3.1).
         let w_bg = out.new_wid("img");
@@ -315,8 +353,10 @@ impl Game {
                     out.send(wdg::new_wdg(w, "inv", 400, 200, 0, &[]));
                 }
             }
-            (Some("slen"), _) | (None, "bud") | (None, "chr") => {}
+            (Some("slen"), "chr") => self.open_char_sheet(sid),
+            (Some("slen"), _) | (None, "bud") => {}
             (Some("inv"), "drop") => self.inv_drop(sid, wid, &args),
+            (Some("item"), "iact") => self.on_item_iact(sid, wid),
             (Some("mapview"), "click") => self.on_map_click(sid, &args),
             (Some("mapview"), "place") => {
                 debug!(sid, "placement confirmed (stub)");
@@ -328,12 +368,16 @@ impl Game {
                     .collect();
                 self.on_menu_action(sid, &action);
             }
+            (Some("make"), "make") => {
+                let mode = args.first().and_then(|a| a.as_int()).unwrap_or(0);
+                self.on_make_cmd(sid, mode);
+            }
             (Some("frv"), "click") | (Some("frv"), "give") => {
                 self.on_frv_msg(sid, name, &args);
             }
             (Some("sm"), "cl") => {
                 let choice = args.first().and_then(|a| a.as_int()).unwrap_or(-1);
-                debug!(sid, choice, "flower menu choice");
+                self.on_flower_choice(sid, wid, choice);
             }
             _ => {
                 trace!(sid, wid, name, "unhandled wdgmsg");
@@ -363,9 +407,19 @@ impl Game {
         // the saved world position overrides the fresh-spawn search.
         let saved_state = self.save.players.get(&name).map(|saved| {
             let mut restored_inv = Vec::with_capacity(saved.inv.len());
-            for (resname, count, ql) in &saved.inv {
+            for (n, (resname, count, ql)) in saved.inv.iter().enumerate() {
                 let idx = self.world.res.intern(leak_static(resname));
-                restored_inv.push((idx, *count, *ql));
+                let label = saved
+                    .inv_labels
+                    .get(n)
+                    .map(|s| leak_static(s))
+                    .unwrap_or("");
+                restored_inv.push(InvStack {
+                    res: idx,
+                    count: *count,
+                    ql: *ql,
+                    label,
+                });
             }
             (
                 saved.pos,
@@ -392,9 +446,11 @@ impl Game {
             }
             None => {
                 let mut fresh = HashMap::new();
-                fresh.insert("str".to_owned(), 10);
-                fresh.insert("agi".to_owned(), 10);
-                fresh.insert("int".to_owned(), 10);
+                // All eight base attributes (CharWnd lists str..psy; the
+                // FEP requirement is the highest of them).
+                for k in ["str", "agi", "int", "con", "per", "cha", "dex", "psy"] {
+                    fresh.insert(k.to_owned(), 10);
+                }
                 fresh.insert("hp".to_owned(), 100);
                 fresh.insert("energy".to_owned(), 100);
                 fresh.insert("lp".to_owned(), 0);
@@ -433,6 +489,7 @@ impl Game {
             lp,
             attrs,
             inv,
+            fep: crate::craft::FepState::default(),
             fight_target: None,
             atk_cd: 0,
         });
@@ -531,14 +588,30 @@ impl Game {
         // Global state.
         let (unix, dt, mp, yt) = self.world.astro();
         out.send(wdg::globlob(unix, dt, mp, yt, Some((255, 255, 255, 255))));
+        // Snapshot attributes before pushing cattr (player borrows end here).
+        let attr = |k: &str| self.world.player(sid).and_then(|p| p.attrs.get(k).copied()).unwrap_or(10);
         out.send(wdg::cattr(&[
-            ("pts", 100, 100),
-            ("hp", 100, 100),
-            ("str", 10, 10),
-            ("agi", 10, 10),
-            ("int", 10, 10),
+            ("pts", lp, lp),
+            ("hp", 100, hp),
+            ("energy", 100, energy),
+            ("stamina", 100, stamina),
+            ("str", attr("str"), attr("str")),
+            ("agi", attr("agi"), attr("agi")),
+            ("int", attr("int"), attr("int")),
+            ("con", attr("con"), attr("con")),
+            ("per", attr("per"), attr("per")),
+            ("cha", attr("cha"), attr("cha")),
+            ("dex", attr("dex"), attr("dex")),
+            ("psy", attr("psy"), attr("psy")),
         ]));
-        out.send(wdg::paginae_add(&["paginae/act/add", "paginae/add/study"]));
+        // Menu paginae: base actions plus every implemented craft recipe
+        // (RMSG_PAGINAE; parents resolve from the served resource pack).
+        let mut pages: Vec<&'static str> = vec!["paginae/act/add", "paginae/add/study"];
+        pages.push("paginae/craft/roastmeat");
+        for r in crate::craft::RECIPES {
+            pages.push(r.pagina);
+        }
+        out.send(wdg::paginae_add(&pages));
         info!(sid, %name, gob, "player entered world");
     }
 
@@ -963,7 +1036,7 @@ impl Game {
                     };
                     self.world.gobs.frame[tslot] += 1;
                     let pos = self.world.gobs.pos[tslot];
-                    self.spawn_drop_near(pos, "gfx/invobjs/log", 1, 10);
+                    self.spawn_drop_near(pos, "gfx/invobjs/log", 10, "");
                     if let Some(p) = self.world.player_mut(sid) {
                         p.lp += 5;
                     }
@@ -980,7 +1053,7 @@ impl Game {
             Kind::Stone => {
                 let pos = self.world.gobs.pos[tslot];
                 self.world.gobs.kill(target);
-                self.spawn_drop_near(pos, "gfx/invobjs/stone", 1, 10);
+                self.spawn_drop_near(pos, "gfx/invobjs/stone", 10, "");
                 if let Some(p) = self.world.player_mut(sid) {
                     p.lp += 3;
                 }
@@ -991,7 +1064,12 @@ impl Game {
                 let res_idx = self.world.gobs.res_idx[tslot];
                 if let Some(drop) = self.world.gobs.kind[tslot].drop_info() {
                     if let Some(p) = self.world.player_mut(sid) {
-                        p.inv.push((res_idx, drop.1 as u32, drop.2));
+                        p.inv.push(InvStack {
+                            res: res_idx,
+                            count: drop.1 as u32,
+                            ql: drop.2,
+                            label: drop.3,
+                        });
                     }
                 }
                 self.world.gobs.kill(target);
@@ -1142,7 +1220,13 @@ impl Game {
         }
     }
 
-    fn spawn_drop_near(&mut self, at: (i32, i32), resname: &'static str, _count: u8, _ql: u8) {
+    fn spawn_drop_near(
+        &mut self,
+        at: (i32, i32),
+        resname: &'static str,
+        ql: u8,
+        label: &'static str,
+    ) {
         let res_idx = self.world.res.intern(resname);
         let jitter = |w: &mut World| (w.next_ai_rand(7) - 3) * 11;
         let jx = jitter(&mut self.world);
@@ -1150,7 +1234,8 @@ impl Game {
         let id = self.world.gobs.spawn(
             Kind::Drop {
                 resname_idx: res_idx,
-                ql: 10,
+                ql,
+                label,
             },
             (at.0 + jx, at.1 + jy),
             res_idx,
@@ -1228,7 +1313,7 @@ impl Game {
         let Some(inv_wid) = self.inv_window(sid) else {
             return;
         };
-        let items: Vec<(u16, u32, u8)> = self
+        let items: Vec<InvStack> = self
             .world
             .player(sid)
             .map(|p| p.inv.clone())
@@ -1245,14 +1330,16 @@ impl Game {
         for id in old {
             out.send(wdg::dst_wdg(id));
         }
-        for (n, (res_idx, count, ql)) in items.iter().enumerate() {
-            let res_name = self.world.res.name(*res_idx).unwrap_or("gfx/invobjs/stone");
-            let wire = out.res.wire_named(*res_idx, res_name);
+        out.item_wids.clear();
+        for (n, stack) in items.iter().enumerate() {
+            let res_name = self.world.res.name(stack.res).unwrap_or("gfx/invobjs/stone");
+            let wire = out.res.wire_named(stack.res, res_name);
             if let Some((name, ver)) = out.res.pending_announce(wire) {
                 out.send(wdg::resid(wire, name, ver));
                 out.res.mark_announced(wire);
             }
             let w = out.new_wid("item");
+            out.item_wids.insert(w, n);
             let x = 15 + (n as i32 % 4) * 40;
             let y = 15 + (n as i32 / 4) * 40;
             out.send(wdg::new_wdg(
@@ -1263,10 +1350,12 @@ impl Game {
                 inv_wid,
                 &[
                     ListVal::I(wire as i32),
-                    ListVal::I(*ql as i32),
+                    ListVal::I(stack.ql as i32),
                     ListVal::I(0),
-                    ListVal::S(String::new()),
-                    ListVal::I(*count as i32),
+                    // Server tooltip = display name; food-and-fep.md Item.name()
+                    // precedence makes this the fep.conf lookup key for food.
+                    ListVal::S(stack.label.to_owned()),
+                    ListVal::I(stack.count as i32),
                 ],
             ));
         }
@@ -1285,13 +1374,436 @@ impl Game {
             return;
         };
         let pos = self.world.gobs.pos[slot];
-        let name = self.world.res.name(stack.0).unwrap_or("gfx/invobjs/stone");
-        self.spawn_drop_near(pos, leak_static(name), stack.1 as u8, stack.2);
+        let name = self.world.res.name(stack.res).unwrap_or("gfx/invobjs/stone");
+        self.spawn_drop_near(pos, leak_static(name), stack.ql, stack.label);
         self.refresh_inventory(sid);
     }
 
+    // ------------------------------------------------------------------
+    // Crafting (crafting-and-building.md: making protocol)
+    // ------------------------------------------------------------------
+
     fn on_menu_action(&mut self, sid: SessionId, action: &[String]) {
-        debug!(sid, ?action, "menu action");
+        // Craft leaves send act("craft", <recipe-id>) via MenuGrid.
+        if action.len() >= 2 && action[0] == "craft" {
+            let recipe_id = action[1].as_str();
+            // The roast pagina carries ad ["craft", "roast"]; it maps to a
+            // dynamic recipe resolved per attempt (any raw meat in scope).
+            let known = recipe_id == "roast"
+                || crate::craft::RECIPES.iter().any(|r| r.id == recipe_id);
+            if !known {
+                info!(sid, recipe = recipe_id, "unknown craft id: ignoring");
+                return;
+            }
+            self.open_make_window(sid, recipe_id);
+        } else {
+            debug!(sid, ?action, "menu action");
+        }
+    }
+
+    /// Open the `make` widget for a recipe and push its `pop` contents:
+    /// a flat (wire-id, count) list, inputs terminated by -1, then outputs.
+    fn open_make_window(&mut self, sid: SessionId, recipe_id: &str) {
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        // One crafting dialog at a time (UI.make_window is a single slot).
+        if let Some(old) = out.craft_window {
+            out.send(wdg::dst_wdg(old));
+            out.craft_window = None;
+            out.craft_recipe = None;
+        }
+        let (title, pop): (&str, Vec<ListVal>) = if recipe_id == "roast" {
+            ("Roasted Meat", Vec::new())
+        } else {
+            match crate::craft::RECIPES.iter().find(|r| r.id == recipe_id) {
+                None => return,
+                Some(r) => {
+                    let mut pop = Vec::new();
+                    for (resname, count) in r.inputs {
+                        let gidx = self.world.res.intern(resname);
+                        let wire = out.res.wire_named(gidx, resname);
+                        if let Some((n, v)) = out.res.pending_announce(wire) {
+                            out.send(wdg::resid(wire, n, v));
+                            out.res.mark_announced(wire);
+                        }
+                        pop.push(ListVal::I(wire as i32));
+                        pop.push(ListVal::I(*count as i32));
+                    }
+                    pop.push(ListVal::I(-1));
+                    for (resname, count) in r.outputs {
+                        let gidx = self.world.res.intern(resname);
+                        let wire = out.res.wire_named(gidx, resname);
+                        if let Some((n, v)) = out.res.pending_announce(wire) {
+                            out.send(wdg::resid(wire, n, v));
+                            out.res.mark_announced(wire);
+                        }
+                        pop.push(ListVal::I(wire as i32));
+                        pop.push(ListVal::I(*count as i32));
+                    }
+                    (r.name, pop)
+                }
+            }
+        };
+        // Dynamic roast pop: one input (first raw meat present) and its
+        // mapped output; rebuilt per attempt when the raw stack changes.
+        let pop = if recipe_id == "roast" {
+            let meat = self
+                .world
+                .player(sid)
+                .map(|p| {
+                    p.inv
+                        .iter()
+                        .find_map(|s| crate::craft::roast_result(s.label).map(|out| (s.label, out)))
+                })
+                .unwrap_or(None);
+            match meat {
+                Some((raw, roasted)) => {
+                    let mut pop = Vec::new();
+                    for resname in [raw, roasted] {
+                        let gidx = self.world.res.intern("gfx/invobjs/meat");
+                        let wire = out.res.wire_named(gidx, "gfx/invobjs/meat");
+                        if let Some((n, v)) = out.res.pending_announce(wire) {
+                            out.send(wdg::resid(wire, n, v));
+                            out.res.mark_announced(wire);
+                        }
+                        pop.push(ListVal::I(wire as i32));
+                        pop.push(ListVal::I(1));
+                        if resname == raw {
+                            pop.push(ListVal::I(-1));
+                        }
+                    }
+                    pop
+                }
+                None => vec![ListVal::I(-1)],
+            }
+        } else {
+            pop
+        };
+        let w = out.new_wid("make");
+        out.send(wdg::new_wdg(w, "make", 350, 200, 0, &[ListVal::S(title.to_owned())]));
+        out.send(wdg::wdgmsg(w, "pop", &pop));
+        out.craft_window = Some(w);
+        out.craft_recipe = Some(recipe_id.to_owned());
+        info!(sid, recipe = recipe_id, "makewindow opened");
+    }
+
+    /// Client pressed Craft (mode 0) or Craft All (mode 1) on the make
+    /// widget. Loop while preconditions hold; stop after the last success.
+    fn on_make_cmd(&mut self, sid: SessionId, mode: i32) {
+        let Some(recipe_id) = self.sessions.get(&sid).and_then(|o| o.craft_recipe.clone()) else {
+            return;
+        };
+        let max_iter = if mode == 1 { 64 } else { 1 };
+        let mut made = 0u32;
+        for _ in 0..max_iter {
+            if !self.craft_once(sid, &recipe_id) {
+                break;
+            }
+            made += 1;
+        }
+        if made > 0 {
+            self.refresh_inventory(sid);
+            // Re-push pop so the window reflects any roast-input change.
+            self.open_make_window(sid, &recipe_id);
+        }
+        info!(sid, recipe = recipe_id, made, "craft batch done");
+    }
+
+    /// One craft attempt: validate, consume (lowest quality first), produce.
+    /// Returns false when a precondition fails (ends batch crafting).
+    fn craft_once(&mut self, sid: SessionId, recipe_id: &str) -> bool {
+        if recipe_id == "roast" {
+            return self.roast_once(sid);
+        }
+        let Some(recipe) = crate::craft::RECIPES.iter().find(|r| r.id == recipe_id) else {
+            return false;
+        };
+        let Some(pidx) = self.world.by_session.get(&sid).copied() else {
+            return false;
+        };
+        // Validate: every input present in the required quantity.
+        for (resname, need) in recipe.inputs {
+            let gidx = self.world.res.intern(resname);
+            let have: u32 = self.world.players[pidx]
+                .inv
+                .iter()
+                .filter(|s| s.res == gidx)
+                .map(|s| s.count)
+                .sum();
+            if have < *need {
+                debug!(sid, recipe = recipe.id, resname, "missing ingredient");
+                return false;
+            }
+        }
+        // Consume lowest-quality-first so Craft All rolls per-iteration
+        // quality from the actually consumed items (crafting doc).
+        let mut consumed: Vec<(u8, u32)> = Vec::new(); // (ql, units)
+        for (resname, need) in recipe.inputs {
+            let gidx = self.world.res.intern(resname);
+            let mut remaining = *need;
+            while remaining > 0 {
+                // Find the lowest-quality non-empty stack of this resource.
+                let slot = {
+                    let inv = &self.world.players[pidx].inv;
+                    inv.iter().enumerate().fold(None::<usize>, |best, (i, s)| {
+                        if s.res == gidx && s.count > 0 {
+                            match best {
+                                None => Some(i),
+                                Some(b) if s.ql < inv[b].ql => Some(i),
+                                other => other,
+                            }
+                        } else {
+                            best
+                        }
+                    })
+                };
+                let Some(slot) = slot else {
+                    // Validation passed but stacks emptied mid-loop: fail safe.
+                    return false;
+                };
+                let stack = &mut self.world.players[pidx].inv[slot];
+                let take = remaining.min(stack.count);
+                stack.count -= take;
+                consumed.push((stack.ql, take));
+                remaining -= take;
+            }
+        }
+        self.world.players[pidx].inv.retain(|s| s.count > 0);
+        // Weighted-average output quality (loftar: sum(q*w)/sum(w)).
+        let total_w: u32 = consumed.iter().map(|(_, w)| w).sum();
+        let qsum: u32 = consumed.iter().map(|(q, w)| *q as u32 * w).sum();
+        let mut q = if total_w > 0 { (qsum / total_w) as i32 } else { 10 };
+        // Softcap by the crafter's relevant attribute (skill stand-in):
+        // q = (q + attr)/2 when attr < q (crafting-and-building.md).
+        let attr_val = self.world.players[pidx]
+            .attrs
+            .get(recipe.softcap_attr)
+            .copied()
+            .unwrap_or(10);
+        if attr_val < q {
+            q = (attr_val + q) / 2;
+        }
+        let out_q = q.clamp(1, 255) as u8;
+        for (resname, count) in recipe.outputs {
+            let gidx = self.world.res.intern(resname);
+            self.world.players[pidx].inv.push(InvStack {
+                res: gidx,
+                count: *count,
+                ql: out_q,
+                label: "",
+            });
+        }
+        // First-time discoveries grant LP (learning doc); keep it modest.
+        self.world.players[pidx].lp += 1;
+        self.push_cattr(sid);
+        true
+    }
+
+    /// One roast attempt: find a raw meat stack, convert one unit.
+    fn roast_once(&mut self, sid: SessionId) -> bool {
+        let Some(pidx) = self.world.by_session.get(&sid).copied() else {
+            return false;
+        };
+        let pos = self
+            .world
+            .players[pidx]
+            .inv
+            .iter()
+            .position(|s| crate::craft::roast_result(s.label).is_some() && s.count > 0);
+        let Some(pos) = pos else {
+            debug!(sid, "roast: no raw meat in inventory");
+            return false;
+        };
+        let stack = &mut self.world.players[pidx].inv[pos];
+        let roasted = crate::craft::roast_result(stack.label).unwrap_or(stack.label);
+        stack.count -= 1;
+        let out_ql = stack.ql;
+        let raw = stack.label;
+        if stack.count == 0 {
+            self.world.players[pidx].inv.remove(pos);
+        }
+        self.world.players[pidx].inv.push(InvStack {
+            res: self.world.res.intern("gfx/invobjs/meat"),
+            count: 1,
+            ql: out_ql,
+            label: roasted,
+        });
+        debug!(sid, raw, roasted, "roasted one meat");
+        true
+    }
+
+    // ------------------------------------------------------------------
+    // Eating (food-and-fep.md: eat flow + FEP accumulation)
+    // ------------------------------------------------------------------
+
+    /// Item right-click (`iact`): open a flower menu for foods.
+    fn on_item_iact(&mut self, sid: SessionId, wid: u16) {
+        let stack_idx = self
+            .sessions
+            .get(&sid)
+            .and_then(|o| o.item_wids.get(&wid).copied());
+        let Some(stack_idx) = stack_idx else {
+            return;
+        };
+        let label = self
+            .world
+            .player(sid)
+            .and_then(|p| p.inv.get(stack_idx))
+            .map(|s| s.label)
+            .unwrap_or("");
+        if label.is_empty() || self.fep.get(label).is_none() {
+            debug!(sid, label, "iact on non-food item: no menu");
+            return;
+        }
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        // One flower menu at a time per session.
+        if let Some((old, _)) = out.item_menu {
+            out.send(wdg::dst_wdg(old));
+        }
+        let w = out.new_wid("sm");
+        out.send(wdg::new_wdg(w, "sm", -1, -1, 0, &[ListVal::S("Eat".to_owned())]));
+        out.item_menu = Some((w, stack_idx));
+    }
+
+    /// Flower menu petal click: `cl <i>`; 0 = Eat.
+    fn on_flower_choice(&mut self, sid: SessionId, wid: u16, choice: i32) {
+        let pending = self
+            .sessions
+            .get(&sid)
+            .and_then(|o| o.item_menu)
+            .filter(|(w, _)| *w == wid);
+        let Some((_, stack_idx)) = pending else {
+            return;
+        };
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        out.item_menu = None;
+        out.send(wdg::dst_wdg(wid));
+        if choice != 0 {
+            // Confirm the cancel client-side (FlowerMenu.uimsg "cancel").
+            out.send(wdg::wdgmsg(wid, "cancel", &[]));
+            return;
+        }
+        out.send(wdg::wdgmsg(wid, "act", &[ListVal::I(0)]));
+        self.eat_item(sid, stack_idx);
+    }
+
+    /// Apply one unit of food: energy fill, FEP grant, HHP healing,
+    /// attribute gain on reaching the requirement (fandom FEP loop).
+    fn eat_item(&mut self, sid: SessionId, stack_idx: usize) {
+        let Some(pidx) = self.world.by_session.get(&sid).copied() else {
+            return;
+        };
+        let Some(stack) = self.world.players[pidx].inv.get(stack_idx).copied() else {
+            return;
+        };
+        let Some(feps) = self.fep.get(stack.label) else {
+            debug!(sid, label = stack.label, "eat: no fep entry");
+            return;
+        };
+        let total_fep: f32 = feps.iter().filter(|(a, _)| *a != FepAttr::Hhp).map(|(_, v)| v).sum();
+        let hhp: f32 = feps
+            .iter()
+            .find(|(a, _)| *a == FepAttr::Hhp)
+            .map(|(_, v)| *v)
+            .unwrap_or(0.0);
+        // Consume one unit, then roll the attribute draw (single world
+        // borrow at a time; the RNG lives on World).
+        let roll = self.world.next_ai_rand(1_000_000) as u32;
+        {
+            let inv = &mut self.world.players[pidx].inv;
+            inv[stack_idx].count -= 1;
+            if inv[stack_idx].count == 0 {
+                inv.remove(stack_idx);
+            }
+        }
+        let p = &mut self.world.players[pidx];
+        // Energy fill: server policy (legacy per-food fill unknown,
+        // food-and-fep.md open question 1) scaled by the food's FEP total.
+        let fill = (10.0f32 + total_fep * 1.5).min(60.0) as i32;
+        p.energy = (p.energy + fill).min(100);
+        // HHP heals the hard pool directly (fep.conf semantics, doc note 10).
+        if hhp > 0.0 {
+            p.hp = (p.hp + hhp.round() as i32).min(100);
+        }
+        // Grant FEPs (tenths), then check the attribute requirement.
+        p.fep.grant(feps, stack.ql);
+        let cap = p
+            .attrs
+            .iter()
+            .filter(|(k, _)| crate::craft::FepAttr::from_key(&k.to_uppercase()).is_some())
+            .map(|(_, v)| *v)
+            .max()
+            .unwrap_or(10);
+        // Pre-rolled weighted draw (single call in pick_gain).
+        let mut rng = || roll;
+        if p.fep.total() >= cap * 10 {
+            if let Some(gain) = p.fep.pick_gain(&mut rng) {
+                *p.attrs.entry(gain.to_owned()).or_insert(10) += 1;
+                info!(sid, attr = gain, "attribute raised by food");
+            }
+            p.fep.reset();
+        }
+        self.refresh_inventory(sid);
+        self.push_food_msg(sid);
+        self.push_cattr(sid);
+        info!(sid, label = stack.label, fill, "ate food");
+    }
+
+    /// Push the `food` uimsg on the chr widget: cap in tenths, then
+    /// (id, tenths, color) triples (CharWnd.FoodMeter.update contract).
+    fn push_food_msg(&mut self, sid: SessionId) {
+        let chr_wid = match self.sessions.get(&sid).and_then(|o| o.chr_window()) {
+            Some(w) => w,
+            None => return,
+        };
+        let Some(p) = self.world.player(sid) else {
+            return;
+        };
+        let cap = p
+            .attrs
+            .iter()
+            .filter(|(k, _)| crate::craft::FepAttr::from_key(&k.to_uppercase()).is_some())
+            .map(|(_, v)| *v)
+            .max()
+            .unwrap_or(10)
+            * 10;
+        let mut entries: Vec<(&'static str, i32)> =
+            p.fep.acc.iter().map(|(k, v)| (*k, *v)).collect();
+        entries.sort_unstable_by_key(|(k, _)| *k);
+        let mut args: Vec<ListVal> = vec![ListVal::I(cap)];
+        for (id, tenths) in entries {
+            let attr = FepAttr::from_key(&id.to_uppercase()).unwrap_or(FepAttr::Str);
+            let (r, g, b, a) = attr.color();
+            args.push(ListVal::S(id.to_owned()));
+            args.push(ListVal::I(tenths));
+            args.push(ListVal::Col(r, g, b, a));
+        }
+        if let Some(out) = self.sessions.get_mut(&sid) {
+            out.send(wdg::wdgmsg(chr_wid, "food", &args));
+        }
+    }
+
+    /// Open the character sheet window (`chr`) and feed its FEP bar.
+    fn open_char_sheet(&mut self, sid: SessionId) {
+        let wid = {
+            let Some(out) = self.sessions.get_mut(&sid) else {
+                return;
+            };
+            if let Some(w) = out.chr_window() {
+                w
+            } else {
+                let w = out.new_wid("chr");
+                out.send(wdg::new_wdg(w, "chr", 30, 30, 0, &[]));
+                w
+            }
+        };
+        let _ = wid;
+        self.push_food_msg(sid);
     }
 
     // ------------------------------------------------------------------
@@ -1775,9 +2287,9 @@ impl Game {
             self.broadcast_retract(target);
             self.world.animal_gobs.retain(|&g| g != target);
             self.world.animal_fights.remove(&target);
-            for (res, count) in species.loot() {
+            for (res, count, label) in species.loot() {
                 for _ in 0..count {
-                    self.spawn_drop_near(pos, res, 1, 10);
+                    self.spawn_drop_near(pos, res, 10, label);
                 }
             }
             self.world.players[pidx].lp += 10;
@@ -1915,19 +2427,24 @@ impl Game {
         let inv_named: Vec<(String, u32, u8)> = p
             .inv
             .iter()
-            .map(|(idx, count, ql)| {
+            .map(|s| {
                 (
                     self.world
                         .res
-                        .name(*idx)
+                        .name(s.res)
                         .unwrap_or("gfx/invobjs/unknown")
                         .to_owned(),
-                    *count,
-                    *ql,
+                    s.count,
+                    s.ql,
                 )
             })
             .collect();
-        self.save.snapshot(p, pos, inv_named);
+        let labels: Vec<String> = p
+            .inv
+            .iter()
+            .map(|s| s.label.to_owned())
+            .collect();
+        self.save.snapshot(p, pos, inv_named, labels);
     }
 
     fn on_session_closed(&mut self, sid: SessionId) {
@@ -1975,10 +2492,14 @@ fn leak_static(name: &str) -> &'static str {
 }
 
 impl Kind {
-    /// Extract (resname_idx, count, ql) from a Drop kind.
-    pub fn drop_info(&self) -> Option<(u16, u8, u8)> {
+    /// Extract (resname_idx, count, ql, display label) from a Drop kind.
+    pub fn drop_info(&self) -> Option<(u16, u8, u8, &'static str)> {
         match self {
-            Kind::Drop { resname_idx, ql } => Some((*resname_idx, 1, *ql)),
+            Kind::Drop {
+                resname_idx,
+                ql,
+                label,
+            } => Some((*resname_idx, 1, *ql, label)),
             _ => None,
         }
     }
