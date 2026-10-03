@@ -1364,9 +1364,6 @@ impl Game {
             }
             let action = match nearest {
                 Some((pgob, dist)) if species.aggressive() && dist < aggro => {
-                    if self.saturated && tick.is_multiple_of(200) {
-                        info!(?species, id, ?pgob, dist, "predator chasing");
-                    }
                     AnimalAction::Chase(pgob)
                 }
                 Some((_pgob, dist)) if !species.aggressive() && dist < 200 => AnimalAction::Flee,
@@ -1586,11 +1583,21 @@ impl Game {
                 // Attack weight scales 0.5..2.0 with advantage (balance).
                 let weight = (rel.balance.clamp(-5, 5) as f32) * 0.1 + 1.0;
                 let def_chip = (crate::fight::SWING_DEF_DMG as f32 * weight) as i32;
-                let breaking = rel.defence <= crate::fight::OPENING_THRESHOLD;
-                rel.defence = (rel.defence - def_chip).max(0);
-                let landed = breaking || rel.defence <= crate::fight::OPENING_THRESHOLD;
+                // Chip the animal's defence in the World store (the mirror
+                // source); rel.defence streams it to the client.
+                let (_, landed) = {
+                    let Some(af) = self.world.animal_fights.get_mut(&target) else {
+                        continue;
+                    };
+                    let breaking = af.def <= crate::fight::OPENING_THRESHOLD;
+                    af.def = (af.def - def_chip).max(0);
+                    let landed = breaking || af.def <= crate::fight::OPENING_THRESHOLD;
+                    if landed {
+                        af.def = crate::fight::BAR_FULL;
+                    }
+                    (breaking, landed)
+                };
                 if landed {
-                    rel.defence = crate::fight::BAR_FULL;
                     let str = *self.world.players[pidx].attrs.get("str").unwrap_or(&10);
                     swing = Some((5 * str / 10).max(1));
                 }
@@ -2033,6 +2040,101 @@ mod tests {
             }
         }
         assert!(fought, "predator must engage a player in reach");
+    }
+
+    /// A stationary player next to a predator must land damage through
+    /// openings and eventually kill it (full combat kill-cycle check).
+    #[tokio::test]
+    async fn stationary_player_kills_predator() {
+        let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut g = Game::new(42, cmd_rx, net_rx, true);
+        let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, _raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        g.session_connected(1, tx, raw_tx);
+        let wid = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "charlist")
+            .map(|(k, _)| *k)
+            .expect("charlist widget");
+        g.on_wdgmsg(
+            1,
+            wid,
+            "play",
+            vec![hnh_proto::ListArg::Str("hunter".to_owned())],
+        );
+        g.on_mapreq(1, (0, 0));
+        let (pred_id, pred_slot) = g
+            .world
+            .animal_gobs
+            .iter()
+            .filter_map(|&id| {
+                g.world.gobs.get(id).map(|slot| {
+                    let aggro = matches!(
+                        g.world.gobs.kind[slot],
+                        Kind::Animal { species } if species.aggressive()
+                    );
+                    if aggro {
+                        Some((id, slot))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .flatten()
+            .next()
+            .expect("saturated grid spawns predators");
+        let (ax, ay) = g.world.gobs.pos[pred_slot];
+        // Leave exactly one predator alive so the fight dynamics are
+        // deterministic (no pack target swapping).
+        let keep = pred_id;
+        let others: Vec<GobId> = g
+            .world
+            .animal_gobs
+            .iter()
+            .copied()
+            .filter(|&id| id != keep)
+            .collect();
+        for id in others {
+            g.world.gobs.kill(id);
+        }
+        g.world.animal_gobs.retain(|&id| id == keep);
+        let pgob = g.world.players[0].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        g.world.gobs.pos[pslot] = (ax + 5, ay);
+        let mut killed = false;
+        let mut saw_damage = false;
+        // Track the predator currently engaged (the dense pack may swap
+        // targets as other wolves wander into reach).
+        for tick in 0..3000 {
+            if tick % 4 == 0 {
+                // Hold position next to the predator (stationary player).
+                g.world.gobs.pos[pslot] = (ax + 5, ay);
+            }
+            g.tick();
+            // The target may vanish (killed): check both paths.
+            if !g.world.gobs.alive[pred_slot] {
+                killed = true;
+                break;
+            }
+            let engaged = g.world.players[0].fight_target;
+            if let Some(tid) = engaged {
+                if let Some(tslot) = g.world.gobs.get(tid) {
+                    if g.world.gobs.hp[tslot] < g.world.gobs.max_hp[tslot] {
+                        saw_damage = true;
+                    }
+                }
+            }
+        }
+        assert!(saw_damage, "damage must land through openings");
+        assert!(
+            killed,
+            "stationary player must kill a predator in 3000 ticks"
+        );
     }
 
     fn predator_slot(g: &Game) -> usize {
