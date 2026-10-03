@@ -41,15 +41,24 @@ pub struct MessageBuf {
 
 impl MessageBuf {
     pub fn new() -> Self {
-        Self { buf: Vec::with_capacity(256), read: 0 }
+        Self {
+            buf: Vec::with_capacity(256),
+            read: 0,
+        }
     }
 
     pub fn with_capacity(cap: usize) -> Self {
-        Self { buf: Vec::with_capacity(cap), read: 0 }
+        Self {
+            buf: Vec::with_capacity(cap),
+            read: 0,
+        }
     }
 
     pub fn from_slice(data: &[u8]) -> Self {
-        Self { buf: data.to_vec(), read: 0 }
+        Self {
+            buf: data.to_vec(),
+            read: 0,
+        }
     }
 
     // ----- writers -----
@@ -134,7 +143,10 @@ impl MessageBuf {
 
     fn need(&self, n: usize) -> Result<()> {
         if self.read + n > self.buf.len() {
-            Err(MsgError::Eom { offset: self.read, len: self.buf.len() })
+            Err(MsgError::Eom {
+                offset: self.read,
+                len: self.buf.len(),
+            })
         } else {
             Ok(())
         }
@@ -182,7 +194,10 @@ impl MessageBuf {
         }
         if self.read >= self.buf.len() {
             self.read = start;
-            return Err(MsgError::Eom { offset: start, len: self.buf.len() });
+            return Err(MsgError::Eom {
+                offset: start,
+                len: self.buf.len(),
+            });
         }
         let s = std::str::from_utf8(&self.buf[start..self.read])
             .map_err(|_| MsgError::InvalidUtf8)?
@@ -220,8 +235,11 @@ impl MessageBuf {
                 let a = self.u8()?;
                 Ok(Some(ListArg::Color(r, g, b, a)))
             }
-            other => Err(MsgError::Eom { offset: self.read - 1, len: self.buf.len() })
-                .map_err(|_| MsgError::TooLarge(other as usize)),
+            other => Err(MsgError::Eom {
+                offset: self.read - 1,
+                len: self.buf.len(),
+            })
+            .map_err(|_| MsgError::TooLarge(other as usize)),
         }
     }
 
@@ -293,7 +311,11 @@ mod tests {
     #[test]
     fn roundtrip_primitives() {
         let mut m = MessageBuf::new();
-        m.uint8(0xAB).uint16(0xBEEF).int32(-123456).coord(-100, 250).string("Haven");
+        m.uint8(0xAB)
+            .uint16(0xBEEF)
+            .int32(-123456)
+            .coord(-100, 250)
+            .string("Haven");
         let mut r = MessageBuf::from_slice(m.as_slice());
         assert_eq!(r.u8().unwrap(), 0xAB);
         assert_eq!(r.u16().unwrap(), 0xBEEF);
@@ -306,7 +328,11 @@ mod tests {
     #[test]
     fn roundtrip_typed_list() {
         let mut m = MessageBuf::new();
-        m.lint(-7).lstr("play").lcoord(1, 2).lcolor(255, 0, 128, 32).lend();
+        m.lint(-7)
+            .lstr("play")
+            .lcoord(1, 2)
+            .lcolor(255, 0, 128, 32)
+            .lend();
         let mut r = MessageBuf::from_slice(m.as_slice());
         let l = r.list().unwrap();
         assert_eq!(l[0], ListArg::Int(-7));

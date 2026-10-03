@@ -43,12 +43,12 @@ impl JavaRandom {
     pub fn next_bounded(&mut self, bound: i32) -> i32 {
         debug_assert!(bound > 0, "BUG: bound must be positive");
         if bound & (bound - 1) == 0 {
-            (bound as i64 * self.next(31) as i64 >> 31) as i32
+            (((bound as i64) * (self.next(31) as i64)) >> 31) as i32
         } else {
             loop {
                 let bits = self.next(31);
                 let val = bits % bound;
-                if (bits as i32).wrapping_sub(val).wrapping_add(bound - 1) >= 0 {
+                if bits.wrapping_sub(val).wrapping_add(bound - 1) >= 0 {
                     return val;
                 }
             }

@@ -146,7 +146,11 @@ impl WorldGen {
         let m = self.moisture.fbm(fx / 90.0, fy / 90.0, 4, 2.0, 0.5);
 
         if e < 0.38 + r * 0.02 {
-            return if e < 0.335 { tile::DEEP_WATER } else { tile::WATER };
+            return if e < 0.335 {
+                tile::DEEP_WATER
+            } else {
+                tile::WATER
+            };
         }
         if e > 0.78 {
             return if e > 0.83 { tile::MOUNTAIN } else { tile::CAVE };
@@ -191,8 +195,15 @@ impl WorldGen {
                 tiles[Grid::idx(x, y)] = self.tile_at(tx as i32, ty as i32);
             }
         }
-        let mnm = format!("{:016x}", hash64(self.seed ^ hash64((gx as u64) << 32) ^ (gy as u64)));
-        Grid { gc: (gx, gy), tiles, mnm }
+        let mnm = format!(
+            "{:016x}",
+            hash64(self.seed ^ hash64((gx as u64) << 32) ^ (gy as u64))
+        );
+        Grid {
+            gc: (gx, gy),
+            tiles,
+            mnm,
+        }
     }
 }
 

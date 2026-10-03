@@ -34,7 +34,12 @@ pub async fn run(count: usize) {
                 ok += 1;
             }
         }
-        info!(connected = ok, total = count, elapsed_secs = start.elapsed().as_secs(), "bot cohort finished");
+        info!(
+            connected = ok,
+            total = count,
+            elapsed_secs = start.elapsed().as_secs(),
+            "bot cohort finished"
+        );
     });
 }
 
@@ -59,14 +64,19 @@ fn bot_session(idx: usize) -> bool {
 
     // --- handshake ---
     let mut sess = hnh_proto::MessageBuf::new();
-    sess.uint8(MSG_SESS).uint16(1).string("Haven").uint16(PVER).string(&name).bytes(&cookie);
+    sess.uint8(MSG_SESS)
+        .uint16(1)
+        .string("Haven")
+        .uint16(PVER)
+        .string(&name)
+        .bytes(&cookie);
     let sess = sess.finish();
     let start = Instant::now();
     let mut accepted = false;
     while start.elapsed() < Duration::from_secs(10) {
         let _ = sock.send_to(&sess, server);
         let mut buf = [0u8; 1500];
-        if let Ok((n, _)) = sock.recv_from(&mut buf) {
+        if let Ok((_n, _)) = sock.recv_from(&mut buf) {
             if buf[0] == MSG_SESS {
                 if buf.len() > 1 && buf[1] == 0 {
                     accepted = true;
@@ -83,7 +93,9 @@ fn bot_session(idx: usize) -> bool {
 
     // --- bootstrap: collect widgets until mapview appears, then play ---
     let boot = bootstrap(&sock, &mut rel_tx, &mut rel_rx, server, &name);
-    let Some(mapview) = boot.mapview else { return false };
+    let Some(mapview) = boot.mapview else {
+        return false;
+    };
 
     // --- behavior loop: random walks for up to 10 minutes ---
     let behavior_end = Instant::now() + Duration::from_secs(600);
@@ -98,8 +110,16 @@ fn bot_session(idx: usize) -> bool {
             let jx = 555 * 11 + rng.next_bounded(600) - 300;
             let jy = 555 * 11 + rng.next_bounded(600) - 300;
             let mut click = hnh_proto::MessageBuf::new();
-            click.uint8(RMSG_WDGMSG).uint16(mapview).string("click")
-                .lint(0).lint(jx).lint(jy).lint(1).lint(0).lend();
+            click
+                .uint8(RMSG_WDGMSG)
+                .uint16(mapview)
+                .string("click")
+                .lint(0)
+                .lint(jx)
+                .lint(jy)
+                .lint(1)
+                .lint(0)
+                .lend();
             rel_tx.queue(&click.finish());
         }
         if now >= next_beat {
@@ -126,34 +146,35 @@ fn bootstrap(
     let mut played = false;
     while Instant::now() < deadline {
         let mut buf = [0u8; 65536];
-        match sock.recv_from(&mut buf) {
-            Ok((n, _)) => {
-                if buf[0] == MSG_CLOSE {
-                    break;
-                }
-                if buf[0] == MSG_REL {
-                    for (ty, payload) in rel_rx.on_rel(&buf[1..n]) {
-                        if ty == RMSG_NEWWDG {
-                            let mut m = hnh_proto::MessageBuf::from_slice(&payload[1..]);
-                            if let (Ok(wid), Ok(t)) = (m.u16(), m.str()) {
-                                match t.as_str() {
-                                    "charlist" => charlist = Some(wid),
-                                    "mapview" => mapview = Some(wid),
-                                    _ => {}
-                                }
+        if let Ok((n, _)) = sock.recv_from(&mut buf) {
+            if buf[0] == MSG_CLOSE {
+                break;
+            }
+            if buf[0] == MSG_REL {
+                for (ty, payload) in rel_rx.on_rel(&buf[1..n]) {
+                    if ty == RMSG_NEWWDG {
+                        let mut m = hnh_proto::MessageBuf::from_slice(&payload[1..]);
+                        if let (Ok(wid), Ok(t)) = (m.u16(), m.str()) {
+                            match t.as_str() {
+                                "charlist" => charlist = Some(wid),
+                                "mapview" => mapview = Some(wid),
+                                _ => {}
                             }
                         }
                     }
                 }
             }
-            Err(_) => {}
         }
         // Fire `play` as soon as we see the charlist.
         if let Some(wid) = charlist {
             if !played {
                 played = true;
                 let mut play = hnh_proto::MessageBuf::new();
-                play.uint8(RMSG_WDGMSG).uint16(wid).string("play").lstr(name).lend();
+                play.uint8(RMSG_WDGMSG)
+                    .uint16(wid)
+                    .string("play")
+                    .lstr(name)
+                    .lend();
                 rel_tx.queue(&play.finish());
             }
         }
@@ -168,16 +189,13 @@ fn bootstrap(
 
 fn drain_inbound(sock: &StdUdp, rel_rx: &mut RelReceiver, alive: &mut bool) {
     let mut buf = [0u8; 65536];
-    loop {
-        match sock.recv_from(&mut buf) {
-            Ok((n, _)) => match buf[0] {
-                MSG_REL => {
-                    let _ = rel_rx.on_rel(&buf[1..n]);
-                }
-                MSG_CLOSE => *alive = false,
-                _ => {}
-            },
-            Err(_) => break,
+    while let Ok((n, _)) = sock.recv_from(&mut buf) {
+        match buf[0] {
+            MSG_REL => {
+                let _ = rel_rx.on_rel(&buf[1..n]);
+            }
+            MSG_CLOSE => *alive = false,
+            _ => {}
         }
     }
 }

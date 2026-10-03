@@ -35,16 +35,39 @@ pub enum NetCmd {
         raw_tx: mpsc::UnboundedSender<Vec<u8>>,
         reply: oneshot::Sender<SessionId>,
     },
-    Wdgmsg { sid: SessionId, wid: u16, name: String, args: Vec<hnh_proto::ListArg> },
-    MapReq { sid: SessionId, gc: (i32, i32) },
-    ObjAck { sid: SessionId, acks: Vec<(GobId, u32)> },
-    Closed { sid: SessionId },
+    Wdgmsg {
+        sid: SessionId,
+        wid: u16,
+        name: String,
+        args: Vec<hnh_proto::ListArg>,
+    },
+    MapReq {
+        sid: SessionId,
+        gc: (i32, i32),
+    },
+    ObjAck {
+        sid: SessionId,
+        acks: Vec<(GobId, u32)>,
+    },
+    Closed {
+        sid: SessionId,
+    },
 }
 
 impl From<NetCmd> for Cmd {
     fn from(c: NetCmd) -> Cmd {
         match c {
-            NetCmd::Wdgmsg { sid, wid, name, args } => Cmd::Wdgmsg { sid, wid, name, args },
+            NetCmd::Wdgmsg {
+                sid,
+                wid,
+                name,
+                args,
+            } => Cmd::Wdgmsg {
+                sid,
+                wid,
+                name,
+                args,
+            },
             NetCmd::MapReq { sid, gc } => Cmd::MapReq { sid, gc },
             NetCmd::ObjAck { sid, acks } => Cmd::ObjAck { sid, acks },
             NetCmd::Closed { sid } => Cmd::SessionClosed { sid },
@@ -54,8 +77,13 @@ impl From<NetCmd> for Cmd {
 }
 
 pub struct Net {
+    // Read by the shard dispatch path once multi-socket sharding lands
+    // this session; the single-socket spawn path owns them directly.
+    #[allow(dead_code)]
     game_tx: mpsc::UnboundedSender<NetCmd>,
+    #[allow(dead_code)]
     sessions: HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>,
+    #[allow(dead_code)]
     socket: Arc<UdpSocket>,
 }
 
@@ -136,7 +164,11 @@ impl Net {
         let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (reply_tx, reply_rx) = oneshot::channel();
         if game_tx
-            .send(NetCmd::Accept { game_tx: gameq_tx.clone(), raw_tx: raw_tx.clone(), reply: reply_tx })
+            .send(NetCmd::Accept {
+                game_tx: gameq_tx.clone(),
+                raw_tx: raw_tx.clone(),
+                reply: reply_tx,
+            })
             .is_err()
         {
             return None;
@@ -315,9 +347,16 @@ fn dispatch_rmsg(d: &mut Driver, rtype: u8, payload: &[u8]) {
     let mut m = hnh_proto::MessageBuf::from_slice(&payload[1..]);
     match rtype {
         RMSG_WDGMSG => {
-            let (Ok(wid), Ok(name)) = (m.u16(), m.str()) else { return };
+            let (Ok(wid), Ok(name)) = (m.u16(), m.str()) else {
+                return;
+            };
             let args = m.list().unwrap_or_default();
-            let _ = d.cmd_tx.send(NetCmd::Wdgmsg { sid: d.sid, wid, name, args });
+            let _ = d.cmd_tx.send(NetCmd::Wdgmsg {
+                sid: d.sid,
+                wid,
+                name,
+                args,
+            });
         }
         other => {
             debug!(sid = d.sid, rtype = other, "unhandled RMSG from client");

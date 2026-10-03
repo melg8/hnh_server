@@ -31,9 +31,11 @@ impl MapGridPayload {
         m.uint8(255);
         // zlib-compressed: tiles then plot list.
         let mut z = ZlibEncoder::new(Vec::with_capacity(10_100), Compression::default());
-        z.write_all(&self.tiles).expect("BUG: write to Vec cannot fail");
+        z.write_all(&self.tiles)
+            .expect("BUG: write to Vec cannot fail");
         for &(pidx, t, c1x, c1y, c2x, c2y) in &self.plots {
-            z.write_all(&[pidx, t, c1x, c1y, c2x, c2y]).expect("BUG: write to Vec cannot fail");
+            z.write_all(&[pidx, t, c1x, c1y, c2x, c2y])
+                .expect("BUG: write to Vec cannot fail");
         }
         z.write_all(&[255]).expect("BUG: write to Vec cannot fail");
         let compressed = z.finish().expect("BUG: finish cannot fail");
@@ -44,12 +46,7 @@ impl MapGridPayload {
 
 /// Fragment an assembled payload into MSG_MAPDATA datagrams (MTU-bounded).
 /// Each datagram: int32 pktid, uint16 off, uint16 total, chunk bytes.
-pub fn fragment_payload(
-    msg_type: u8,
-    pktid: i32,
-    payload: &[u8],
-    mtu: usize,
-) -> Vec<Vec<u8>> {
+pub fn fragment_payload(msg_type: u8, pktid: i32, payload: &[u8], mtu: usize) -> Vec<Vec<u8>> {
     let total = payload.len() as u16;
     let chunk_size = mtu.saturating_sub(9).max(256);
     let mut out = Vec::new();
@@ -57,7 +54,10 @@ pub fn fragment_payload(
     while off < payload.len() || out.is_empty() {
         let end = (off + chunk_size).min(payload.len());
         let mut m = MessageBuf::with_capacity(end - off + 9);
-        m.uint8(msg_type).int32(pktid).uint16(off as u16).uint16(total);
+        m.uint8(msg_type)
+            .int32(pktid)
+            .uint16(off as u16)
+            .uint16(total);
         if end > off {
             m.bytes(&payload[off..end]);
         }

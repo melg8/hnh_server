@@ -51,7 +51,11 @@ impl Default for RelSender {
 
 impl RelSender {
     pub fn new() -> Self {
-        Self { tseq: 0, pending: Vec::new(), window: 4096 }
+        Self {
+            tseq: 0,
+            pending: Vec::new(),
+            window: 4096,
+        }
     }
 
     /// Queue one sub-message payload for reliable ordered delivery.

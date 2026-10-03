@@ -77,7 +77,9 @@ impl Species {
     /// Loot dropped on death: (resource name, count).
     pub fn loot(self) -> Vec<(&'static str, u32)> {
         match self {
-            Species::Deer | Species::Aurochs => vec![("gfx/invobjs/meat", 3), ("gfx/invobjs/hide", 2)],
+            Species::Deer | Species::Aurochs => {
+                vec![("gfx/invobjs/meat", 3), ("gfx/invobjs/hide", 2)]
+            }
             Species::Cow => vec![("gfx/invobjs/meat", 4), ("gfx/invobjs/hide", 3)],
             Species::Boar => vec![("gfx/invobjs/meat", 3)],
             Species::Fox => vec![("gfx/invobjs/meat", 1), ("gfx/invobjs/tail", 1)],
@@ -86,6 +88,9 @@ impl Species {
         }
     }
 
+    // Name-driven lookup kept for spawn-table and tooling use; gameplay code
+    // addresses species by enum value directly.
+    #[allow(dead_code)]
     pub fn from_name(name: &str) -> Option<Species> {
         Some(match name {
             "deer" => Species::Deer,
@@ -102,13 +107,22 @@ impl Species {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    Player { player: usize },
-    Animal { species: Species },
+    Player {
+        player: usize,
+    },
+    Animal {
+        species: Species,
+    },
     /// Harvestable tree; `stage` counts remaining harvests.
-    Tree { harvests: u8 },
+    Tree {
+        harvests: u8,
+    },
     Stone,
     /// Item lying on the ground.
-    Drop { resname_idx: u16, ql: u8 },
+    Drop {
+        resname_idx: u16,
+        ql: u8,
+    },
 }
 
 /// Linear movement state (OD_LINBEG / OD_LINSTEP).
@@ -160,7 +174,14 @@ impl Gobs {
 
     /// Spawn returns a stable, never-reused-in-session gob id (slot index +
     /// generation baked into the id keeps ids unique across the process).
-    pub fn spawn(&mut self, kind: Kind, pos: (i32, i32), res_idx: u16, hp: i32, speed: i32) -> GobId {
+    pub fn spawn(
+        &mut self,
+        kind: Kind,
+        pos: (i32, i32),
+        res_idx: u16,
+        hp: i32,
+        speed: i32,
+    ) -> GobId {
         let slot = match self.free.pop() {
             Some(s) => s,
             None => {
@@ -255,6 +276,7 @@ pub struct Player {
 /// their own ack/retransmit regimes (client re-requests lost grids, and
 /// OBJACK gates gob state retransmission).
 pub struct SessionOut {
+    #[allow(dead_code)] // echoed in session teardown bookkeeping
     pub sid: SessionId,
     pub queue: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     pub raw: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
@@ -267,6 +289,7 @@ pub struct SessionOut {
     pub next_wid: u16,
     pub widgets: HashMap<u16, String>,
     /// Pending map requests (grid coord -> requested tick).
+    #[allow(dead_code)] // pending MAPREQ dedup, consumed by grid streaming
     pub mapreqs: HashSet<(i32, i32)>,
     /// Session-local resource id table.
     pub res: ResTable,
@@ -312,6 +335,7 @@ pub fn tile_speed(t: u8) -> Option<i32> {
 
 /// Full simulation world.
 pub struct World {
+    #[allow(dead_code)] // needed by persistence snapshot headers this session
     pub seed: u64,
     pub grids: hnh_world::GridStore,
     pub gobs: Gobs,
@@ -445,9 +469,13 @@ impl World {
                 let px = (gc.0 as i64 * 100 + x) as i32 * 11 + 5;
                 let py = (gc.1 as i64 * 100 + y) as i32 * 11 + 5;
                 let res_idx = self.res.intern(species.resname());
-                let id = self
-                    .gobs
-                    .spawn(Kind::Animal { species }, (px, py), res_idx, species.max_hp(), species.speed());
+                let id = self.gobs.spawn(
+                    Kind::Animal { species },
+                    (px, py),
+                    res_idx,
+                    species.max_hp(),
+                    species.speed(),
+                );
                 self.animal_gobs.push(id);
                 out.push(id);
                 break;

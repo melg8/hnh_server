@@ -49,11 +49,21 @@ impl GridStore {
     /// Mutate one tile in place (terraforming). Because grids are shared
     /// via Arc, the mutation clones the tile array and reinserts a new Arc;
     /// previous readers keep their consistent snapshot.
-    pub fn mutate_tile(&mut self, gc: (i32, i32), x: usize, y: usize, tile: u8) -> Option<std::sync::Arc<Grid>> {
+    pub fn mutate_tile(
+        &mut self,
+        gc: (i32, i32),
+        x: usize,
+        y: usize,
+        tile: u8,
+    ) -> Option<std::sync::Arc<Grid>> {
         let old = self.grid(gc);
         let mut tiles = *old.tiles;
         tiles[Grid::idx(x, y)] = tile;
-        let new_grid = std::sync::Arc::new(Grid { gc, tiles: Box::new(tiles), mnm: old.mnm.clone() });
+        let new_grid = std::sync::Arc::new(Grid {
+            gc,
+            tiles: Box::new(tiles),
+            mnm: old.mnm.clone(),
+        });
         self.grids.insert(gc, std::sync::Arc::clone(&new_grid));
         Some(new_grid)
     }

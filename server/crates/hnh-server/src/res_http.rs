@@ -49,7 +49,9 @@ async fn handle(mut stream: TcpStream, dir: Arc<PathBuf>) -> anyhow::Result<()> 
         .to_owned();
     // Map "gfx/foo" -> dir/gfx/foo.res; reject path traversal.
     if path.contains("..") || path.contains('\\') {
-        stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n").await?;
+        stream
+            .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            .await?;
         return Ok(());
     }
     let file = dir.join(format!("{path}.res"));

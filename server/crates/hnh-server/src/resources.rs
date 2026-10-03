@@ -94,13 +94,25 @@ pub mod wdg {
     /// RMSG_NEWWDG with typed args list.
     pub fn new_wdg(id: u16, ty: &str, x: i32, y: i32, parent: u16, args: &[ListVal]) -> Vec<u8> {
         let mut m = MessageBuf::new();
-        m.uint8(RMSG_NEWWDG).uint16(id).string(ty).coord(x, y).uint16(parent);
+        m.uint8(RMSG_NEWWDG)
+            .uint16(id)
+            .string(ty)
+            .coord(x, y)
+            .uint16(parent);
         push_args(&mut m, args);
         m.finish()
     }
 
     /// RMSG_NEWWDG for resource-defined widgets (type contains '/').
-    pub fn new_wdg_res(id: u16, resname: &str, x: i32, y: i32, parent: u16, args: &[ListVal]) -> Vec<u8> {
+    #[allow(dead_code)] // wire surface for mechanics landing this session
+    pub fn new_wdg_res(
+        id: u16,
+        resname: &str,
+        x: i32,
+        y: i32,
+        parent: u16,
+        args: &[ListVal],
+    ) -> Vec<u8> {
         new_wdg(id, resname, x, y, parent, args)
     }
 
@@ -122,7 +134,10 @@ pub mod wdg {
     /// RMSG_RESID announcement.
     pub fn resid(wire_idx: u16, name: &str, ver: u16) -> Vec<u8> {
         let mut m = MessageBuf::new();
-        m.uint8(RMSG_RESID).uint16(wire_idx).string(name).uint16(ver);
+        m.uint8(RMSG_RESID)
+            .uint16(wire_idx)
+            .string(name)
+            .uint16(ver);
         m.finish()
     }
 
@@ -134,7 +149,13 @@ pub mod wdg {
     }
 
     /// RMSG_GLOBLOB TIME+ASTRO(+LIGHT) blob.
-    pub fn globlob(unix: i32, dt: i32, mp: i32, yt: i32, light: Option<(u8, u8, u8, u8)>) -> Vec<u8> {
+    pub fn globlob(
+        unix: i32,
+        dt: i32,
+        mp: i32,
+        yt: i32,
+        light: Option<(u8, u8, u8, u8)>,
+    ) -> Vec<u8> {
         let mut m = MessageBuf::new();
         m.uint8(RMSG_GLOBLOB);
         m.uint8(GMSG_TIME).int32(unix);
@@ -166,14 +187,34 @@ pub mod wdg {
     }
 
     /// RMSG_BUFF set.
-    pub fn buff_set(id: i32, resid: u16, tt: &str, ameter: i32, nmeter: i32, cmeter: i32, cticks: i32, major: u8) -> Vec<u8> {
+    #[allow(dead_code)] // wire surface for mechanics landing this session
+    #[allow(clippy::too_many_arguments)] // mirrors the RMSG_BUFF wire layout
+    pub fn buff_set(
+        id: i32,
+        resid: u16,
+        tt: &str,
+        ameter: i32,
+        nmeter: i32,
+        cmeter: i32,
+        cticks: i32,
+        major: u8,
+    ) -> Vec<u8> {
         let mut m = MessageBuf::new();
-        m.uint8(RMSG_BUFF).string("set").int32(id).uint16(resid).string(tt)
-            .int32(ameter).int32(nmeter).int32(cmeter).int32(cticks).uint8(major);
+        m.uint8(RMSG_BUFF)
+            .string("set")
+            .int32(id)
+            .uint16(resid)
+            .string(tt)
+            .int32(ameter)
+            .int32(nmeter)
+            .int32(cmeter)
+            .int32(cticks)
+            .uint8(major);
         m.finish()
     }
 
     /// RMSG_SFX.
+    #[allow(dead_code)] // wire surface for mechanics landing this session
     pub fn sfx(wire_idx: u16) -> Vec<u8> {
         let mut m = MessageBuf::new();
         m.uint8(RMSG_SFX).uint16(wire_idx);
@@ -181,6 +222,7 @@ pub mod wdg {
     }
 
     /// RMSG_MAPIV mode 0: invalidate one grid.
+    #[allow(dead_code)] // wire surface for mechanics landing this session
     pub fn mapiv_grid(gc: (i32, i32)) -> Vec<u8> {
         let mut m = MessageBuf::new();
         m.uint8(RMSG_MAPIV).uint8(0).coord(gc.0, gc.1);

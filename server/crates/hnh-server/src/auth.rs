@@ -15,7 +15,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use hnh_proto::{auth_frame, parse_auth_frame, AUTH_CMD_GETTOKEN, AUTH_CMD_PASSWD, AUTH_CMD_USR, AUTH_CMD_USETOKEN};
+use hnh_proto::{
+    auth_frame, parse_auth_frame, AUTH_CMD_GETTOKEN, AUTH_CMD_PASSWD, AUTH_CMD_USETOKEN,
+    AUTH_CMD_USR,
+};
 
 pub const AUTH_PORT: u16 = 1871;
 const COOKIE_TTL_SECS: u64 = 300;
@@ -121,7 +124,12 @@ impl Sha256 {
     fn compress(&mut self, block: &[u8; 64]) {
         let mut w = [0u32; 64];
         for i in 0..16 {
-            w[i] = u32::from_be_bytes([block[4 * i], block[4 * i + 1], block[4 * i + 2], block[4 * i + 3]]);
+            w[i] = u32::from_be_bytes([
+                block[4 * i],
+                block[4 * i + 1],
+                block[4 * i + 2],
+                block[4 * i + 3],
+            ]);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -218,18 +226,20 @@ fn mix128(mut v: u64) -> u64 {
     v ^ (v >> 31)
 }
 
-fn load_certs(cert_path: &str, key_path: &str) -> anyhow::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+fn load_certs(
+    cert_path: &str,
+    key_path: &str,
+) -> anyhow::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     if !std::path::Path::new(cert_path).exists() || !std::path::Path::new(key_path).exists() {
         generate_dev_cert(cert_path, key_path)?;
     }
-    let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(
-        std::fs::File::open(cert_path)?,
-    ))
+    let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(std::fs::File::open(
+        cert_path,
+    )?))
     .collect::<Result<_, _>>()?;
-    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(
-        std::fs::File::open(key_path)?,
-    ))?
-    .ok_or_else(|| anyhow::anyhow!("no private key in {key_path}"))?;
+    let key =
+        rustls_pemfile::private_key(&mut std::io::BufReader::new(std::fs::File::open(key_path)?))?
+            .ok_or_else(|| anyhow::anyhow!("no private key in {key_path}"))?;
     Ok((certs, key))
 }
 
@@ -256,7 +266,9 @@ fn generate_dev_cert(cert_path: &str, key_path: &str) -> anyhow::Result<()> {
 
 impl AuthServer {
     pub fn new() -> Self {
-        AuthServer { accounts: Arc::new(RwLock::new(Accounts::default())) }
+        AuthServer {
+            accounts: Arc::new(RwLock::new(Accounts::default())),
+        }
     }
 
     /// Issue a single-use session cookie. Used by the TLS listener and by
@@ -268,7 +280,10 @@ impl AuthServer {
             .accounts
             .try_write()
             .expect("BUG: accounts lock poisoned by await overlap");
-        acc.cookies.insert(cookie.clone(), (username.to_owned(), now() + COOKIE_TTL_SECS));
+        acc.cookies.insert(
+            cookie.clone(),
+            (username.to_owned(), now() + COOKIE_TTL_SECS),
+        );
         cookie
     }
 
@@ -347,7 +362,8 @@ async fn handle_auth_conn(
                         acc.passwords.entry(user.clone()).or_insert(digest_hex);
                         let cookie = {
                             let c = rand_bytes(32);
-                            acc.cookies.insert(c.clone(), (user.clone(), now() + COOKIE_TTL_SECS));
+                            acc.cookies
+                                .insert(c.clone(), (user.clone(), now() + COOKIE_TTL_SECS));
                             c
                         };
                         (0, cookie)
@@ -358,7 +374,8 @@ async fn handle_auth_conn(
                 let user = pending_user.clone().unwrap_or_default();
                 let mut acc = accounts.write().await;
                 let tok = rand_bytes(32);
-                acc.tokens.insert(tok.clone(), (user.clone(), now() + TOKEN_TTL_SECS));
+                acc.tokens
+                    .insert(tok.clone(), (user.clone(), now() + TOKEN_TTL_SECS));
                 (0, tok)
             }
             AUTH_CMD_USETOKEN => {
@@ -366,7 +383,8 @@ async fn handle_auth_conn(
                 match acc.tokens.remove(&payload) {
                     Some((user, exp)) if exp > now() => {
                         let cookie = rand_bytes(32);
-                        acc.cookies.insert(cookie.clone(), (user, now() + COOKIE_TTL_SECS));
+                        acc.cookies
+                            .insert(cookie.clone(), (user, now() + COOKIE_TTL_SECS));
                         (0, cookie)
                     }
                     _ => (1, b"Invalid token".to_vec()),
@@ -392,6 +410,7 @@ async fn tokio_rustls_accept(
 
 #[cfg(test)]
 mod tests {
+    #![allow(unused_imports)]
     use super::*;
 
     #[test]

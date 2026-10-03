@@ -10,7 +10,11 @@ use std::io::Write;
 pub fn refresh(seed: u64) {
     let path = repo_root().join("HANDOFF.md");
     let stamp = chrono_stamp();
-    let mut f = match std::fs::OpenOptions::new().append(true).create(true).open(&path) {
+    let mut f = match std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)
+    {
         Ok(f) => f,
         Err(_) => return,
     };
