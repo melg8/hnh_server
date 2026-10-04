@@ -58,7 +58,8 @@ case "${1:-all}" in
     echo "UNIT VISIBLEIDX: ALL PASS"
     ;;
   load)
-    (cd server && (./target/release/hnh-server --seed 42 --bots 1000 --saturated --perf > /tmp/g15-load.log 2>&1 &))
+    (cd server && (HNH_SAVE_FILE=target/load-save.json \
+      ./target/release/hnh-server --seed 42 --bots 1000 --saturated --perf > /tmp/g15-load.log 2>&1 &))
     sleep 100
     A=$(grep -c "session accepted" /tmp/g15-load.log)
     [ "$A" -ge 990 ] || { stop_server; fail "only $A/1000 sessions"; }
