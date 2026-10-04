@@ -111,6 +111,9 @@ case "${1:-all}" in
     # persistence restart.
     bash server/scripts/verify_ui_probe.sh run | grep -q "UI PROBE RUN: OK" || fail "ui probe"
     echo "  ui probe ok"
+    # Session-17: the login-screen portrait data path + real click chain.
+    bash server/scripts/verify_ui_probe.sh charlist | grep -q "UI PROBE CHARLIST: OK" || fail "charlist probe"
+    echo "  charlist probe ok"
     bash server/scripts/verify_equip.sh e2e | grep -q "E2E EQUIP: ALL PASS" || fail "equip persistence"
     echo "  equip persistence ok"
     echo "BATTERY: ALL PASS"

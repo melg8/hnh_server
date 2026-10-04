@@ -701,3 +701,41 @@ decomposition is depth 2, stated in the plan). Commits 84c8f24
   changes); craft paginae ad->action wiring for the remaining recipes;
   grid-owner partitioning for the 10k target (single game task is
   still the simulation owner).
+
+## 2026-10-04 - Session 17: login portrait fixed (standing-frame layers), stale-jar guard
+Continuation under .unlazy/session17 (tree 99). Commits 0a45392
+(stale-jar guard), 84ebcfb (portrait layers), 1d61679 (portrait log).
+
+- Stale-jar guard (highest-probability root cause of "symptoms persist
+  after fixes"): run-client.bat used to build the jar only when
+  build/haven.jar was absent, so a `git pull` never rebuilt and the
+  user kept running pre-fix client code (the avatar/encodeurl/res-ver
+  fixes all live in src/haven). run-client.bat now rebuilds whenever
+  HEAD moved (rev stamp build/.clientrev) or the jar is missing;
+  start-server.bat applies the same stamp to the gameres pack
+  (gameres/.genrev). Gate: server/scripts/verify_windows_launch.sh.
+- Login portrait ("no face at login"): the charlist "add" uimsg listed
+  gfx/borka/{body,head,hair} - pose-router ("plalay") resources whose
+  layers carry ZERO imgc images, so AvaRender resolved all layers and
+  still drew a blank card. The server now sends frame 0 of the
+  standing pose of each body part (legs, torso male, head, idle arms,
+  hair-karin); in-game OD_LAYERS keeps the routers (sprite factories
+  resolve poses there). The UiProbe proved the defect headlessly:
+  3 layers resolved, 0 image layers, blank portrait reproduced.
+- UiProbe charlist mode: asserts the add uimsg decodes into a real
+  char entry, every portrait layer resolves client-side, the
+  composited image inventory is non-empty, and world entry happens
+  through the REAL Button.click() chain (not a raw queued play msg).
+  Gate: verify_ui_probe.sh charlist; wired into the battery.
+- Charlist portrait observability: every login logs the exact layer
+  names into logs/server.log (verify_charlist_log.sh), so future bug
+  reports carry the portrait evidence automatically.
+- Verified: UI PROBE RUN/EQUIP/CHARLIST OK; CARGO TEST, FMT CLIPPY,
+  BATTERY (incl. charlist probe), CHARLIST LOG, HANDOFF FILE gates
+  green; committed and pushed to master.
+- NEXT (handoff): mapview "drop" ground-drop flow; equipment effects
+  (armor class, avatar layer changes when equipment changes); craft
+  paginae ad->action wiring; grid-owner partitioning for the 10k
+  target. If the user still reports a frozen client after this
+  session: ask for logs/bugreport-*.zip (collect-logs.bat) - with the
+  stale-jar guard the client rev in the log header must match HEAD.
