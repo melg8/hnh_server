@@ -26,3 +26,4 @@ build-classes/
 chats/
 server/save/
 build-classes8/
+scripts/jogl/agent/*.class
