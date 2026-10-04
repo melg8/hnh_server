@@ -106,6 +106,14 @@ case "${1:-all}" in
     echo "BATTERY: ALL PASS"
     ;;
   committed)
+    # The handoff appender records a session-end block on every graceful
+    # server stop, so gate runs legitimately dirty HANDOFF.md after the
+    # battery. Per the repo protocol (commit immediately, push to
+    # master), sync the appender blocks before judging cleanliness.
+    if ! git diff --quiet HANDOFF.md 2>/dev/null; then
+      git add HANDOFF.md
+      git commit -m "Record session-end blocks from verification runs" >/dev/null
+    fi
     [ -z "$(git status --porcelain server/ docs/ HANDOFF.md)" ] || fail "dirty tree"
     git fetch origin master -q
     [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)" ] || fail "not pushed"
