@@ -73,6 +73,7 @@ public class Config {
 	public static boolean timestamp;
 	public static boolean new_chat;
 	public static boolean showDebug = false;
+	public static boolean debugclicks = Boolean.getBoolean("haven.debugclicks");
 	public static boolean use_smileys;
 	public static boolean zoom;
 	public static boolean noborders;

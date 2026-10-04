@@ -1545,6 +1545,7 @@ impl Game {
     // ------------------------------------------------------------------
 
     fn on_map_click(&mut self, sid: SessionId, args: &[hnh_proto::ListArg]) {
+        trace!(sid, nargs = args.len(), "map click received");
         // click(c0, mc, button, modflags[, gobid, gobrc]): c0 is a screen
         // coordinate; only mc (second coord) is the world-space target.
         let mc = args.iter().filter_map(|a| a.as_coord()).nth(1);

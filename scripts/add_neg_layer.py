@@ -61,16 +61,20 @@ def main():
         print(f"{tgt_path} already has a neg layer")
         return 0
     sz = image_size(tlayers) or (30, 30)
-    # Neg layout: cc (2xi32), bc (2xi32), bs (2xi32), sz (2xi32), u8 epcount.
-    # cc is the image center: the legacy item icons anchor at (w/2, h/2).
-    # bc/bs describe the ground hitbox in screen-projection units; reuse the
-    # source's hitbox shape but keep it small for a flat icon.
+    # Neg layout (Resource.Neg / cdec = 2x int16 per coord):
+    #   cc cdec(buf,0)   - image anchor (4 bytes)
+    #   bc cdec(buf,4)   - hitbox base (4 bytes)
+    #   bs cdec(buf,8)   - hitbox size (4 bytes)
+    #   sz cdec(buf,12)  - sprite size (4 bytes)
+    #   u8 endpoint count, then endpoints - zero for a flat icon.
+    # Total 17 bytes.
     cc = (sz[0] // 2, sz[1] // 2)
     bc = (0, 0)
     bs = (11, 11)
     szc = (sz[0], sz[1])
-    blob = struct.pack("<ii", *cc) + struct.pack("<ii", *bc) + \
-        struct.pack("<ii", *bs) + struct.pack("<ii", *szc) + b"\x00"
+    blob = struct.pack("<hh", *cc) + struct.pack("<hh", *bc) + \
+        struct.pack("<hh", *bs) + struct.pack("<hh", *szc) + b"\x00"
+    assert len(blob) == 17, len(blob)
     tlayers.append(("neg", blob))
     open(out_path, "wb").write(build_res(tver, tlayers))
     print(f"wrote {out_path} (cc={cc}, src ver {tver})")

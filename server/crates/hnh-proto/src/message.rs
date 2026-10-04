@@ -244,10 +244,22 @@ impl MessageBuf {
     }
 
     /// Read a full typed list until T_END.
+    ///
+    /// The legacy client's `Message.addlist` (the encoder for every
+    /// client->server widget-message argument list) does NOT append a
+    /// T_END byte: the list simply ends at the end of the message. A
+    /// strict terminator read therefore discards ALL arguments of every
+    /// real-client click ("map click received nargs=0" - the character
+    /// "stands rooted"). EOF is a valid list end here; the explicit
+    /// T_END byte still terminates early for server-side builders that
+    /// append it.
     pub fn list(&mut self) -> Result<Vec<ListArg>> {
         let mut out = Vec::new();
-        while let Some(arg) = self.list_arg()? {
-            out.push(arg);
+        while !self.eom() {
+            match self.list_arg()? {
+                Some(arg) => out.push(arg),
+                None => break,
+            }
         }
         Ok(out)
     }
@@ -345,5 +357,31 @@ mod tests {
     fn eom_error() {
         let mut r = MessageBuf::from_slice(&[1, 2]);
         assert!(r.i32().is_err());
+    }
+
+    #[test]
+    fn list_without_terminator_reads_all_args() {
+        // The legacy client's addlist does not append T_END (the wire
+        // list ends at end-of-message). Every argument must survive.
+        let mut m = MessageBuf::new();
+        m.lcoord(400, 340).lcoord(575, 575).lint(1).lint(0);
+        let mut r = MessageBuf::from_slice(m.as_slice());
+        let l = r.list().unwrap();
+        assert_eq!(l[0], ListArg::Coord(400, 340));
+        assert_eq!(l[1], ListArg::Coord(575, 575));
+        assert_eq!(l[2], ListArg::Int(1));
+        assert_eq!(l[3], ListArg::Int(0));
+        assert_eq!(l.len(), 4);
+    }
+
+    #[test]
+    fn list_with_terminator_still_terminates_early() {
+        // Server-side builders append T_END; trailing bytes after the
+        // terminator must be ignored.
+        let mut m = MessageBuf::new();
+        m.lint(42).lend().uint8(0xFF).uint8(0xFF);
+        let mut r = MessageBuf::from_slice(m.as_slice());
+        let l = r.list().unwrap();
+        assert_eq!(l, vec![ListArg::Int(42)]);
     }
 }
