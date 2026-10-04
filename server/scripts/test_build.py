@@ -330,7 +330,17 @@ class BuildClient:
                 elif code == OD_LINSTEP:
                     off += 4
                 elif code == OD_LAYERS:
-                    off += 8
+                    base = struct.unpack("<H", body[off : off + 2])[0]
+                    off += 2
+                    while True:
+                        layer = struct.unpack("<H", body[off : off + 2])[0]
+                        off += 2
+                        if layer == 0xFFFF:
+                            break
+                    # The layered base is the avatar body resource; record
+                    # it so player-gob detection keeps working now that
+                    # players spawn without a plain OD_RES.
+                    g["res"] = self.resids.get(base)
                 elif code == OD_HEALTH:
                     off += 1
                 elif code == OD_BUDDY:
