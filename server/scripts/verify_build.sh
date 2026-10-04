@@ -103,19 +103,23 @@ case "${1:-all}" in
     echo "  farming flow ok"
     python3 server/scripts/test_party_chat.py | tail -1 | grep -qE "PARTY FLOW: OK|CHAT FLOW: OK" || { stop_server; fail "party/chat flow"; }
     echo "  party/chat flow ok"
+    python3 server/scripts/test_equip.py equipbot | tail -1 | grep -q "EQUIP FLOW: OK" || { stop_server; fail "equip flow"; }
+    echo "  equip flow ok"
     stop_server
+    # Session-16 gates that own their server lifecycle: the headless
+    # client-side probe (real Java client classes, no GL) and the equip
+    # persistence restart.
+    bash server/scripts/verify_ui_probe.sh run | grep -q "UI PROBE RUN: OK" || fail "ui probe"
+    echo "  ui probe ok"
+    bash server/scripts/verify_equip.sh e2e | grep -q "E2E EQUIP: ALL PASS" || fail "equip persistence"
+    echo "  equip persistence ok"
     echo "BATTERY: ALL PASS"
     ;;
   committed)
-    # The handoff appender records a session-end block on every graceful
-    # server stop, so gate runs legitimately dirty HANDOFF.md after the
-    # battery. Per the repo protocol (commit immediately, push to
-    # master), sync the appender blocks before judging cleanliness.
-    if ! git diff --quiet HANDOFF.md 2>/dev/null; then
-      git add HANDOFF.md
-      git commit -m "Record session-end blocks from verification runs" >/dev/null
-      git push origin master -q || fail "appender push failed"
-    fi
+    # The server never writes to HANDOFF.md (the session-end appender was
+    # removed in session 16), so a dirty HANDOFF.md here is unrecorded
+    # session work, not gate noise: it must be committed by the session
+    # itself, not swept in here.
     [ -z "$(git status --porcelain server/ docs/ HANDOFF.md)" ] || fail "dirty tree"
     git fetch origin master -q
     [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)" ] || fail "not pushed"

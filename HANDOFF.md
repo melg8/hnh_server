@@ -650,3 +650,54 @@ PLAN.md). Commits 5bc985b + 16eaecd on origin/master.
   matches the OD_BUDDY character name).
 
 
+
+## 2026-10-04 - Session 16: black screen fixed (client-side probe), equipment paperdoll, handoff de-clutter
+Continuation under .unlazy/session16 (tree 99 requested; honest
+decomposition is depth 2, stated in the plan). Commits 84c8f24
+(HANDOFF de-clutter), 67c2120 (black screen), e8aa327 (paperdoll).
+
+- HANDOFF hygiene (user-reported clutter): the server appended a
+  boilerplate "## Session end <unix stamp>" block to this file on
+  every clean exit; 181 blocks from gate runs buried the session log.
+  Removed the appender (src/handoff.rs + main.rs call site), stripped
+  all 181 blocks, and pinned the protocol rule: the server binary and
+  every automated tool must never write to this file. The `committed`
+  gate no longer auto-commits HANDOFF.md dirt.
+- NEW feedback tool - client-probe/UiProbe: drives the REAL client
+  classes (AuthClient -> Session -> UI -> RemoteUI, the exact
+  post-play receive path, no GL) against a live server; every
+  throwable is precisely what kills the real client's threads.
+  Gate: server/scripts/verify_ui_probe.sh (compile|run|equip). The
+  probe needs any JDK (javac runs via `java -m
+  jdk.compiler/com.sun.tools.javac.Main`), lib/*.jar on the
+  classpath, HAVEN_RESDIR=res/compiled, and MainFrame statics set.
+- Black screen root causes (all four fixed, each alone froze the
+  client): (1) resource versions were hard-coded while the client
+  hard-rejects version mismatches ("Wrong res version") - the server
+  now parses the true LE u16 version from every served .res header;
+  (2) res_http appended ".res" to targets that already ended in
+  ".res" - the res server had NEVER served a real client; (3) player
+  gobs spawned with OD_RES of gfx/borka/body (no neg layer) killed
+  the session reader with "No negative found" - players now spawn
+  through OD_LAYERS only, layer RESIDs announced first; (4) the
+  client's HttpSource.encodeurl dropped the port via the 3-arg URI
+  constructor - every HTTP res fetch hit port 80. Also added
+  res/compiled/gfx/hud/vilind.res (KinInfo's static initializer 404s
+  without it; generator scripts/make_vilind.py).
+- Equipment paperdoll (the user-reported missing doll): widget type
+  "epry", 16 server-semantics slots, bootstrap "set"+"ava" sync,
+  slen "equ" reopens it. Equip/unequip ride the cursor item ("drop"
+  onto a slot, "take" from a slot); occupied/invalid slots rejected.
+  Inventory "drop" now places the cursor item into the inventory (the
+  real Inventory.drop semantic) instead of popping the last stack to
+  the ground; ground drops belong to mapview "drop" (still
+  unhandled). SaveData v3 -> v4 (additive): equipped slots persist
+  across restarts.
+- Verified: UI PROBE RUN/EQUIP OK; UNIT EQUIP, E2E EQUIP (incl.
+  restart persistence) OK; battery extended with equip flow + probe +
+  equip persistence; 81 cargo tests green; fmt + clippy clean.
+- NEXT (handoff): mapview "drop" ground-drop flow; equipment effects
+  (armor class from tooltips, avatar layer changes when equipment
+  changes); craft paginae ad->action wiring for the remaining recipes;
+  grid-owner partitioning for the 10k target (single game task is
+  still the simulation owner).
