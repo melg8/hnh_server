@@ -140,6 +140,12 @@ pub enum Kind {
     Tree {
         harvests: u8,
     },
+    /// Growing crop (docs/mechanics/livestock/farming-and-plants.md).
+    /// `spec` indexes `farming::CROPS`; `stage` is the wire sdt byte.
+    Crop {
+        spec: u8,
+        stage: u8,
+    },
     Stone,
     /// Item lying on the ground. `label` carries the display name so food
     /// keeps its fep.conf identity from ground to inventory.
@@ -350,6 +356,14 @@ pub struct SessionOut {
     pub item_menu: Option<(u16, usize)>,
     /// Item widget id -> inventory stack index (iact routing).
     pub item_wids: HashMap<u16, usize>,
+    /// Open harvest flower menu: `sm` widget id -> target crop gob.
+    pub crop_menu: Option<(u16, GobId)>,
+    /// Plow Field pagina armed: next map click plows the tile.
+    pub pending_plow: bool,
+    /// Item stack currently held on the cursor (take -> itemact flow).
+    pub cursor: Option<InvStack>,
+    /// Map grids this client already holds (MAPDATA re-send targeting).
+    pub grids_seen: HashSet<(i32, i32)>,
 }
 
 impl SessionOut {
@@ -413,6 +427,14 @@ pub struct World {
     pub animal_gobs: Vec<GobId>,
     /// Live animal engagements: offence/defence bars toward their target.
     pub animal_fights: HashMap<GobId, AnimalFight>,
+    /// Growing crops by gob id (farming tick + harvest lookup).
+    pub crops: HashMap<GobId, crate::farm::CropState>,
+    /// Tile -> crop gob occupying it (one crop per tile).
+    pub crop_at: HashMap<(i32, i32), GobId>,
+    /// Plowed (furrowed) tiles -> tilth state. `0` deadline = planted
+    /// (never decays while the crop lives); a non-zero unix-ms deadline
+    /// reverts the tile to grass when it passes.
+    pub tilth: HashMap<(i32, i32), u64>,
     /// Tick counter for deterministic scheduling.
     pub tick: u64,
     /// Deterministic RNG for AI (seeded from world seed).
@@ -448,6 +470,9 @@ impl World {
             by_session: HashMap::new(),
             animal_gobs: Vec::new(),
             animal_fights: HashMap::new(),
+            crops: HashMap::new(),
+            crop_at: HashMap::new(),
+            tilth: HashMap::new(),
             tick: 0,
             rng: hnh_world::JavaRandom::new(seed as i64),
             start_instant: Instant::now(),

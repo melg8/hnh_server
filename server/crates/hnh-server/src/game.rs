@@ -15,8 +15,11 @@ use hnh_proto::consts::*;
 use hnh_proto::MessageBuf;
 
 use crate::craft::FepAttr;
+use crate::farm;
 use crate::resources::wdg::{self, ListVal};
 use crate::state::*;
+
+use hnh_world::tile;
 
 // Despawn horizon for dropped items; consumed by the item-despawn pass
 // landing together with persistence.
@@ -113,8 +116,56 @@ impl Game {
         if fep.len() == 0 {
             tracing::warn!("no fep.conf found in candidates: food grants disabled");
         }
+        let mut world = World::new(seed);
+        // Restore terraforming overrides (furrows) into the grid store
+        // before any grid is generated on demand.
+        world.grids.overrides = save.world_state.tile_overrides.iter().copied().collect();
+        // Restore persisted crops + furrows so the world stays persistent
+        // across restarts (SavedCrop carries the spec index and stage).
+        let saved_crops = save.world_state.crops.clone();
+        for saved in saved_crops {
+            let tile = saved.tile;
+            if world.crop_at.contains_key(&tile) {
+                continue;
+            }
+            if (saved.spec as usize) >= crate::farm::CROPS.len() {
+                tracing::warn!(spec = saved.spec, tile = ?tile, "saved crop spec out of range: dropped");
+                continue;
+            }
+            let res_static: &'static str = Box::leak(saved.res.clone().into_boxed_str());
+            let res_idx = world.res.intern(res_static);
+            let gob = world.gobs.spawn(
+                Kind::Crop {
+                    spec: saved.spec,
+                    stage: saved.stage,
+                },
+                (tile.0 * 11 + 5, tile.1 * 11 + 5),
+                res_idx,
+                1,
+                0,
+            );
+            world.crops.insert(
+                gob,
+                crate::farm::CropState {
+                    spec: saved.spec,
+                    stage: saved.stage,
+                    seed_ql: saved.seed_ql,
+                    soil_ql: saved.soil_ql,
+                    next_stage_at: saved.next_stage_at,
+                },
+            );
+            world.crop_at.insert(tile, gob);
+        }
+        let saved_tilth = save.world_state.tilth.clone();
+        for (tile, deadline) in saved_tilth {
+            world.tilth.insert(tile, deadline);
+        }
+        let restored = world.crops.len();
+        if restored > 0 {
+            info!(crops = restored, "persisted crops restored");
+        }
         Game {
-            world: World::new(seed),
+            world,
             sessions: HashMap::new(),
             rx,
             net_rx,
@@ -216,6 +267,41 @@ impl Game {
                 self.save.snapshot(p, pos, inv_named, labels);
             }
         }
+        // World-state snapshot: growing crops + furrowed tiles.
+        let mut crops = Vec::with_capacity(self.world.crops.len());
+        for (gob, state) in &self.world.crops {
+            let Some(slot) = self.world.gobs.get(*gob) else {
+                continue;
+            };
+            let Kind::Crop { spec, .. } = self.world.gobs.kind[slot] else {
+                continue;
+            };
+            let (posx, posy) = self.world.gobs.pos[slot];
+            let res = self
+                .world
+                .res
+                .name(self.world.gobs.res_idx[slot])
+                .unwrap_or("gfx/terobjs/plants/wheat")
+                .to_owned();
+            crops.push(crate::persist::SavedCrop {
+                res,
+                tile: (posx.div_euclid(11), posy.div_euclid(11)),
+                spec,
+                stage: state.stage,
+                seed_ql: state.seed_ql,
+                soil_ql: state.soil_ql,
+                next_stage_at: state.next_stage_at,
+            });
+        }
+        self.save.world_state.crops = crops;
+        self.save.world_state.tilth = self.world.tilth.iter().map(|(t, d)| (*t, *d)).collect();
+        self.save.world_state.tile_overrides = self
+            .world
+            .grids
+            .overrides
+            .iter()
+            .map(|(t, v)| (*t, *v))
+            .collect();
         if let Err(e) = self.save.flush(seed) {
             tracing::warn!(error = %e, "autosave failed");
         }
@@ -288,6 +374,10 @@ impl Game {
             craft_window: None,
             item_menu: None,
             item_wids: HashMap::new(),
+            crop_menu: None,
+            pending_plow: false,
+            cursor: None,
+            grids_seen: HashSet::new(),
         };
         // Character selection UI (session-lifecycle.md 3.1).
         let w_bg = out.new_wid("img");
@@ -374,7 +464,10 @@ impl Game {
             (Some("slen"), "chr") => self.open_char_sheet(sid),
             (Some("slen"), _) | (None, "bud") => {}
             (Some("inv"), "drop") => self.inv_drop(sid, wid, &args),
+            // "take" originates from the item widget itself (Item.mousedown).
+            (Some("item"), "take") => self.inv_take(sid, wid),
             (Some("item"), "iact") => self.on_item_iact(sid, wid),
+            (Some("mapview"), "itemact") => self.on_map_itemact(sid, &args),
             (Some("mapview"), "click") => self.on_map_click(sid, &args),
             (Some("mapview"), "place") => {
                 debug!(sid, "placement confirmed (stub)");
@@ -572,6 +665,11 @@ impl Game {
                 ("gfx/invobjs/branch", 2, 10, ""),
                 ("gfx/invobjs/stone", 2, 10, ""),
                 ("gfx/invobjs/meat", 1, 10, "Beef"),
+                // Farming starter seeds: the plow pagina is pushed to
+                // every session, so the full plant-grow-harvest loop is
+                // playable out of the box.
+                ("gfx/invobjs/seed-wheat", 5, 10, "Wheat Seeds"),
+                ("gfx/invobjs/seed-carrot", 5, 10, "Carrot Seeds"),
             ];
             for (resname, count, ql, label) in kit {
                 let gidx = self.world.res.intern(resname);
@@ -686,7 +784,8 @@ impl Game {
         out.send(wdg::cattr(&attr_entries));
         // Menu paginae: base actions plus every implemented craft recipe
         // (RMSG_PAGINAE; parents resolve from the served resource pack).
-        let mut pages: Vec<&'static str> = vec!["paginae/act/add", "paginae/add/study"];
+        let mut pages: Vec<&'static str> =
+            vec!["paginae/act/add", "paginae/add/study", "paginae/act/plow"];
         pages.push("paginae/craft/roastmeat");
         for r in crate::craft::RECIPES {
             pages.push(r.pagina);
@@ -723,6 +822,10 @@ impl Game {
     // ------------------------------------------------------------------
 
     fn on_mapreq(&mut self, sid: SessionId, gc: (i32, i32)) {
+        // Track which grids this client holds (tile-mutation re-sends).
+        if let Some(out) = self.sessions.get_mut(&sid) {
+            out.grids_seen.insert(gc);
+        }
         // Populate the grid the first time anyone looks at it.
         let mut spawned = Vec::new();
         let first_touch = !self.populated.contains(&gc);
@@ -794,6 +897,7 @@ impl Game {
             m.uint8(OD_RES).uint16(wire_res | 0x8000);
             let sdt = match kind {
                 Kind::Tree { harvests } => vec![harvests],
+                Kind::Crop { stage, .. } => vec![stage],
                 _ => Vec::new(),
             };
             if sdt.is_empty() {
@@ -942,7 +1046,11 @@ impl Game {
                 let needs_move;
                 {
                     let out = self.sessions.get_mut(&sid).expect("BUG: sid from cand");
-                    is_new = out.visible.insert(id);
+                    // Check-only here: stream_spawn performs the insert and
+                    // skips already-present ids; inserting before calling it
+                    // would suppress the spawn block entirely (the avatar
+                    // bug: the client never received its own gob).
+                    is_new = !out.visible.contains(&id);
                     needs_move = !is_new
                         && mv.is_some()
                         && out
@@ -1049,9 +1157,13 @@ impl Game {
     // ------------------------------------------------------------------
 
     fn on_map_click(&mut self, sid: SessionId, args: &[hnh_proto::ListArg]) {
-        // click(c0, mc, button, modflags[, gobid, gobrc])
-        let mc = args.iter().find_map(|a| a.as_coord());
-        let button = args.iter().filter_map(|a| a.as_int()).nth(1).unwrap_or(0);
+        // click(c0, mc, button, modflags[, gobid, gobrc]): c0 is a screen
+        // coordinate; only mc (second coord) is the world-space target.
+        let mc = args.iter().filter_map(|a| a.as_coord()).nth(1);
+        // Ints in order: button, modflags[, gobid]; coords are filtered out.
+        let mut ints = args.iter().filter_map(|a| a.as_int());
+        let button = ints.next().unwrap_or(0);
+        let _modflags = ints.next().unwrap_or(0);
         let gobid = args.get(4).and_then(|a| a.as_int());
         let Some((_x, y)) = mc else { return };
         let (mx, my) = mc.expect("BUG: mc checked above");
@@ -1059,6 +1171,19 @@ impl Game {
             return;
         };
         if button == 1 {
+            // Armed Plow Field pagina takes precedence: plow instead of walk.
+            let plow_armed = self
+                .sessions
+                .get(&sid)
+                .map(|o| o.pending_plow)
+                .unwrap_or(false);
+            if plow_armed {
+                if let Some(out) = self.sessions.get_mut(&sid) {
+                    out.pending_plow = false;
+                }
+                self.plow_tile(sid, Self::tile_coord(mx, my));
+                return;
+            }
             if let Some(target) = gobid {
                 self.player_interact(sid, player_gob, target, (mx, my));
             } else {
@@ -1185,6 +1310,9 @@ impl Game {
             }
             Kind::Animal { species } => {
                 self.start_fight(sid, target, species);
+            }
+            Kind::Crop { .. } => {
+                self.open_crop_menu(sid, target);
             }
             Kind::Player { .. } => {
                 warn!(sid, "pvp interactions are not enabled yet");
@@ -1495,6 +1623,367 @@ impl Game {
     }
 
     // ------------------------------------------------------------------
+    // Crop farming (docs/mechanics/livestock/farming-and-plants.md)
+    // ------------------------------------------------------------------
+
+    /// Inventory "take": move one stack onto the cursor. The client then
+    /// aims with the mouse; a map click arrives as mapview `itemact`.
+    fn inv_take(&mut self, sid: SessionId, wid: u16) {
+        let stack_idx = self
+            .sessions
+            .get(&sid)
+            .and_then(|o| o.item_wids.get(&wid).copied());
+        let Some(stack_idx) = stack_idx else {
+            return;
+        };
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        if out.cursor.is_some() {
+            return; // one cursor item at a time
+        }
+        let Some(stack) = self
+            .world
+            .player(sid)
+            .and_then(|p| p.inv.get(stack_idx).copied())
+        else {
+            return;
+        };
+        if let Some(p) = self.world.player_mut(sid) {
+            p.inv.remove(stack_idx);
+        }
+        out.cursor = Some(stack);
+        self.refresh_inventory(sid);
+    }
+
+    /// MapView `itemact(cc0, mc, modflags[, gobid, gobrc])`: the player
+    /// clicked the map with an item on the cursor. cc0 is a screen
+    /// coordinate; the world-space target is the second coord (mc).
+    fn on_map_itemact(&mut self, sid: SessionId, args: &[hnh_proto::ListArg]) {
+        let mc = args.iter().filter_map(|a| a.as_coord()).nth(1);
+        let Some((mx, my)) = mc else { return };
+        let Some(cursor) = self.sessions.get(&sid).and_then(|o| o.cursor) else {
+            return;
+        };
+        let label = cursor.label;
+        match farm::spec_by_seed_label(label) {
+            Some(spec) => self.plant_seed(sid, spec, Self::tile_coord(mx, my), cursor),
+            None => {
+                // Not a seed: legacy map click with a cursor item drops it.
+                let pos = self
+                    .world
+                    .player(sid)
+                    .and_then(|p| self.world.gobs.get(p.gob))
+                    .map(|slot| self.world.gobs.pos[slot]);
+                if let Some(pos) = pos {
+                    let name = self
+                        .world
+                        .res
+                        .name(cursor.res)
+                        .unwrap_or("gfx/invobjs/stone")
+                        .to_owned();
+                    self.spawn_drop_near(pos, leak_static(&name), cursor.ql, cursor.label);
+                    if let Some(out) = self.sessions.get_mut(&sid) {
+                        out.cursor = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Map units -> tile coordinates (11x11 map units per tile).
+    fn tile_coord(mx: i32, my: i32) -> (i32, i32) {
+        (mx.div_euclid(11), my.div_euclid(11))
+    }
+
+    /// Plow Field action: furrow one grass tile (Adventure > Landscaping).
+    /// Tile 9 (PLOWED) is a real tile type the client renders from the
+    /// map stream; the mutation is recorded as a grid override so it
+    /// survives eviction/restart, and fresh MAPDATA re-sent to holders.
+    fn plow_tile(&mut self, sid: SessionId, (tx, ty): (i32, i32)) {
+        let gc = (tx.div_euclid(100), ty.div_euclid(100));
+        let lx = tx.rem_euclid(100) as usize;
+        let ly = ty.rem_euclid(100) as usize;
+        let tile = self.world.grids.grid(gc).tile(lx, ly);
+        if tile != tile::GRASS {
+            debug!(sid, tx, ty, tile, "plow refused: not grass");
+            return;
+        }
+        if self.world.crop_at.contains_key(&(tx, ty)) {
+            debug!(sid, tx, ty, "plow refused: tile occupied");
+            return;
+        }
+        // Drain stamina (server policy; legacy plow-by-hand cost unknown).
+        if let Some(p) = self.world.player_mut(sid) {
+            p.stamina = (p.stamina - 10).max(0);
+        }
+        self.world.grids.mutate_tile(gc, lx, ly, tile::PLOWED);
+        let now = unix_ms();
+        self.world
+            .tilth
+            .insert((tx, ty), now + crate::farm::tilth_decay_ms());
+        // Re-send the mutated grid to every client holding it.
+        let payload = {
+            let grid = self.world.grids.grid(gc);
+            hnh_proto::MapGridPayload {
+                gc,
+                mnm: grid.mnm.clone(),
+                tiles: grid.tiles.as_slice().to_vec(),
+                plot_flags: vec![],
+                plots: vec![],
+            }
+            .encode()
+        };
+        let holders: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, o)| o.grids_seen.contains(&gc))
+            .map(|(s, _)| *s)
+            .collect();
+        for h in holders {
+            if let Some(out) = self.sessions.get_mut(&h) {
+                let pktid = (self.world.tick & 0x3FFFFFFF) as i32;
+                let frags = hnh_proto::fragment_payload(MSG_MAPDATA, pktid, &payload, 1200);
+                for f in frags {
+                    out.send_raw(f);
+                }
+            }
+        }
+        info!(sid, tx, ty, "tile plowed");
+    }
+
+    /// Plant one seed unit from the cursor on a plowed, empty tile.
+    fn plant_seed(&mut self, sid: SessionId, spec: usize, (tx, ty): (i32, i32), cursor: InvStack) {
+        if !self.world.tilth.contains_key(&(tx, ty)) {
+            debug!(sid, tx, ty, "plant refused: tile not plowed");
+            return;
+        }
+        if self.world.crop_at.contains_key(&(tx, ty)) {
+            debug!(sid, tx, ty, "plant refused: tile occupied");
+            return;
+        }
+        // Consume one unit; empty cursor hands the stack back to the flow.
+        let mut cursor = cursor;
+        cursor.count = cursor.count.saturating_sub(1);
+        let spec_data = &farm::CROPS[spec];
+        let res_idx = self.world.res.intern(spec_data.gob_res);
+        let now = unix_ms();
+        let state = crate::farm::CropState {
+            spec: spec as u8,
+            stage: 0,
+            seed_ql: cursor.ql,
+            soil_ql: crate::farm::soil_quality(tx, ty),
+            next_stage_at: now + farm::stage_duration_ms(spec_data).as_millis() as u64,
+        };
+        // Gob at the tile center; hp/speed are unused for plants.
+        let gob = self.world.gobs.spawn(
+            Kind::Crop {
+                spec: spec as u8,
+                stage: 0,
+            },
+            (tx * 11 + 5, ty * 11 + 5),
+            res_idx,
+            1,
+            0,
+        );
+        self.world.crops.insert(gob, state);
+        self.world.crop_at.insert((tx, ty), gob);
+        // Planting clears the tilth decay timer (legacy quirk).
+        self.world.tilth.insert((tx, ty), 0);
+        if let Some(out) = self.sessions.get_mut(&sid) {
+            out.cursor = if cursor.count == 0 {
+                None
+            } else {
+                Some(cursor)
+            };
+        }
+        self.refresh_inventory(sid);
+        self.broadcast_spawn(gob);
+        info!(sid, tx, ty, spec = spec_data.gob_res, "seed planted");
+    }
+
+    /// Click on a crop gob: open the stage-appropriate harvest flower menu.
+    fn open_crop_menu(&mut self, sid: SessionId, target: GobId) {
+        let Some(slot) = self.world.gobs.get(target) else {
+            return;
+        };
+        let Kind::Crop { stage, .. } = self.world.gobs.kind[slot] else {
+            return;
+        };
+        let Some(state) = self.world.crops.get(&target) else {
+            return;
+        };
+        let spec = &farm::CROPS[state.spec as usize];
+        let option = if stage >= spec.stages {
+            "Harvest"
+        } else if stage >= spec.early_stage {
+            "Harvest (unripe)"
+        } else {
+            debug!(sid, stage, "crop not harvestable yet");
+            return;
+        };
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        // One flower menu at a time per session.
+        if let Some((old, _)) = out.crop_menu {
+            out.send(wdg::dst_wdg(old));
+        }
+        if let Some((old, _)) = out.item_menu {
+            out.send(wdg::dst_wdg(old));
+        }
+        let w = out.new_wid("sm");
+        out.send(wdg::new_wdg(
+            w,
+            "sm",
+            -1,
+            -1,
+            0,
+            &[ListVal::S(option.to_owned())],
+        ));
+        out.crop_menu = Some((w, target));
+    }
+
+    /// Flower menu choice on a crop: apply the per-stage yield table.
+    fn harvest_crop(&mut self, sid: SessionId, wid: u16, choice: i32) {
+        let pending = self
+            .sessions
+            .get(&sid)
+            .and_then(|o| o.crop_menu)
+            .filter(|(w, _)| *w == wid);
+        let Some((_, gob)) = pending else {
+            return;
+        };
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        out.crop_menu = None;
+        out.send(wdg::dst_wdg(wid));
+        if choice != 0 {
+            out.send(wdg::wdgmsg(wid, "cancel", &[]));
+            return;
+        }
+        out.send(wdg::wdgmsg(wid, "act", &[ListVal::I(0)]));
+        let Some(slot) = self.world.gobs.get(gob) else {
+            return;
+        };
+        let Kind::Crop { stage, spec } = self.world.gobs.kind[slot] else {
+            return;
+        };
+        let pos = self.world.gobs.pos[slot];
+        let Some(state) = self.world.crops.get(&gob).copied() else {
+            return;
+        };
+        let spec_data = &farm::CROPS[spec as usize];
+        let mature = stage >= spec_data.stages;
+        // Quality roll: seed q + [-5,+5], soil below seed caps at +2
+        // (docs "Quality model"); skill softcap lands with the skill leaf.
+        let roll = farm::roll_from_uniform(self.world.next_ai_rand(11) as u32);
+        let ql = farm::quality_roll(state.seed_ql, state.soil_ql, roll);
+        let yields: Vec<farm::Yield> = if mature {
+            spec_data.mature_yields.to_vec()
+        } else {
+            vec![spec_data.early_yield]
+        };
+        let drawn: Vec<(farm::Yield, u32, u8)> = yields
+            .iter()
+            .map(|y| {
+                let n =
+                    farm::count_from_uniform(y.count, self.world.next_ai_rand(1_000_000) as u32);
+                (*y, n.max(1), ql)
+            })
+            .collect();
+        // Remove the crop and restore a decaying tilth entry.
+        self.world.crops.remove(&gob);
+        self.world
+            .crop_at
+            .remove(&(pos.0.div_euclid(11), pos.1.div_euclid(11)));
+        self.world.gobs.kill(gob);
+        self.broadcast_retract(gob);
+        self.world.tilth.insert(
+            (pos.0.div_euclid(11), pos.1.div_euclid(11)),
+            unix_ms() + crate::farm::tilth_decay_ms(),
+        );
+        for (y, n, q) in drawn {
+            let res_idx = self.world.res.intern(y.res);
+            if let Some(p) = self.world.player_mut(sid) {
+                p.inv.push(InvStack {
+                    res: res_idx,
+                    count: n,
+                    ql: q,
+                    label: y.label,
+                });
+            }
+        }
+        self.refresh_inventory(sid);
+        info!(sid, gob, mature, "crop harvested");
+    }
+
+    /// Per-tick crop growth + tilth decay (farming scheduler pass).
+    fn tick_farming(&mut self) {
+        if self.world.crops.is_empty() && self.world.tilth.is_empty() {
+            return;
+        }
+        let now = unix_ms();
+        let mut due: Vec<(GobId, u8, u64)> = Vec::new();
+        for (gob, state) in self.world.crops.iter() {
+            if state.next_stage_at <= now {
+                let spec = &farm::CROPS[state.spec as usize];
+                let next_stage = (state.stage + 1).min(spec.stages);
+                let next_at = if next_stage >= spec.stages {
+                    u64::MAX
+                } else {
+                    now + farm::stage_duration_ms(spec).as_millis() as u64
+                };
+                due.push((*gob, next_stage, next_at));
+            }
+        }
+        for (gob, stage, next_at) in due {
+            let Some(slot) = self.world.gobs.get(gob) else {
+                continue;
+            };
+            let Kind::Crop { spec, .. } = self.world.gobs.kind[slot] else {
+                continue;
+            };
+            self.world.gobs.kind[slot] = Kind::Crop { spec, stage };
+            self.world.gobs.frame[slot] += 1;
+            if let Some(state) = self.world.crops.get_mut(&gob) {
+                state.stage = stage;
+                state.next_stage_at = next_at;
+            }
+            // Stage update: OD_RES re-send with a fresh sdt byte; the
+            // client's OCache.cres rebuilds the sprite (non-empty sdt).
+            let frame = self.world.gobs.frame[slot];
+            let viewers: Vec<SessionId> = self
+                .sessions
+                .iter()
+                .filter(|(_, o)| o.visible.contains(&gob))
+                .map(|(s, _)| *s)
+                .collect();
+            for v in viewers {
+                let block = self.encode_gob_block(v, gob, true);
+                if let (Some(out), Some(block)) = (self.sessions.get_mut(&v), block) {
+                    out.send_raw(block.clone());
+                    out.unacked.entry(gob).or_default().insert(frame, block);
+                }
+            }
+            trace!(gob, stage, "crop stage advance");
+        }
+        // Tilth decay: unplanted furrows revert to grass.
+        let expired: Vec<(i32, i32)> = self
+            .world
+            .tilth
+            .iter()
+            .filter(|(_, &deadline)| deadline != 0 && deadline <= now)
+            .map(|(t, _)| *t)
+            .collect();
+        for tile in expired {
+            self.world.tilth.remove(&tile);
+            debug!(tx = tile.0, ty = tile.1, "tilth decayed");
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Crafting (crafting-and-building.md: making protocol)
     // ------------------------------------------------------------------
 
@@ -1511,6 +2000,13 @@ impl Game {
                 return;
             }
             self.open_make_window(sid, recipe_id);
+        } else if action.first().map(String::as_str) == Some("plow") {
+            // Plow Field pagina (ad ["plow"]): arm tile plowing; the next
+            // map click plows the tile under the cursor.
+            info!(sid, "plow pagina armed");
+            if let Some(out) = self.sessions.get_mut(&sid) {
+                out.pending_plow = true;
+            }
         } else {
             debug!(sid, ?action, "menu action");
         }
@@ -1795,8 +2291,18 @@ impl Game {
         out.item_menu = Some((w, stack_idx));
     }
 
-    /// Flower menu petal click: `cl <i>`; 0 = Eat.
+    /// Flower menu petal click: `cl <i>`; petal 0 confirms.
     fn on_flower_choice(&mut self, sid: SessionId, wid: u16, choice: i32) {
+        // Crop harvest menus take precedence over the item eat menu.
+        let crop_menu = self
+            .sessions
+            .get(&sid)
+            .and_then(|o| o.crop_menu)
+            .map(|(w, _)| w);
+        if crop_menu == Some(wid) {
+            self.harvest_crop(sid, wid, choice);
+            return;
+        }
         let pending = self
             .sessions
             .get(&sid)
@@ -1966,6 +2472,9 @@ impl Game {
         let t4 = Instant::now();
         self.update_visibility();
         phase_us[4] = t4.elapsed().as_micros();
+        // Farming scheduler (crop growth, tilth decay) is a cheap scan of
+        // the live crop set only; no work with an empty map.
+        self.tick_farming();
         let perf = &mut self.world.perf;
         perf.active_sessions = self.sessions.len();
         perf.phase_us = phase_us;
@@ -2642,6 +3151,19 @@ impl Game {
 
     fn on_session_closed(&mut self, sid: SessionId) {
         if let Some(out) = self.sessions.remove(&sid) {
+            // A stack left on the cursor goes back to the inventory so a
+            // log-out mid-plant does not eat the item.
+            if let Some(stack) = out.cursor {
+                if let Some(p) = self
+                    .world
+                    .by_session
+                    .get(&sid)
+                    .copied()
+                    .and_then(|idx| self.world.players.get_mut(idx))
+                {
+                    p.inv.push(stack);
+                }
+            }
             if let Some(gob) = out.player_gob {
                 self.persist_player(gob);
                 self.broadcast_retract(gob);
@@ -2684,6 +3206,15 @@ fn leak_static(name: &str) -> &'static str {
     Box::leak(name.to_owned().into_boxed_str())
 }
 
+/// Unix time in milliseconds: the shared clock for crop stage deadlines
+/// and tilth decay (survives restarts alongside persisted crops).
+pub fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 impl Kind {
     /// Extract (resname_idx, count, ql, display label) from a Drop kind.
     pub fn drop_info(&self) -> Option<(u16, u8, u8, &'static str)> {
@@ -2701,6 +3232,267 @@ impl Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test (avatar bug): the player's own gob must be streamed
+    /// to the session with OD_BUDDY naming the character. A double insert
+    /// into `visible` (scan phase + stream_spawn) used to suppress the
+    /// spawn block, so the client never received its own avatar gob.
+    #[tokio::test]
+    async fn player_gob_is_streamed_with_buddy() {
+        let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut g = Game::new(
+            42,
+            cmd_rx,
+            net_rx,
+            false,
+            std::env::temp_dir().join("hnh-game-test-save.json"),
+        );
+        let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        g.session_connected(1, tx, raw_tx);
+        let wid = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "charlist")
+            .map(|(k, _)| *k)
+            .expect("charlist widget");
+        g.on_wdgmsg(
+            1,
+            wid,
+            "play",
+            vec![hnh_proto::ListArg::Str("avatared".to_owned())],
+        );
+        // A few ticks: visibility scan must stream the player's own gob.
+        for _ in 0..5 {
+            g.tick();
+        }
+        let mut saw_buddy = false;
+        while let Ok(block) = raw_rx.try_recv() {
+            // Block layout: [MSG_OBJDATA][flags][gobid i32][frame i32][subs].
+            if block.len() < 10 || block[0] != MSG_OBJDATA {
+                continue;
+            }
+            let mut off = 10;
+            while off < block.len() {
+                let code = block[off];
+                off += 1;
+                match code {
+                    OD_END => break,
+                    OD_RES => {
+                        let wire = u16::from_le_bytes([block[off], block[off + 1]]);
+                        off += 2;
+                        if wire & 0x8000 != 0 {
+                            let n = block[off] as usize;
+                            off += 1 + n;
+                        }
+                    }
+                    OD_MOVE => off += 8,
+                    OD_LINBEG => off += 20,
+                    OD_LINSTEP => off += 4,
+                    OD_LAYERS => off += 8,
+                    OD_HEALTH => off += 1,
+                    OD_BUDDY => {
+                        let end = block[off..]
+                            .iter()
+                            .position(|&b| b == 0)
+                            .map(|p| off + p)
+                            .unwrap_or(block.len());
+                        if &block[off..end] == b"avatared" {
+                            saw_buddy = true;
+                        }
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+            if saw_buddy {
+                break;
+            }
+        }
+        assert!(
+            saw_buddy,
+            "player gob spawn block with OD_BUDDY must be streamed"
+        );
+    }
+
+    /// Full plow -> plant -> grow -> harvest flow at the handler level
+    /// (wire transport is covered by server/scripts/test_farming.py).
+    #[tokio::test]
+    async fn farming_flow_end_to_end() {
+        let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut g = Game::new(
+            42,
+            cmd_rx,
+            net_rx,
+            false,
+            std::env::temp_dir().join("hnh-game-test-save.json"),
+        );
+        let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, _raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        g.session_connected(1, tx, raw_tx);
+        let charlist = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "charlist")
+            .map(|(k, _)| *k)
+            .unwrap();
+        g.on_wdgmsg(
+            1,
+            charlist,
+            "play",
+            vec![hnh_proto::ListArg::Str("farmer".to_owned())],
+        );
+        // Put the player on a known grass spot and populate its grid.
+        let pgob = g.world.players[0].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        g.world.gobs.pos[pslot] = (550, 550);
+        g.on_mapreq(1, (0, 0));
+        // Find a grass tile near the player (avoid trees/stones/animals).
+        let mut tile = None;
+        'outer: for r in 0..8i32 {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs() != r && dy.abs() != r {
+                        continue;
+                    }
+                    let tx = 50 + dx;
+                    let ty = 50 + dy;
+                    let gc = (tx.div_euclid(100), ty.div_euclid(100));
+                    let ix = tx.rem_euclid(100) as usize;
+                    let iy = ty.rem_euclid(100) as usize;
+                    if g.world.grids.grid(gc).tile(ix, iy) == tile::GRASS {
+                        tile = Some((tx, ty));
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        let (tx0, ty0) = tile.expect("grass tile near spawn");
+        // 1. Arm the plow pagina, click the tile.
+        let scm = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "scm")
+            .map(|(k, _)| *k)
+            .unwrap();
+        g.on_wdgmsg(
+            1,
+            scm,
+            "act",
+            vec![hnh_proto::ListArg::Str("plow".to_owned())],
+        );
+        assert!(
+            g.sessions.get(&1).unwrap().pending_plow,
+            "plow pagina must arm"
+        );
+        let c0 = hnh_proto::ListArg::Coord(0, 0);
+        let mc = hnh_proto::ListArg::Coord(tx0 * 11 + 5, ty0 * 11 + 5);
+        let mapview = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "mapview")
+            .map(|(k, _)| *k)
+            .unwrap();
+        g.on_wdgmsg(
+            1,
+            mapview,
+            "click",
+            vec![
+                c0.clone(),
+                mc.clone(),
+                hnh_proto::ListArg::Int(1),
+                hnh_proto::ListArg::Int(0),
+            ],
+        );
+        assert!(
+            g.world.tilth.contains_key(&(tx0, ty0)),
+            "tile must be furrowed"
+        );
+
+        // 2. Take a seed stack onto the cursor and itemact the tile.
+        let seed_idx = g.world.players[0]
+            .inv
+            .iter()
+            .position(|s| s.label == "Wheat Seeds")
+            .expect("starter seeds");
+        let stack = g.world.players[0].inv[seed_idx];
+        g.sessions.get_mut(&1).unwrap().cursor = Some(stack);
+        g.on_map_itemact(1, &[c0, mc, hnh_proto::ListArg::Int(0)]);
+        // Crop gob exists and is registered at the tile.
+        let crop_gob = *g
+            .world
+            .crop_at
+            .get(&(tx0, ty0))
+            .expect("crop gob registered");
+        assert!(g.world.crops.contains_key(&crop_gob));
+        // Cursor kept the remainder (5 seeds - 1).
+        assert_eq!(
+            g.sessions.get(&1).unwrap().cursor.as_ref().map(|s| s.count),
+            Some(4)
+        );
+
+        // 3. Force growth to maturity by rewinding stage deadlines.
+        let state = g.world.crops.get_mut(&crop_gob).unwrap();
+        state.next_stage_at = 0;
+        g.tick();
+        assert_eq!(
+            g.world.crops.get(&crop_gob).unwrap().stage,
+            1,
+            "first stage advance on due tick"
+        );
+        for _ in 0..8 {
+            let st = g.world.crops.get_mut(&crop_gob).unwrap();
+            st.next_stage_at = 0;
+            g.tick();
+        }
+        let mature = {
+            let slot = g.world.gobs.get(crop_gob).unwrap();
+            match g.world.gobs.kind[slot] {
+                Kind::Crop { stage, spec } => stage >= farm::CROPS[spec as usize].stages,
+                _ => false,
+            }
+        };
+        assert!(mature, "crop must reach maturity after forced advances");
+
+        // 4. Click the crop -> flower menu -> harvest -> yields.
+        g.on_map_click(
+            1,
+            &[
+                hnh_proto::ListArg::Coord(0, 0),
+                hnh_proto::ListArg::Coord(tx0 * 11 + 5, ty0 * 11 + 5),
+                hnh_proto::ListArg::Int(1),
+                hnh_proto::ListArg::Int(0),
+                hnh_proto::ListArg::Int(crop_gob),
+                hnh_proto::ListArg::Coord(tx0 * 11 + 5, ty0 * 11 + 5),
+            ],
+        );
+        let sm = g.sessions.get(&1).unwrap().crop_menu.map(|(w, _)| w);
+        assert!(sm.is_some(), "harvest flower menu must open");
+        g.on_flower_choice(1, sm.unwrap(), 0);
+        let inv_before = g.world.players[0].inv.len();
+        assert!(inv_before > 5, "harvest must push yields into inventory");
+        assert!(
+            !g.world.crops.contains_key(&crop_gob)
+                && g.world.crop_at.get(&(tx0, ty0)) != Some(&crop_gob),
+            "crop gob removed from registries"
+        );
+        // Tilth decay timer restored (non-zero deadline again).
+        assert_ne!(g.world.tilth.get(&(tx0, ty0)), Some(&0));
+    }
 
     /// Predators in a saturated world must engage the player: chase, open
     /// the Fightview window and start swinging back.

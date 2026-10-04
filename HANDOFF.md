@@ -897,3 +897,395 @@ variants) -> headless avatar.
   avatar/head/hair must render. If any refusal lines appear in
   client.log ("res http: connect refused for <url>"), send the next
   bugreport - the log now names the exact URL after retries.
+
+---
+
+## Session end 1791079026
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079050
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079087
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079110
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079132
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079170
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079188
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079217
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079243
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079261
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079275
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079312
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079345
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079454
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079472
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079520
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079538
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079560
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079766
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079787
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079829
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079855
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079877
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079888
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079913
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079936
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079945
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791079964
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791080087
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791080280
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791080435
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791080778
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791080810
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791080851
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791080889
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791080907
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791080933
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791080995
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791081058
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791081079
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791081209
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791081343
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791081429
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791081466
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791081487
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791081529
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791081549
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791081561
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791081664
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+

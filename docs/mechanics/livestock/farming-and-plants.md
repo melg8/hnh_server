@@ -323,6 +323,45 @@ products) are cataloged in the companion document
 
 ## Server implementation notes (farming)
 
+Implemented in the Rust server (commit "Crop farming: plow, plant, grow,
+harvest"): module `server/crates/hnh-server/src/farm.rs` holds the crop
+registry (8 crops whose item and gob resources exist in the shipped pack:
+carrot, wheat, flax, hemp, pumpkin, tea, poppy, yellow onion), the quality
+roll and the soil-quality function; handlers live in `game.rs`
+(`plow_tile`, `plant_seed`, `open_crop_menu`, `harvest_crop`,
+`tick_farming`).
+
+- Plowing: `paginae/act/plow` (ad `["plow"]`) is pushed to every session;
+  arming it makes the next map click furrow one grass tile
+  (`GridStore::mutate_tile` to tile id 9 = PLOWED). Mutations are recorded
+  in `GridStore.overrides`, re-applied on on-demand generation, and
+  persisted in save v2, so furrows survive eviction and restarts. Fresh
+  MAPDATA is re-sent to every session holding the grid.
+- Planting: the client's take -> cursor -> `itemact` flow (Item.mousedown
+  sends `take` from the item widget; MapView.iteminteract sends
+  `itemact(cc0, mc, ...)` - the world target is the SECOND coord). One
+  seed unit is consumed, a crop gob spawns at the tile center with sdt
+  stage 0, and the tilth decay timer is cleared (legacy quirk).
+- Growth: `tick_farming` scans `World.crops` each tick against unix-ms
+  deadlines; a due crop advances its stage byte and gets a full OD_RES
+  re-send with fresh sdt to every viewer (OCache.cres rebuilds the sprite).
+  Durations are legacy wiki hours divided by `HNH_CROP_TIME_SCALE`
+  (default 60 -> 1 legacy hour = 1 real minute; 1.0 = legacy real time;
+  250 ms per-stage floor for tests).
+- Harvest: clicking a crop opens a stage-appropriate flower menu
+  ("Harvest (unripe)" from `early_stage`, "Harvest" at maturity). Mature
+  wheat/flax/hemp return seeds rather than grain because the 2009 pack
+  lacks a grain invobj (see Open questions); quality is rolled per the
+  quality model (seed + [-5,+5], soil below seed caps at +2). The farming
+  skill softcap is applied once the LP/skill economy lands.
+- Tilth decay: unplanted furrows revert (override removed) after 8 legacy
+  hours at the same scale; a 10 s minimum keeps test scales sane.
+- Persistence: save v2 carries `crops` (resource name, tile, spec, stage,
+  qualities, next deadline), `tilth` (tile -> deadline, 0 = planted) and
+  `tile_overrides` (terraforming state), all additive over v1.
+
+Original notes kept for reference below.
+
 - State: per-tile records `{tilth: bool, tilth_planted_at, tilth_decay_at, soil_q}`,
   per-crop-gob records `{res: crop_id, stage: u8, planted_at, stage_durations: [hours],
   seed_q, random_offset}`. Persist tilth and soil quality; crop gobs persist with

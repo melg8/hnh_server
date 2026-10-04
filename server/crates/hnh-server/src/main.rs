@@ -7,6 +7,7 @@
 mod auth;
 mod bots;
 mod craft;
+mod farm;
 mod fight;
 mod game;
 mod handoff;

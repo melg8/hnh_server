@@ -40,10 +40,37 @@ pub struct SaveData {
     pub seed: u64,
     pub saved_at_unix: u64,
     pub players: Vec<SavedPlayer>,
+    /// Persisted growing crops (v2, additive): gob resource name + state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crops: Vec<SavedCrop>,
+    /// Persisted furrowed tiles: (tile x, tile y) -> decay deadline unix-ms
+    /// (0 = planted). v2, additive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tilth: Vec<((i32, i32), u64)>,
+    /// Persisted tile overrides (terraforming): (tx, ty) -> tile id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tile_overrides: Vec<((i32, i32), u8)>,
+}
+
+/// A persisted growing crop. Resource names keep the entry stable across
+/// process-local resource renumbering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedCrop {
+    /// Planted gob resource (`gfx/terobjs/plants/...`).
+    pub res: String,
+    /// Tile coordinates (11x11 map units per tile).
+    pub tile: (i32, i32),
+    /// Crop spec index into `farm::CROPS` (registry order is stable).
+    pub spec: u8,
+    pub stage: u8,
+    pub seed_ql: u8,
+    pub soil_ql: u8,
+    /// Absolute unix-ms deadline of the next stage advance.
+    pub next_stage_at: u64,
 }
 
 impl SaveData {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 
     pub fn new(seed: u64) -> Self {
         SaveData {
@@ -51,6 +78,9 @@ impl SaveData {
             seed,
             saved_at_unix: now_unix(),
             players: Vec::new(),
+            crops: Vec::new(),
+            tilth: Vec::new(),
+            tile_overrides: Vec::new(),
         }
     }
 }
@@ -67,6 +97,16 @@ pub struct SaveStore {
     path: PathBuf,
     /// Name -> latest snapshot (online players overwrite on autosave).
     pub players: HashMap<String, SavedPlayer>,
+    /// World-state snapshot taken at last flush (crops + tilth).
+    pub world_state: WorldState,
+}
+
+/// World-level persisted state gathered by the game task at flush time.
+#[derive(Default)]
+pub struct WorldState {
+    pub crops: Vec<SavedCrop>,
+    pub tilth: Vec<((i32, i32), u64)>,
+    pub tile_overrides: Vec<((i32, i32), u8)>,
 }
 
 impl SaveStore {
@@ -74,13 +114,22 @@ impl SaveStore {
     /// characters. A missing file is a fresh world; a corrupt file logs and
     /// starts fresh rather than wedging the server.
     pub fn load(path: &Path, expected_seed: u64) -> SaveStore {
-        let players = match std::fs::read(path) {
+        let (players, world_state) = match std::fs::read(path) {
             Ok(bytes) => match serde_json::from_slice::<SaveData>(&bytes) {
-                Ok(data) if data.seed == expected_seed => data
-                    .players
-                    .into_iter()
-                    .map(|p| (p.name.clone(), p))
-                    .collect(),
+                Ok(data) if data.seed == expected_seed => {
+                    let ws = WorldState {
+                        crops: data.crops.clone(),
+                        tilth: data.tilth.clone(),
+                        tile_overrides: data.tile_overrides.clone(),
+                    };
+                    (
+                        data.players
+                            .into_iter()
+                            .map(|p| (p.name.clone(), p))
+                            .collect(),
+                        ws,
+                    )
+                }
                 Ok(data) => {
                     tracing::warn!(
                         path = %path.display(),
@@ -88,19 +137,25 @@ impl SaveStore {
                         expected = expected_seed,
                         "save seed mismatch: starting fresh characters"
                     );
-                    HashMap::new()
+                    (HashMap::new(), WorldState::default())
                 }
                 Err(e) => {
                     tracing::warn!(path = %path.display(), error = %e, "unreadable save file: starting fresh");
-                    HashMap::new()
+                    (HashMap::new(), WorldState::default())
                 }
             },
-            Err(_) => HashMap::new(),
+            Err(_) => (HashMap::new(), WorldState::default()),
         };
-        tracing::info!(path = %path.display(), saved_chars = players.len(), "save store loaded");
+        tracing::info!(
+            path = %path.display(),
+            saved_chars = players.len(),
+            saved_crops = world_state.crops.len(),
+            "save store loaded"
+        );
         SaveStore {
             path: path.to_path_buf(),
             players,
+            world_state,
         }
     }
 
@@ -138,6 +193,8 @@ impl SaveStore {
         let mut data = SaveData::new(seed);
         data.players = self.players.values().cloned().collect();
         data.players.sort_by(|a, b| a.name.cmp(&b.name));
+        data.crops = self.world_state.crops.clone();
+        data.tilth = self.world_state.tilth.clone();
         let bytes = serde_json::to_vec(&data)?;
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, &bytes)?;
