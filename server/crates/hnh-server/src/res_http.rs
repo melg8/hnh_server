@@ -71,12 +71,25 @@ async fn handle(mut stream: TcpStream, dir: Arc<PathBuf>) -> anyhow::Result<()> 
         }
     }
     let req = String::from_utf8_lossy(&buf);
-    let path = req
+    // The real client requests "<name>.res" while the legacy test helpers
+    // request bare names; normalize so both map to dir/<name>.res (this
+    // double-suffix bug made every real-client HTTP fetch 404, forcing all
+    // resources through local sources only).
+    let raw_path = req
         .split_whitespace()
         .nth(1)
         .unwrap_or("/")
         .trim_start_matches('/')
-        .to_owned();
+        .strip_suffix(".res")
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            req.split_whitespace()
+                .nth(1)
+                .unwrap_or("/")
+                .trim_start_matches('/')
+                .to_owned()
+        });
+    let path = raw_path;
     // Map "gfx/foo" -> dir/gfx/foo.res; reject path traversal.
     if path.contains("..") || path.contains('\\') {
         warn!(?peer, path = %path, "res 403 (path traversal)");

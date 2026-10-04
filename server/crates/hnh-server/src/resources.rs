@@ -3,6 +3,49 @@
 //! its own id -> (name, version) mappings before first use.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+
+/// Served resource directory (gameres/), set once at startup; the file
+/// version reader needs it to inspect actual .res headers.
+static RES_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static VER_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, u16>>> =
+    std::sync::OnceLock::new();
+
+/// Point the version reader at the directory the res HTTP server serves.
+pub fn init_res_dir(dir: PathBuf) {
+    let _ = RES_DIR.set(dir);
+    let _ = VER_CACHE.set(std::sync::Mutex::new(HashMap::new()));
+}
+
+/// True resource version, parsed from the served `<name>.res` header
+/// ("Haven Resource 1\n" + LE u16 version). The client rejects any
+/// announce whose version differs from the file it loads
+/// ("Wrong res version" LoadException), which used to leave every
+/// hard-coded-version resource broken client-side: missing tilesets and
+/// avatar layers render as a black screen with an invisible character.
+/// Falls back to 1 when the file is unreadable.
+pub fn file_version(name: &str) -> u16 {
+    const SIG: &[u8] = b"Haven Resource 1";
+    if let Some(cache) = VER_CACHE.get() {
+        if let Ok(map) = cache.lock() {
+            if let Some(&v) = map.get(name) {
+                return v;
+            }
+        }
+    }
+    let ver = RES_DIR
+        .get()
+        .and_then(|dir| std::fs::read(dir.join(format!("{name}.res"))).ok())
+        .filter(|bytes| bytes.len() >= SIG.len() + 2 && &bytes[..SIG.len()] == SIG)
+        .map(|bytes| u16::from_le_bytes([bytes[SIG.len()], bytes[SIG.len() + 1]]))
+        .unwrap_or(1);
+    if let Some(cache) = VER_CACHE.get() {
+        if let Ok(mut map) = cache.lock() {
+            map.insert(name.to_owned(), ver);
+        }
+    }
+    ver
+}
 
 pub struct ResTable {
     /// game-global name -> game-global index.
@@ -77,13 +120,15 @@ impl ResTable {
     }
 
     /// Whether this session-local wire id still needs an RMSG_RESID push.
+    /// The announced version is the real file version so the client's own
+    /// version check accepts the resource it downloads or loads locally.
     pub fn pending_announce(&self, wire_idx: u16) -> Option<(&'static str, u16)> {
         if self.announced.contains(&wire_idx) {
             return None;
         }
         self.wire.get(wire_idx as usize)?;
         let name = self.wire_names.get(&wire_idx)?;
-        Some((name, 1))
+        Some((name, file_version(name)))
     }
 }
 
@@ -176,12 +221,14 @@ pub mod wdg {
         m.finish()
     }
 
-    /// RMSG_PAGINAE add entries.
+    /// RMSG_PAGINAE add entries. The per-pagina version must be the real
+    /// file version - a mismatch makes the client's MenuGrid throw
+    /// PaginaException, which kills the UI receive thread.
     pub fn paginae_add(names: &[&str]) -> Vec<u8> {
         let mut m = MessageBuf::new();
         m.uint8(RMSG_PAGINAE);
         for n in names {
-            m.uint8(b'+').string(n).uint16(1);
+            m.uint8(b'+').string(n).uint16(super::file_version(n));
         }
         m.finish()
     }

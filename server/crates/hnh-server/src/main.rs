@@ -203,6 +203,8 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             res_dir.display()
         ));
     }
+    // Version announcements read the actual .res headers from this dir.
+    resources::init_res_dir(res_dir.clone());
     let res_listener = res_http::bind().await.map_err(|e| {
         anyhow::anyhow!(
             "cannot bind resource http port {}: {e:#}",

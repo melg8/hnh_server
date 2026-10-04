@@ -929,9 +929,10 @@ impl Game {
         for (w, n, v) in pending {
             out.send(wdg::resid(w, n, v));
         }
-        // Tilesets before first MAPDATA.
-        for (id, name, ver) in hnh_world::TILESETS {
-            out.send(wdg::tiles(*id, name, *ver));
+        // Tilesets before first MAPDATA; the version must be the real file
+        // version - the client hard-rejects mismatched announces.
+        for (id, name, _ver) in hnh_world::TILESETS {
+            out.send(wdg::tiles(*id, name, crate::resources::file_version(name)));
         }
         // HUD widgets.
         let w_slen = out.new_wid("slen");
@@ -1142,7 +1143,14 @@ impl Game {
         m.uint8(0); // flags
         m.int32(id);
         m.int32(frame as i32);
-        if include_res {
+        // Players must NOT be announced via OD_RES: the avatar base resource
+        // (gfx/borka/body) carries no neg layer, so ResDrawable's eager
+        // ImageSprite creation throws "No negative found" inside the
+        // client's session reader thread and kills it - the observed black
+        // screen after entering the world. Players render through
+        // OD_LAYERS (Layered drawable) only.
+        let is_player = matches!(kind, Kind::Player { .. });
+        if include_res && !is_player {
             // OD_RES with the resource; sprite dynamic data for plants.
             m.uint8(OD_RES).uint16(wire_res | 0x8000);
             let sdt = match kind {
@@ -1222,6 +1230,19 @@ impl Game {
             let msg = wdg::resid(wire, name, ver);
             out.send(msg);
             out.res.mark_announced(wire);
+        }
+        // Player avatar layers: announce base + layer resources before the
+        // spawn block. The client resolves OD_LAYERS ids through these
+        // RESIDs; without them the avatar renders invisible ("no doll").
+        if matches!(self.world.gobs.kind[slot], Kind::Player { .. }) {
+            for layer_name in ["gfx/borka/body", "gfx/borka/head", "gfx/borka/hair"] {
+                let gi = self.world.res.intern(layer_name);
+                let w = out.res.wire_named(gi, layer_name);
+                if let Some((name, ver)) = out.res.pending_announce(w) {
+                    out.send(wdg::resid(w, name, ver));
+                    out.res.mark_announced(w);
+                }
+            }
         }
         // Encode and register the spawn block (separate borrow scope).
         if let Some(block) = self.encode_gob_block(sid, id, true) {
