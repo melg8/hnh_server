@@ -92,16 +92,16 @@ impl Species {
         match self {
             Species::Deer | Species::Aurochs => vec![
                 ("gfx/invobjs/meat", 3, self.meat_label()),
-                ("gfx/invobjs/hide", 2, ""),
+                ("gfx/invobjs/hide-raw-fox", 2, ""),
             ],
             Species::Cow => vec![
                 ("gfx/invobjs/meat", 4, self.meat_label()),
-                ("gfx/invobjs/hide", 3, ""),
+                ("gfx/invobjs/hide-raw-cow", 3, ""),
             ],
             Species::Boar => vec![("gfx/invobjs/meat", 3, self.meat_label())],
             Species::Fox => vec![
                 ("gfx/invobjs/meat", 1, self.meat_label()),
-                ("gfx/invobjs/tail", 1, ""),
+                ("gfx/invobjs/hide-raw-fox", 1, ""),
             ],
             Species::Wolf => vec![("gfx/invobjs/meat", 2, self.meat_label())],
             Species::Hare => vec![("gfx/invobjs/meat", 1, self.meat_label())],

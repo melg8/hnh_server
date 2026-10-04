@@ -723,6 +723,22 @@ connection attempt and closes the socket (src/haven/Session.java lines
 - MSG_SESS attempts arrive as duplicates (client retries every 2 s up to
   10 times); the accept reply is idempotent - answer each duplicate with
   the same error-0 datagram until the client stops.
+- Movement timing (verified against src/haven/LinMove.java, session 20):
+  the client interpolates a whole LINBEG move on its own render clock -
+  `ctick: a += (dt/1000)/(c*0.06) * 0.9` - so it covers the path in
+  `c * 66.67 ms` no matter when LINSTEP frames arrive, and `setl` only
+  ever ADVANCES the client progress. Therefore: derive the step count as
+  `c = round(total_ms / 66.67)`, send LINSTEP `l = floor(progress * c)`
+  only when the index advances, and finish each move with ONE block
+  carrying `OD_MOVE` (destination) followed by `OD_LINSTEP(l >= c)`:
+  `Gob.move` pins `rc` to the goal, then linstep drops the Moving
+  attribute. A final bare LINSTEP without OD_MOVE lets `position()` fall
+  back to the STALE pre-move `rc` - the avatar visibly rubber-bands to
+  its start point (measured on the real client).
+- Retargeting while moving must start the new LINBEG from the mover's
+  interpolated position, not from the old destination: the client snaps
+  the gob to the new `s` the moment LINBEG arrives, so a
+  destination-anchored restart teleports on rapid clicks.
 
 ## Open questions
 

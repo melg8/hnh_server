@@ -22,8 +22,9 @@ trap cleanup EXIT
 
 # --- server (fresh save per run: no cross-run state) ---
 cd $REPO
-RUST_LOG=hnh_server=trace server/target/release/hnh-server --seed 42 \
-  --save save/e2e_$TAG.json $EXTRA > /tmp/server_$TAG.log 2>&1 &
+rm -f $REPO/save/e2e_$TAG.json
+HNH_SAVE_FILE=$REPO/save/e2e_$TAG.json RUST_LOG=hnh_server=trace \
+  server/target/release/hnh-server --seed 42 $EXTRA > /tmp/server_$TAG.log 2>&1 &
 SPID=$!
 sleep 2
 if ! kill -0 $SPID 2>/dev/null; then
@@ -50,7 +51,7 @@ DISPLAY=:99 LD_LIBRARY_PATH=$JOGL:$X11 LIBGL_ALWAYS_SOFTWARE=1 \
   $J8/bin/java -cp "$CP" \
   -Djava.library.path=$JOGL \
   -Dhaven.resdir=$REPO/gameres \
-  -Dhaven.autoplay=$USERNAME \
+  -Dhaven.driveuser=$USERNAME \
   -javaagent:$REPO/scripts/jogl/agent/driveagent.jar \
   haven.MainFrame > /tmp/client_$TAG.log 2>&1 &
 JPID=$!

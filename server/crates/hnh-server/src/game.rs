@@ -4237,8 +4237,12 @@ impl Game {
             self.world.gobs.mv[slot] = None;
             self.world.gobs.frame[slot] += 1;
             self.world.gobs.set_pos(slot, (tx, ty));
-            // l >= c: the client clears the Moving attribute and idles.
-            self.linstep_broadcast(id, steps);
+            // Pin the destination into the client's gob.rc, THEN remove the
+            // Moving attribute: linstep(l >= c) alone would drop Moving and
+            // position() would fall back to the STALE pre-move rc - the
+            // avatar visibly snapped back to its start point (the measured
+            // "walks then rubber-bands home" defect).
+            self.finish_move_broadcast(id, (tx, ty), steps);
             if matches!(self.world.gobs.kind[slot], Kind::Player { .. }) {
                 self.stream_pose(slot, u8::MAX);
             }
@@ -4274,6 +4278,40 @@ impl Game {
                     .int32(frame as i32)
                     .uint8(OD_LINSTEP)
                     .int32(l)
+                    .uint8(OD_END);
+                let block = m.finish();
+                out.send_raw(block.clone());
+                out.unacked.entry(id).or_default().insert(frame, block);
+            }
+        }
+    }
+
+    /// Move finalizer: OD_MOVE to the destination followed by the final
+    /// LINSTEP (l >= c). One OBJDATA block, applied in order client-side:
+    /// Gob.move pins rc = destination, then linstep drops the Moving
+    /// attribute, so position() rests exactly on the goal.
+    fn finish_move_broadcast(&mut self, id: GobId, target: (i32, i32), c: i32) {
+        let Some(slot) = self.world.gobs.get(id) else {
+            return;
+        };
+        let frame = self.world.gobs.frame[slot];
+        let viewers: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, o)| o.visible.contains(&id))
+            .map(|(s, _)| *s)
+            .collect();
+        for v in viewers {
+            if let Some(out) = self.sessions.get_mut(&v) {
+                let mut m = MessageBuf::new();
+                m.uint8(MSG_OBJDATA)
+                    .uint8(0)
+                    .int32(id)
+                    .int32(frame as i32)
+                    .uint8(OD_MOVE)
+                    .coord(target.0, target.1)
+                    .uint8(OD_LINSTEP)
+                    .int32(c)
                     .uint8(OD_END);
                 let block = m.finish();
                 out.send_raw(block.clone());

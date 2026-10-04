@@ -196,14 +196,23 @@ scripts/jogl/deploy-agent-env.sh
 # widget chain, a real AWT Robot map click, and MOVEMENT verdicts read
 # from the client's own gob position:
 scripts/jogl/run-real-client-e2e.sh <username> <tag>
+
+# Character-selection portrait: captures the charlist screen (the agent
+# picks the character itself via Charlist.choose_player after the shot)
+# and pixel-checks the avatar frame:
+scripts/jogl/verify_charlist_portrait.sh <tag>
 ```
 
-`MOVEMENT: MOVED` (twice: two clicks) is the pass line; the client log
-is at `/tmp/client_<tag>.log`, the server trace at `/tmp/server_<tag>.log`.
-For visual verification (portrait, avatar, rendering) the agent saves
-full-window screenshots to `/tmp/client_world_*.png` - READ them, do not
-assume. The client debug flag `-Dhaven.debugclicks=true` traces which
-branch consumes a map click when you need to debug input handling.
+`MOVEMENT: MOVED` plus `SPEED VERDICT: OK` (measured tiles/s inside the
+documented 3.0 walk gait window), `NO TELEPORT: OK`, and
+`RAPID CLICKS: GLIDING` are the movement pass lines; `PORTRAIT: OK` is the
+pass line for the login card. The client log is at `/tmp/client_<tag>.log`,
+the server trace at `/tmp/server_<tag>.log`. For visual verification
+(portrait, avatar pose, rendering) the agent saves full-window screenshots
+to `/tmp/client_charlist.png`, `/tmp/client_walking.png`,
+`/tmp/client_world_*.png` - READ them, do not assume. The client debug flag
+`-Dhaven.debugclicks=true` traces which branch consumes a map click when
+you need to debug input handling.
 
 Rule of thumb: a fix is done when the wire test passes AND the real
 client demonstrates the behavior. Record both evidences in HANDOFF.md.

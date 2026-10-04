@@ -835,3 +835,63 @@ AGENTS.md), e29538f, plus the test_farming parser fix.
   craft paginae ad->action wiring; grid-owner partitioning for 10k;
   shared visibility groups (dedupe per-cell candidate scans) as the
   documented 10k lever.
+
+## 2026-10-04 - Session 20: movement fidelity + charlist portrait (real-client verified)
+Continuation under .unlazy/session20 (tree 99; gates in
+.unlazy/session20/GATES.md, all leaf gates met). Commit 7d42202 (server
+movement rework) + the follow-up fixes in this session.
+
+- The four user-reported defects were ROOT-CAUSED on the client side and
+  fixed server-side / client-side, then verified on the REAL GL client:
+  1) "No face at login" (charlist card): TWO stacked issues. The original
+     TexRT AvaRender draws layers onto the framebuffer under a bottom-up
+     ortho and copies the screen back - on this render stack the card
+     stayed empty. AvaRender is now a CPU composite (TexI, BufferedImage,
+     z-ordered imgc layers) anchored so the figure lands in the rectangle
+     Avaview actually shows (its draw offset exposes buffer rect
+     69..143 x, 20..94 y). VERIFIED: screenshot shows the character in the
+     card; AVATAR COMPOSITE images=6; PORTRAIT: OK (2024 dark px).
+     The early "portrait OK" verdict was a FALSE POSITIVE (the pixel
+     script looked at the login art, not the card) - the visual read of
+     /tmp/client_charlist.png caught it; the script now checks the real
+     frame region. READ THE SCREENSHOTS.
+  2) "Teleports on rapid clicks": the server pinned the logical position
+     to the destination at move start, so a re-click restarted the move
+     from the destination. start_move now retargets from the interpolated
+     on-path position. VERIFIED: RAPID CLICKS: GLIDING.
+  3) "Rubber-band to start after each walk" (found while verifying 2):
+     a final bare LINSTEP (l >= c) drops the client Moving attribute and
+     position() falls back to the STALE pre-move rc. The finalizer now
+     sends OD_MOVE (destination) + LINSTEP(l>=c) in one block, so Gob.move
+     pins rc first. VERIFIED: DIAG pos==rc==destination after arrival;
+     MOVEMENT: MOVED 555,555 -> 575,575 exactly.
+  4) "Moves too fast / no walking animation": (a) c was derived from
+     100 ms ticks while the client interpolates a move in c*66.67 ms -
+     clients outran the server 1.5x; c is now total_ms*3/200. (b) The
+     base speed 44 subtile/s exceeded the documented walk speed; the
+     gait system (crawl/walk/run/sprint = 16/33/50/66 subtile/s, RoB
+     Glossary) is implemented with speedget cur=1 max=3 and the set
+     wdgmsg. (c) Walking-pose animation: the server streams walking
+     frame sets (OD_LAYERS) at 150 ms/frame while moving and the standing
+     set on arrival. VERIFIED: SPEED 3.43 tiles/s (measured on the real
+     client), mid-walk screenshot shows a walking pose.
+- Harness updates: DriveAgent now captures the charlist card (waits for
+  Charlist.chars, dumps the AvaRender layers + composite PNG), picks the
+  character itself via Charlist.choose_player (no autoplay hack needed),
+  measures tiles/s over moving samples, and reports NO TELEPORT /
+  RAPID CLICKS verdicts; verify_charlist_portrait.sh added and required
+  in AGENTS.md. e2e runner fixed: the server takes HNH_SAVE_FILE (the
+  old --save arg was silently rejected, so every "fresh" run loaded the
+  shared world.json with 1019 stale characters).
+- Pack repairs: 16 more invobj resources shipped without neg layers
+  (stone drop was throwing "No negative found" on the render thread);
+  scripts/add_neg_batch.py synthesizes them in place + mirrors to
+  res/compiled. Animal loot renamed to resources that exist
+  (hide-raw-fox/cow; tail/hide did not exist).
+- Verified: cargo test 90 green (11+71+8), fmt+clippy -D warnings clean,
+  real client MOVEMENT/SPEED/TELEPORT/RAPID/PORTRAIT all OK (s20k).
+- NEXT (handoff): grid-owner partitioning for 10k; shared visibility
+  groups; mapview ground-drop flow; equipment effects (armor class,
+  avatar layer changes); craft pagina ad->action wiring; the charlist
+  card could use a bigger portrait (74x74 window shows a small figure) -
+  cosmetic.

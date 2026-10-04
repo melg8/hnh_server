@@ -85,7 +85,7 @@ Tile id semantics. The client's minimap color table (`MCache.colors`, lines 61-8
 
 Ids without a client color render magenta in `Grid.render()`. The external source adds ids the fork's table omits (forum thread 35295, world-7 era): 3-7 brick floors (red/yellow/black/blue/white), 22 house cellar, 23 mine entry, 26 mountain. Id 2 is not listed anywhere in the repo.
 
-Gameplay notes (external, community-verified on legacy-era servers): grass/heath/moor/forest/dirt are terraformable; water, shallow water, cave, mountain, void and brick/paved floors are fixed; plowed (9) is the intermediate state for farming (see `../livestock/farming-and-plants.md`) and decays back over time; `void` (255) is what mountain becomes when mined out. Walkability and movement speed per tile type are server-side rules not visible in this client.
+Gameplay notes (external, community-verified on legacy-era servers): grass/heath/moor/forest/dirt are terraformable; water, shallow water, cave, mountain, void and brick/paved floors are fixed; plowed (9) is the intermediate state for farming (see `../livestock/farming-and-plants.md`) and decays back over time; `void` (255) is what mountain becomes when mined out. Walkability and movement speed per tile type are server-side rules not visible in this client. Implemented server-side (session 20): passability table plus a per-tile speed CAP as a percent of the mover's gait speed - deep water/shallow water/mountain/cave impassable, conifer/broadleaf 60%, swamp 50%, sand 80%, moor/heath 90%, everything else 100% (read at the starting tile of each move leg).
 
 ## Flavor objects: deterministic per-tile placement (randoom)
 
