@@ -20,3 +20,5 @@ docs/javadoc/
 
 # Runtime logs and bug reports (windows/collect-logs.bat)
 /logs/
+__pycache__/
+*.pyc
