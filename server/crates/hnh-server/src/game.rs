@@ -619,19 +619,11 @@ impl Game {
         // `Resource.layers(imgc)` of every listed resource, so the layers
         // must be IMAGE-bearing standing frames - the pose-router
         // resources ("gfx/borka/body" et al) carry no imgc layers and
-        // would leave the portrait blank ("no face" bug report). Frame 0
-        // of the standing pose of each body part composites into the
-        // full character; z-order comes from each Image's z field.
-        let portrait_layers: &[&'static str] = &[
-            "gfx/borka/body/standing/legs-0",
-            "gfx/borka/body/standing/torso/male-0",
-            "gfx/borka/body/standing/head-0",
-            "gfx/borka/body/standing/arm/idle/left-0",
-            "gfx/borka/body/standing/arm/idle/right-0",
-            "gfx/borka/hair-karin/standing/hair-0",
-        ];
-        let mut layer_ids = Vec::with_capacity(portrait_layers.len());
-        for name in portrait_layers {
+        // would leave the portrait blank ("no face" bug report). The
+        // same frame set layers the in-world avatar, so the login card
+        // and the world character match.
+        let mut layer_ids = Vec::with_capacity(Self::player_layer_names().len());
+        for name in Self::player_layer_names() {
             let global = self.world.res.intern(name);
             let w = out.res.wire_named(global, name);
             if let Some((n, v)) = out.res.pending_announce(w) {
@@ -640,7 +632,7 @@ impl Game {
             }
             layer_ids.push(w);
         }
-        info!(layers = ?portrait_layers, "charlist portrait layers announced");
+        info!(layers = ?Self::player_layer_names(), "charlist portrait layers announced");
         out.send(wdg::new_wdg(
             w_bg,
             "img",
@@ -983,12 +975,30 @@ impl Game {
         for (id, name, _ver) in hnh_world::TILESETS {
             out.send(wdg::tiles(*id, name, crate::resources::file_version(name)));
         }
-        // HUD widgets.
+        // HUD widgets. The mapview MUST be created before the slen HUD:
+        // this fork's SlenHud constructor builds the MinimapPanel, which
+        // captures `ui.mapview` at creation time - with the old order
+        // (slen first) the minimap held a null MapView and the first
+        // real render tick died with an NPE in MiniMap.draw, freezing
+        // the client right after entering the world (the render-only
+        // path no headless probe ever exercised).
+        let w_mv = out.new_wid("mapview");
         let w_slen = out.new_wid("slen");
         let w_scm = out.new_wid("scm");
         let w_speed = out.new_wid("speedget");
         let w_buffs = out.new_wid("buffs");
-        let w_mv = out.new_wid("mapview");
+        out.send(wdg::new_wdg(
+            w_mv,
+            "mapview",
+            0,
+            0,
+            0,
+            &[
+                ListVal::I(0),
+                ListVal::C(spawn_pos.0, spawn_pos.1),
+                ListVal::I(player_gob),
+            ],
+        ));
         out.send(wdg::new_wdg(w_slen, "slen", 0, 0, 0, &[]));
         out.send(wdg::new_wdg(w_scm, "scm", 0, 0, 0, &[]));
         out.send(wdg::new_wdg(
@@ -1012,18 +1022,6 @@ impl Game {
             &[ListVal::S("Area Chat".to_owned()), ListVal::I(0)],
         ));
         out.chat_wid = w_chat;
-        out.send(wdg::new_wdg(
-            w_mv,
-            "mapview",
-            0,
-            0,
-            0,
-            &[
-                ListVal::I(0),
-                ListVal::C(spawn_pos.0, spawn_pos.1),
-                ListVal::I(player_gob),
-            ],
-        ));
         // Vitals meters parented to slen: hp (red), energy (yellow),
         // stamina (green).
         let w_hp = out.new_wid("vm");
@@ -1192,7 +1190,7 @@ impl Game {
             .world
             .res
             .name(res_idx)
-            .unwrap_or("gfx/terobjs/bumlings/stone1");
+            .unwrap_or("gfx/terobjs/bumlings/01");
         let out = self.sessions.get_mut(&sid)?;
         let wire_res = out.res.wire_named(res_idx, res_name);
         let mut m = MessageBuf::new();
@@ -1244,15 +1242,24 @@ impl Game {
         // Player avatar layers.
         if let Kind::Player { player } = kind {
             if let Some(p) = self.world.players.get(player) {
-                let head = out
-                    .res
-                    .wire_named(self.world.res.intern("gfx/borka/head"), "gfx/borka/head");
-                let hair = out
-                    .res
-                    .wire_named(self.world.res.intern("gfx/borka/hair"), "gfx/borka/hair");
-                m.uint8(OD_LAYERS).uint16(wire_res); // base = body
-                m.uint16(head);
-                m.uint16(hair);
+                // The fork client has no plalay/plparts router support: the
+                // "gfx/borka/{body,head,hair}" pose routers carry a custom
+                // layer type the client drops, so any layer resolved from
+                // them has no neg and ImageSprite dies with "No negative
+                // found" on the first render tick (real-client freeze).
+                // The legacy official server resolved poses SERVER-SIDE and
+                // layered concrete image-bearing frame resources instead
+                // (this fork's own JSBot checks layer names like
+                // "gfx/borka/body/sitting/"), so do exactly that: base is
+                // the body router (a load gate client-side, never
+                // sprite-created) and the layers are standing-pose frames.
+                let base = wire_res; // base = gfx/borka/body router
+                m.uint8(OD_LAYERS).uint16(base);
+                for part in Self::player_layer_names() {
+                    let gi = self.world.res.intern(part);
+                    let w = out.res.wire_named(gi, part);
+                    m.uint16(w);
+                }
                 m.uint16(65535);
                 m.uint8(OD_BUDDY).string(&p.name).uint8(0).uint8(0);
             }
@@ -1262,6 +1269,23 @@ impl Game {
         m.uint8(OD_HEALTH).uint8(quarters);
         m.uint8(OD_END);
         Some(m.finish())
+    }
+
+    /// Standing-pose frame resources that compose a player avatar. The fork
+    /// client has no plalay/plparts router support (both layer types are
+    /// dropped on load, leaving factories without a neg), so - like the
+    /// legacy official server - the avatar must be layered from concrete
+    /// image-bearing frame resources. Also used verbatim as the charlist
+    /// portrait layers, so the login card and the world avatar match.
+    fn player_layer_names() -> &'static [&'static str] {
+        &[
+            "gfx/borka/body/standing/legs-0",
+            "gfx/borka/body/standing/torso/male-0",
+            "gfx/borka/body/standing/head-0",
+            "gfx/borka/body/standing/arm/idle/left-0",
+            "gfx/borka/body/standing/arm/idle/right-0",
+            "gfx/borka/hair-karin/standing/hair-0",
+        ]
     }
 
     /// Stream a spawn (full state) for one gob to one session, announcing
@@ -1281,18 +1305,21 @@ impl Game {
             .world
             .res
             .name(res_idx)
-            .unwrap_or("gfx/terobjs/bumlings/stone1");
+            .unwrap_or("gfx/terobjs/bumlings/01");
         let wire = out.res.wire_named(res_idx, res_name);
         if let Some((name, ver)) = out.res.pending_announce(wire) {
             let msg = wdg::resid(wire, name, ver);
             out.send(msg);
             out.res.mark_announced(wire);
         }
-        // Player avatar layers: announce base + layer resources before the
-        // spawn block. The client resolves OD_LAYERS ids through these
-        // RESIDs; without them the avatar renders invisible ("no doll").
+        // Player avatar layers: announce base + every concrete frame
+        // resource the OD_LAYERS block references before the spawn block.
+        // The client resolves OD_LAYERS ids through these RESIDs; without
+        // them the avatar renders invisible ("no doll").
         if matches!(self.world.gobs.kind[slot], Kind::Player { .. }) {
-            for layer_name in ["gfx/borka/body", "gfx/borka/head", "gfx/borka/hair"] {
+            for layer_name in
+                std::iter::once("gfx/borka/body").chain(Self::player_layer_names().iter().copied())
+            {
                 let gi = self.world.res.intern(layer_name);
                 let w = out.res.wire_named(gi, layer_name);
                 if let Some((name, ver)) = out.res.pending_announce(w) {
@@ -5096,7 +5123,19 @@ mod tests {
                     OD_MOVE => off += 8,
                     OD_LINBEG => off += 20,
                     OD_LINSTEP => off += 4,
-                    OD_LAYERS => off += 8,
+                    OD_LAYERS => {
+                        // base u16, then u16 layer ids until the 65535
+                        // terminator (variable size since the layers are
+                        // the concrete standing-pose frames).
+                        off += 2;
+                        loop {
+                            let id = u16::from_le_bytes([block[off], block[off + 1]]);
+                            off += 2;
+                            if id == 65535 {
+                                break;
+                            }
+                        }
+                    }
                     OD_HEALTH => off += 1,
                     OD_BUDDY => {
                         let end = block[off..]
