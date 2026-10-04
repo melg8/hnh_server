@@ -114,6 +114,7 @@ case "${1:-all}" in
     if ! git diff --quiet HANDOFF.md 2>/dev/null; then
       git add HANDOFF.md
       git commit -m "Record session-end blocks from verification runs" >/dev/null
+      git push origin master -q || fail "appender push failed"
     fi
     [ -z "$(git status --porcelain server/ docs/ HANDOFF.md)" ] || fail "dirty tree"
     git fetch origin master -q
