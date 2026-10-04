@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Session 16 leaf-1/leaf-2 gates: headless client-side probe. It drives the
+# Session 16/17 gates: headless client-side probe. It drives the
 # REAL client classes (Session + UI + RemoteUI, the exact post-play receive
 # path, no GL) against a live server; any throwable there is precisely what
 # kills the real client and produces the reported black screen.
-# Usage: verify_ui_probe.sh compile|run|equip
+# Usage: verify_ui_probe.sh compile|run|equip|charlist
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -67,6 +67,24 @@ case "${1:-all}" in
     grep -q "UI PROBE EQUIP: OK" "$PROBE_LOG" || {
       tail -30 "$PROBE_LOG"; fail "probe equip did not pass"; }
     echo "UI PROBE EQUIP: OK"
+    ;;
+  charlist)
+    compile_probe
+    [ -x server/target/release/hnh-server ] \
+      || fail "server binary missing (cd server && cargo build --release)"
+    [ -d gameres ] || fail "gameres/ missing (see HANDOFF 'Resource pack')"
+    rm -f server/target/probe-ui-save.json
+    (cd server && HNH_SAVE_FILE=target/probe-ui-save.json \
+      ./target/release/hnh-server --seed 42 > /tmp/probe-server.log 2>&1 &)
+    sleep 3
+    HAVEN_RESDIR="$PWD/res/compiled" java -Djava.awt.headless=true -cp "build-classes:$JARS" UiProbe probeuser probepass charlist \
+      > "$PROBE_LOG" 2>&1
+    rc=$?
+    stop_server
+    [ $rc -eq 0 ] || { tail -30 "$PROBE_LOG"; fail "probe exited $rc"; }
+    grep -q "UI PROBE CHARLIST: OK" "$PROBE_LOG" || {
+      tail -30 "$PROBE_LOG"; fail "probe charlist did not pass"; }
+    echo "UI PROBE CHARLIST: OK"
     ;;
   *)
     fail "unknown gate: $1"

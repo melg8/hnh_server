@@ -615,21 +615,32 @@ impl Game {
         let w_logo = out.new_wid("img");
         let w_list = out.new_wid("charlist");
         // Avatar layer RESIDs must be announced before the charlist add.
-        let body = out
-            .res
-            .wire_named(self.world.res.intern("gfx/borka/body"), "gfx/borka/body");
-        let head = out
-            .res
-            .wire_named(self.world.res.intern("gfx/borka/head"), "gfx/borka/head");
-        let hair = out
-            .res
-            .wire_named(self.world.res.intern("gfx/borka/hair"), "gfx/borka/hair");
-        for w in [body, head, hair] {
+        // The login portrait (Charlist -> Avaview -> AvaRender) flattens
+        // `Resource.layers(imgc)` of every listed resource, so the layers
+        // must be IMAGE-bearing standing frames - the pose-router
+        // resources ("gfx/borka/body" et al) carry no imgc layers and
+        // would leave the portrait blank ("no face" bug report). Frame 0
+        // of the standing pose of each body part composites into the
+        // full character; z-order comes from each Image's z field.
+        let portrait_layers: &[&'static str] = &[
+            "gfx/borka/body/standing/legs-0",
+            "gfx/borka/body/standing/torso/male-0",
+            "gfx/borka/body/standing/head-0",
+            "gfx/borka/body/standing/arm/idle/left-0",
+            "gfx/borka/body/standing/arm/idle/right-0",
+            "gfx/borka/hair-karin/standing/hair-0",
+        ];
+        let mut layer_ids = Vec::with_capacity(portrait_layers.len());
+        for name in portrait_layers {
+            let global = self.world.res.intern(name);
+            let w = out.res.wire_named(global, name);
             if let Some((n, v)) = out.res.pending_announce(w) {
                 out.send(wdg::resid(w, n, v));
                 out.res.mark_announced(w);
             }
+            layer_ids.push(w);
         }
+        info!(layers = ?portrait_layers, "charlist portrait layers announced");
         out.send(wdg::new_wdg(
             w_bg,
             "img",
@@ -659,11 +670,11 @@ impl Game {
         add.uint8(RMSG_WDGMSG)
             .uint16(w_list)
             .string("add")
-            .lstr("Player")
-            .lint(body as i32)
-            .lint(head as i32)
-            .lint(hair as i32)
-            .lend();
+            .lstr("Player");
+        for id in &layer_ids {
+            add.lint(*id as i32);
+        }
+        add.lend();
         out.send(add.finish());
         self.sessions.insert(sid, out);
     }

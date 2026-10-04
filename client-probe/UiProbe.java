@@ -1,8 +1,10 @@
 import haven.AuthClient;
+import haven.Button;
 import haven.Charlist;
 import haven.Coord;
 import haven.Equipory;
 import haven.HackThread;
+import haven.Indir;
 import haven.MainFrame;
 import haven.MapView;
 import haven.Message;
@@ -13,7 +15,10 @@ import haven.SlenHud;
 import haven.UI;
 import haven.Widget;
 
+import java.lang.reflect.Field;
 import java.net.InetAddress;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -24,9 +29,15 @@ import java.util.concurrent.atomic.AtomicReference;
  * is exactly what kills the real client's threads and produces the reported
  * "black screen after entering the world".
  *
- * Usage: java UiProbe [user] [password] [run|equip]
+ * Usage: java UiProbe [user] [password] [run|equip|charlist]
  * Prints "UI PROBE: OK" (or "UI PROBE EQUIP: OK" in equip mode, which also
  * requires the Equipory paperdoll widget to exist) and exits 0 on success.
+ *
+ * Mode "charlist" proves the character-selection screen end to end: the
+ * charlist "add" uimsg decoded into a real Char entry, every avatar layer
+ * resource resolves client-side (the login portrait data path), the
+ * composited layer inventory is non-empty, and world entry happens through
+ * the REAL Button.click() chain instead of a raw queued "play" message.
  */
 public class UiProbe {
     static void fail(String msg) {
@@ -52,6 +63,19 @@ public class UiProbe {
             err[0].printStackTrace(System.out);
             fail("probe error: " + err[0]);
         }
+    }
+
+    static Object field(Object o, String name) throws Exception {
+        for (Class<?> c = o.getClass(); c != null; c = c.getSuperclass()) {
+            try {
+                Field f = c.getDeclaredField(name);
+                f.setAccessible(true);
+                return f.get(o);
+            } catch (NoSuchFieldException e) {
+                // Walk up the hierarchy.
+            }
+        }
+        throw new NoSuchFieldException(name + " on " + o.getClass());
     }
 
     static void run(String[] args) throws Exception {
@@ -116,33 +140,20 @@ public class UiProbe {
             fail("charlist never appeared");
         System.out.println("PROBE: charlist id=" + clid);
 
-        // Select the character exactly like the real client does.
-        Message play = new Message(Message.RMSG_WDGMSG);
-        play.adduint16(clid);
-        play.addstring("play");
-        play.addlist(new Object[] { "Player" });
-        sess.queuemsg(play);
+        if (mode.equals("charlist"))
+            runCharlist(ui, clid);
+        else {
+            // Select the character exactly like the real client does.
+            Message play = new Message(Message.RMSG_WDGMSG);
+            play.adduint16(clid);
+            play.addstring("play");
+            play.addlist(new Object[] { "Player" });
+            sess.queuemsg(play);
+        }
 
         // Wait for the world widget tree (login flow part 2). This is the
         // window where the reported black screen happens.
-        deadline = System.currentTimeMillis() + 20000;
-        while (System.currentTimeMillis() < deadline) {
-            Throwable d = ruiDeath.get();
-            if (d != null) {
-                d.printStackTrace(System.out);
-                fail("remoteui thread died: " + d);
-            }
-            if ("dead".equals(sess.state))
-                fail("session reader died (message parse exception?)");
-            if (findWidget(ui, MapView.class) >= 0
-                    && findWidget(ui, SlenHud.class) >= 0)
-                break;
-            Thread.sleep(100);
-        }
-        int mvid = findWidget(ui, MapView.class);
-        if (mvid < 0)
-            fail("mapview never appeared (black screen reproduced)");
-        System.out.println("PROBE: mapview id=" + mvid);
+        waitForWorld(ui, ruiDeath);
 
         // Soak: six seconds of live traffic; the client path must survive
         // MAPDATA, OBJDATA, GLOBLOB, movement and visibility updates.
@@ -173,10 +184,105 @@ public class UiProbe {
                 fail("no Equipory (paperdoll) widget after world entry");
             System.out.println("PROBE: equipory id=" + eq);
             System.out.println("UI PROBE EQUIP: OK");
+        } else if (mode.equals("charlist")) {
+            System.out.println("UI PROBE CHARLIST: OK");
         } else {
             System.out.println("UI PROBE: OK");
         }
         System.exit(0);
+    }
+
+    /** Charlist-mode proof: portrait data path + real click chain. */
+    static void runCharlist(UI ui, int clid) throws Exception {
+        Widget cl = ui.widgets.get(clid);
+        if (cl == null)
+            fail("charlist widget vanished");
+        // 1. The "add" uimsg must have decoded into a real Char entry
+        //    (name + avatar layer resource ids). An empty list means the
+        //    login screen would show a card with no portrait and no Play
+        //    button - the reported "client frozen" symptom.
+        List<?> chars = null;
+        long deadline = System.currentTimeMillis() + 15000;
+        while (System.currentTimeMillis() < deadline) {
+            Object l = field(cl, "chars");
+            if (l instanceof List && !((List<?>) l).isEmpty()) {
+                chars = (List<?>) l;
+                break;
+            }
+            Thread.sleep(100);
+        }
+        if (chars == null)
+            fail("charlist add never decoded (no char entries: no portrait, "
+                    + "no play button on the login screen)");
+        Object ch = chars.get(0);
+        Object nm = field(ch, "name");
+        System.out.println("PROBE: char entry name=" + nm);
+
+        // 2. The avatar layer resources must resolve client-side; this is
+        //    the exact data the login-screen portrait (AvaRender) composites.
+        Object ava = field(ch, "ava");
+        if (ava == null)
+            fail("char entry has no Avaview");
+        Object myown = field(ava, "myown");
+        if (myown == null)
+            fail("Avaview has no local AvaRender (empty layer list?)");
+        @SuppressWarnings("unchecked")
+        List<Indir<Resource>> layers = (List<Indir<Resource>>) field(myown, "layers");
+        if (layers.isEmpty())
+            fail("avatar layer list is empty (server sent no layer resids)");
+        int total = 0;
+        List<String> unresolved = new ArrayList<>();
+        deadline = System.currentTimeMillis() + 20000;
+        while (true) {
+            unresolved.clear();
+            total = 0;
+            for (Indir<Resource> r : layers) {
+                Resource res = r.get();
+                if (res == null)
+                    unresolved.add(String.valueOf(r));
+                else {
+                    int n = res.layers(Resource.Image.class).size();
+                    total += n;
+                    System.out.println("PROBE: ava layer " + res.name
+                            + " ver=" + res.ver + " imgs=" + n);
+                }
+            }
+            if (unresolved.isEmpty())
+                break;
+            if (System.currentTimeMillis() >= deadline)
+                fail("avatar layers never resolved: " + unresolved);
+            Thread.sleep(100);
+        }
+        if (total == 0)
+            fail("avatar layers resolved but contain zero image layers "
+                    + "(portrait would be blank)");
+        System.out.println("PROBE: avatar composite imgs=" + total);
+
+        // 3. Enter the world through the REAL click chain: Button.click ->
+        //    wdgmsg("activate") -> Charlist.wdgmsg -> wdgmsg("play").
+        Object plb = field(ch, "plb");
+        if (!(plb instanceof Button))
+            fail("char entry has no Play button");
+        ((Button) plb).click();
+        System.out.println("PROBE: play clicked via the real button chain");
+    }
+
+    /** Wait for the post-play world widget tree (mapview + slen). */
+    static void waitForWorld(UI ui, AtomicReference<Throwable> ruiDeath)
+            throws Exception {
+        long deadline = System.currentTimeMillis() + 20000;
+        while (System.currentTimeMillis() < deadline) {
+            Throwable d = ruiDeath.get();
+            if (d != null) {
+                d.printStackTrace(System.out);
+                fail("remoteui thread died: " + d);
+            }
+            if (findWidget(ui, MapView.class) >= 0
+                    && findWidget(ui, SlenHud.class) >= 0)
+                return;
+            Thread.sleep(100);
+        }
+        fail("mapview never appeared (black screen reproduced)");
     }
 
     static int findWidget(UI ui, Class<?> c) {
