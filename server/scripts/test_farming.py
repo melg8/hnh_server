@@ -30,7 +30,8 @@ BIN = os.path.join(REPO, "server", "target", "release", "hnh-server")
 LIST_END, LIST_INT, LIST_STR, LIST_COORD = 0, 1, 2, 3
 MSG_REL, MSG_MAPDATA, MSG_OBJDATA = 1, 5, 6
 RMSG_WDGMSG, RMSG_RESID, RMSG_CATTR = 1, 6, 9
-OD_MOVE, OD_RES, OD_LINBEG, OD_LINSTEP, OD_BUDDY, OD_END = 1, 2, 3, 4, 15, 255
+OD_MOVE, OD_RES, OD_LINBEG, OD_LINSTEP, OD_LAYERS, OD_AVATAR, OD_BUDDY, OD_END = \
+    1, 2, 3, 4, 6, 9, 15, 255
 OD_LAYERS, OD_HEALTH = 6, 14
 
 
@@ -327,8 +328,18 @@ class FarmClient:
                     off += 20  # 2x coord(8) + int32 steps
                 elif code == OD_LINSTEP:
                     off += 4
-                elif code == OD_LAYERS:
-                    off += 8  # 4x uint16 wire ids
+                elif code == OD_LAYERS or code == OD_AVATAR:
+                    # OD_LAYERS: u16 base res, then u16 layer ids until the
+                    # 65535 sentinel. OD_AVATAR: layers only. The count is
+                    # variable (session 18 spawns 5 concrete pose frames);
+                    # a fixed stride misaligns the rest of the block.
+                    if code == OD_LAYERS:
+                        off += 2  # base res
+                    while True:
+                        layer = struct.unpack("<H", body[off : off + 2])[0]
+                        off += 2
+                        if layer == 65535:
+                            break
                 elif code == OD_HEALTH:
                     off += 1  # quarters byte
                 elif code == OD_BUDDY:
