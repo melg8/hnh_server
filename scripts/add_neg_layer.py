@@ -38,26 +38,25 @@ def build_res(ver, layers):
     return out
 
 def image_size(layers):
-    """First image layer's dimensions (the item icon)."""
+    """First image layer's dimensions (the item icon). The Image layer
+    header carries only z/subz/flags/id/offset; the pixel size lives in
+    the embedded PNG's IHDR chunk (width/height at fixed offsets)."""
     for name, blob in layers:
         if name == "image":
-            # Image layer: u16 z, i8 subz, i8 fl, u16 id, coord o, coord ssz
-            z = struct.unpack("<h", blob[0:2])[0]
-            off = 2 + 1 + 1      # skip subz + fl
-            _id = struct.unpack("<h", blob[off:off+2])[0]; off += 2
-            off += 8              # skip coord o
-            w, h = struct.unpack("<ii", blob[off:off+8])
-            return (w, h)
+            png = blob[11:]
+            if len(png) >= 24 and png[:8] == b"\x89PNG\r\n\x1a\n":
+                w, h = struct.unpack(">II", png[16:24])
+                return (w, h)
     return None
 
 def main():
     src_path, tgt_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
-    sver, slayers = parse_res(src_path)
     tver, tlayers = parse_res(tgt_path)
-    neg = next((b for n, b in slayers if n == "neg"), None)
-    if neg is None:
-        print(f"{src_path} has no neg layer")
-        return 1
+    if src_path != "-":
+        sver, slayers = parse_res(src_path)
+        neg = next((b for n, b in slayers if n == "neg"), None)
+        if neg is None:
+            print(f"note: {src_path} has no neg layer; synthesizing")
     if any(n == "neg" for n, _ in tlayers):
         print(f"{tgt_path} already has a neg layer")
         return 0
