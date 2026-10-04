@@ -425,9 +425,246 @@ public class DriveAgent {
             } catch (Throwable e) {
                 System.out.println("SCREENSHOT: failed " + e);
             }
+
+            // ---------- phase 3: session 21 evidence ----------
+            // m2s(c) = (2x - 2y, x + y): +x (east) draws toward screen
+            // (right, down). Clicking center + (220, 110) orders a pure
+            // +x leg; center - (220, 110) a pure -x leg. Mid-walk frames
+            // must show the walk pose FACING the travel direction.
+            int[] center = {512, 384};
+            // Screen deltas per 110 map subtiles: m2s(d) = (2dx-2dy, dx+dy).
+            // EAST (+x) = (220, 110); NORTH (-y) = (220, -110);
+            // SOUTH (+y) = (-220, 110). Any two legs give the
+            // direction-faces-travel visual evidence (m2s at MapView:626).
+            walkAndShoot(robot, mv, center, 220, 110, "EAST", "/tmp/client_walk_east.png");
+            walkAndShoot(robot, mv, center, 220, -110, "NORTH", "/tmp/client_walk_north.png");
+            walkAndShoot(robot, mv, center, -220, 110, "SOUTH", "/tmp/client_walk_south.png");
+
+            // Equipment paperdoll: Equipory.cdraw draws ui.equip's bg +
+            // the Avatar.rend of the avagob. Dump the binding state and
+            // capture the window region (the missing-doll defect).
+            try {
+                Object equip = get(ui, "equip");
+                if (equip != null) {
+                    Object avagob = get(equip, "avagob");
+                    String dump;
+                    try {
+                        Object sess = get(ui, "sess");
+                        Object glob = get(sess, "glob");
+                        Object oc = get(glob, "oc");
+                        int avid = ((Number) avagob).intValue();
+                        Object dgob = oc.getClass().getMethod("getgob", int.class)
+                                .invoke(oc, avid);
+                        if (dgob != null) {
+                            Object ava = dgob.getClass().getMethod("getattr", Class.class)
+                                    .invoke(dgob, Class.forName("haven.Avatar"));
+                            if (ava != null) {
+                                Object rend = get(ava, "rend");
+                                dump = "ava-rend=" + (rend != null ? "OK" : "NULL");
+                            } else {
+                                dump = "no-Avatar-attr";
+                            }
+                        } else {
+                            dump = "avagob-gob-missing";
+                        }
+                    } catch (Throwable e2) {
+                        dump = "dump-err " + e2;
+                    }
+                    System.out.println("EQUIP DOLL: avagob=" + avagob + " " + dump);
+                    Object wc = getInherited(equip, "c");
+                    Object wsz = getInherited(equip, "sz");
+                    int ex = Integer.parseInt(coord(wc).split(",")[0]);
+                    int ey = Integer.parseInt(coord(wc).split(",")[1]);
+                    int ew = Math.min(512, Integer.parseInt(coord(wsz).split(",")[0]));
+                    int eh = Math.min(400, Integer.parseInt(coord(wsz).split(",")[1]));
+                    java.awt.image.BufferedImage eq = robot.createScreenCapture(
+                            new java.awt.Rectangle(ex, ey, ew, eh));
+                    javax.imageio.ImageIO.write(eq, "png",
+                            new java.io.File("/tmp/client_equip.png"));
+                    System.out.println("EQUIP SCREENSHOT: saved at " + ex + "," + ey
+                            + " " + ew + "x" + eh);
+                } else {
+                    System.out.println("EQUIP DOLL: no equipory window");
+                }
+            } catch (Throwable e) {
+                System.out.println("EQUIP DOLL: err " + e);
+            }
+
+            // Animals in view: the 500-subtile visibility radius far exceeds
+            // the rendered viewport and animal density is low, so passively
+            // waiting rarely puts one on screen. Rounds: census -> if no
+            // kritter inside the viewport, walk toward the nearest one and
+            // re-census after arrival.
+            try {
+                boolean shot = false;
+                for (int round = 0; round < 5 && !shot; round++) {
+                    Object sess = get(ui, "sess");
+                    Object glob = get(sess, "glob");
+                    Object oc = get(glob, "oc");
+                    // The fork camera pans with the mouse (edge-follow), so
+                    // the viewport center is mv.mc + viewoffset(sz, mc) -
+                    // read the LIVE camera instead of assuming the player is
+                    // centered: screen = m2s(gob.pos - mc) + sz/2.
+                    Object mcv = get(mv, "mc");
+                    Object msz = getInherited(mv, "sz");
+                    int vcx = Integer.parseInt(coord(msz).split(",")[0]) / 2;
+                    int vcy = Integer.parseInt(coord(msz).split(",")[1]) / 2;
+                    int mcx = Integer.parseInt(coord(mcv).split(",")[0]);
+                    int mcy = Integer.parseInt(coord(mcv).split(",")[1]);
+                    int bestD = Integer.MAX_VALUE;
+                    int[] bestScreen = null;
+                    String bestRes = "?";
+                    Object it = oc.getClass().getMethod("iterator").invoke(oc);
+                    while (it != null && ((java.util.Iterator<?>) it).hasNext()) {
+                        Object g2 = ((java.util.Iterator<?>) it).next();
+                        String[] names = (String[]) g2.getClass().getMethod("resnames").invoke(g2);
+                        boolean kritter = false;
+                        for (String n : names) {
+                            // Prefer predators: passive species flee the
+                            // player (their flee radius exceeds the
+                            // viewport), while wolves and boars CHASE the
+                            // player into view and stay within reach.
+                            if (n != null && (n.contains("/wolf/") || n.contains("/boar/"))) {
+                                kritter = true;
+                                break;
+                            }
+                        }
+                        if (!kritter) continue;
+                        int[] gp = gobPos(g2);
+                        if (gp == null) continue;
+                        int rx = (gp[0] - mcx), ry = (gp[1] - mcy);
+                        int sx = 2 * rx - 2 * ry + vcx;
+                        int sy = rx + ry + vcy;
+                        int d = Math.abs(sx - vcx) + Math.abs(sy - vcy);
+                        if (d < bestD) {
+                            bestD = d;
+                            bestScreen = new int[] {sx, sy};
+                            bestRes = names.length > 0 ? names[0] : "?";
+                        }
+                    }
+                    if (bestScreen != null
+                            && Math.abs(bestScreen[0] - vcx) < 420
+                            && bestScreen[1] > 60 && bestScreen[1] < 540) {
+                        java.awt.image.BufferedImage an = robot.createScreenCapture(
+                                new java.awt.Rectangle(0, 0, 1024, 768));
+                        javax.imageio.ImageIO.write(an, "png",
+                                new java.io.File("/tmp/client_animals.png"));
+                        System.out.println("ANIMALS SCREENSHOT: saved kritter at "
+                                + bestScreen[0] + "," + bestScreen[1] + " res=" + bestRes);
+                        shot = true;
+                        break;
+                    }
+                    // Walk toward the nearest kritter: clamp its screen
+                    // offset into the clickable viewport and click there.
+                    if (bestScreen != null) {
+                        int dx = bestScreen[0] - vcx;
+                        int dy = bestScreen[1] - vcy;
+                        double len = Math.max(1.0, Math.hypot(dx, dy));
+                        double step = Math.min(1.0, 220.0 / len);
+                        int cx = vcx + (int) Math.round(dx * step);
+                        int cy = vcy + (int) Math.round(dy * step);
+                        cx = Math.max(120, Math.min(900, cx));
+                        cy = Math.max(80, Math.min(500, cy));
+                        System.out.println("ANIMAL HUNT: nearest at screen "
+                                + bestScreen[0] + "," + bestScreen[1] + "; clicking " + cx + "," + cy);
+                        robot.mouseMove(cx, cy);
+                        robot.mousePress(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                        robot.mouseRelease(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                        // Wait for the leg to finish (position rest or 25 s).
+                        int[] huntLast = gobPos(getPlayerGob(mv));
+                        long wdl = System.currentTimeMillis() + 25000;
+                        int huntStable = 0;
+                        while (System.currentTimeMillis() < wdl && huntStable < 4) {
+                            Thread.sleep(400);
+                            Object g = getPlayerGob(mv);
+                            if (g == null) continue;
+                            int[] p = gobPos(g);
+                            if (p == null) continue;
+                            if (p[0] == huntLast[0] && p[1] == huntLast[1]) huntStable++;
+                            else huntStable = 0;
+                            huntLast = p;
+                        }
+                        // Park the mouse centrally: the fork camera pans
+                        // toward the mouse when it rests near the view
+                        // border, which would keep drifting the frame.
+                        robot.mouseMove(512, 340);
+                        Thread.sleep(1200);
+                    } else {
+                        Thread.sleep(2000);
+                    }
+                }
+                if (!shot) {
+                    robot.mouseMove(512, 340);
+                    Thread.sleep(1500);
+                    java.awt.image.BufferedImage an = robot.createScreenCapture(
+                            new java.awt.Rectangle(0, 0, 1024, 768));
+                    javax.imageio.ImageIO.write(an, "png",
+                            new java.io.File("/tmp/client_animals.png"));
+                    System.out.println("ANIMALS SCREENSHOT: saved fallback (no predator in viewport)");
+                }
+            } catch (Throwable e) {
+                System.out.println("ANIMALS SCREENSHOT: err " + e);
+            }
         } catch (Throwable e) {
             System.out.println("AGENT ERROR: " + e);
             e.printStackTrace();
         }
+    }
+
+    /** Click a map leg whose screen offset matches (dx, dy) per 110
+     *  subtiles and capture a mid-walk frame. Retries with doubled
+     *  distances; a click may land on an obstacle or a gob (interact
+     *  instead of walk), so multiple attempts keep the evidence coming. */
+    static void walkAndShoot(Robot robot, Object mv, int[] center, int dx, int dy,
+                             String label, String shotPath) {
+        int[] dists = {1, 2, 3};
+        for (int attempt = 0; attempt < dists.length; attempt++) {
+            try {
+                Object g0 = getPlayerGob(mv);
+                if (g0 == null) { System.out.println("WALKDIR: no gob"); return; }
+                int[] before = gobPos(g0);
+                int mult = dists[attempt];
+                int sx = center[0] + dx * mult;
+                int sy = center[1] + dy * mult;
+                robot.mouseMove(sx, sy);
+                robot.mousePress(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                robot.mouseRelease(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                boolean shooting = false;
+                boolean shot = false;
+                boolean arrived = false;
+                int[] last = before;
+                long dl = System.currentTimeMillis() + 15000;
+                long start = System.currentTimeMillis();
+                while (System.currentTimeMillis() < dl) {
+                    Thread.sleep(250);
+                    Object g = getPlayerGob(mv);
+                    if (g == null) continue;
+                    int[] p = gobPos(g);
+                    if (p == null) continue;
+                    if (!shooting && (p[0] != before[0] || p[1] != before[1])
+                            && System.currentTimeMillis() - start > 700) {
+                        shooting = true;
+                    }
+                    if (shooting && !shot) {
+                        java.awt.image.BufferedImage wimg = robot.createScreenCapture(
+                                new java.awt.Rectangle(0, 0, 1024, 768));
+                        javax.imageio.ImageIO.write(wimg, "png", new java.io.File(shotPath));
+                        System.out.println("WALKDIR SCREENSHOT: saved " + shotPath);
+                        shot = true;
+                    }
+                    boolean resting = (p[0] == last[0] && p[1] == last[1]);
+                    last = p;
+                    if (resting && shot) { arrived = true; break; }
+                }
+                System.out.println("WALKDIR " + label + " attempt " + attempt + ": "
+                        + (arrived ? "ARRIVED at " + last[0] + "," + last[1] : "no-arrival")
+                        + " from " + before[0] + "," + before[1]);
+                if (shot) return;
+            } catch (Throwable e) {
+                System.out.println("WALKDIR: err " + e);
+                return;
+            }
+        }
+        System.out.println("WALKDIR " + label + ": never captured (obstacles?)");
     }
 }

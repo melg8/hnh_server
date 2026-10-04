@@ -57,8 +57,11 @@ DISPLAY=:99 LD_LIBRARY_PATH=$JOGL:$X11 LIBGL_ALWAYS_SOFTWARE=1 \
 JPID=$!
 
 # --- wait for a verdict ---
-for i in $(seq 1 120); do
-  if rg -q "MOVEMENT2|AGENT ERROR|no mapview|no player gob|no UI instance" /tmp/client_$TAG.log 2>/dev/null; then
+# The agent now also produces session-21 evidence after the movement
+# phases (directional walk frames, equipment doll, animals in view), so
+# wait for the LAST verdict line, not just MOVEMENT2.
+for i in $(seq 1 300); do
+  if rg -q "ANIMALS SCREENSHOT|AGENT ERROR|no mapview|no player gob|no UI instance" /tmp/client_$TAG.log 2>/dev/null; then
     break
   fi
   sleep 1
