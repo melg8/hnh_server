@@ -1534,3 +1534,107 @@ decomposition is depth 3, stated in the plan). Commit f1e6f38.
 - Server exited cleanly (seed 42).
 - See HANDOFF.md top section for current state.
 
+
+---
+
+## Session end 1791084945
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791084952
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791084964
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791084976
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791084989
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791084997
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791085009
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791085018
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+## 2026-10-04 - Session 14: parties + chat, skill/LP economy (unlazy tree continued)
+
+Continued the .unlazy/session13 depth-3 tree as .unlazy/session14
+(contract rev 2). Commits c08fbab + ae39445 on origin/master.
+
+- leaf-1.1.2 VERIFIED (party + chat): Area Chat (`slenchat`, title
+  "Area Chat") at world entry; `msg` lines relay as "<Name>: <text>" to
+  sessions within AREA_CHAT_RADIUS = VIEW_RADIUS (hear what you can
+  see; overflow-free i128 squared distance); colored system lines to
+  one session; party invite via player-gob click -> clicker sm menu ->
+  invitee sm menu + prompt; RMSG_PARTY (PD_LIST/PD_LEADER/PD_MEMBER)
+  broadcast on every change; `pv` roster widget lifecycle; leave ->
+  leadership transfer -> disband (empty PD_LIST clears client state);
+  logout cleans membership; cap 10, palette per join order. Modules:
+  chat.rs, party.rs, resources.rs wdg::party, game.rs handlers.
+  e2e server/scripts/test_party_chat.py (CHAT FLOW / PARTY FLOW: OK).
+- leaf-1.1.3 VERIFIED (skill/LP): skills.rs - 11 client-hardcoded skill
+  values, legacy sattr curve (100*(v+1) per point; bulk closed form;
+  no-op pairs free for the client's send-all batch), 8-entry
+  non-incrementable catalog (pack-verified names, server-defined
+  costs), chr exp/nsk/psk pushes, all-or-nothing sattr with full CATTR
+  re-push (vitals-only push left stale SAttr values - caught by e2e,
+  not review), buy with charge + re-push, refusals as chat lines.
+  Planting gate: farming value >= 1 (fresh 100 LP wallet = exactly one
+  point). Passive LP accrual 2/min (HNH_LP_RATE knob) documented as a
+  deviation until curiosity study. skills persisted (SavedPlayer.skills
+  additive v2). test_farming.py farmbot buys via the real contract;
+  new skillbot mode (SKILL GATE: OK).
+- CRITICAL bug found by the e2e: buy() used checked_sub as a wallet
+  guard - 90-200 = -110 is a VALID i32, so wallets could go negative.
+  Domain guard (lp < cost) replaced it; unit test pins the behavior.
+- Verified: 57 cargo tests green, clippy -D warnings clean, fmt clean;
+  CHAT FLOW / PARTY FLOW / FARMING FLOW / SKILL GATE all OK in one
+  server generation (node-1.1 N2).
+- NEXT (leaf-1.2.x WAITING, next-session handoff as recorded in
+  .unlazy/session14 PLAN): building placement + production stations
+  (leaf-1.2.1), then dirty-cell visibility optimization for the 10k
+  target (leaf-1.2.2). Optional follow-ups: curiosity/study engine to
+  replace the passive LP trickle, party marker position refresh.
