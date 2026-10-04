@@ -12,7 +12,9 @@ call "%~dp0build-server.bat"
 if errorlevel 1 exit /b 1
 
 REM 2. Generate gameres\ from lib\haven-res.jar + res\compiled overlay.
-if not exist "gameres" (
+REM    The hair.res probe regenerates stale packs that predate the base
+REM    hair/head aliases (missing ones break the client avatar).
+if not exist "gameres\gfx\borka\hair.res" (
     echo Generating gameres resource pack...
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0make-gameres.ps1"
     if errorlevel 1 (

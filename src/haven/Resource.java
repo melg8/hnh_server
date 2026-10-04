@@ -399,9 +399,19 @@ public class Resource implements Comparable<Resource>, Prioritized,
 			String[] parts = name.split("/");
 			for (int i = 0; i < parts.length - 1; i++)
 				cur = new File(cur, parts[i]);
-			cur = new File(cur, parts[parts.length - 1] + ".res");
+			File f = new File(cur, parts[parts.length - 1] + ".res");
+			if (!f.exists()) {
+				/* Match the original server's resolution: a name may be
+				 * stored nested as <name>/<basename>.res (base tilesets in
+				 * the resource pack are), so fall back before giving the
+				 * load up to the next source in the chain. */
+				File nested = new File(new File(cur, parts[parts.length - 1]),
+						parts[parts.length - 1] + ".res");
+				if (nested.exists())
+					f = nested;
+			}
 			try {
-				return (new FileInputStream(cur));
+				return (new FileInputStream(f));
 			} catch (FileNotFoundException e) {
 				throw ((LoadException) (new LoadException(
 						"Could not find resource in filesystem: " + name, this)
@@ -469,13 +479,39 @@ public class Resource implements Comparable<Resource>, Prioritized,
 
 		public InputStream get(String name) throws IOException {
 			URL resurl = encodeurl(new URL(baseurl, name + ".res"));
-			URLConnection c;
-			if (resurl.getProtocol().equals("https"))
-				c = ssl.connect(resurl);
-			else
-				c = resurl.openConnection();
-			c.addRequestProperty("User-Agent", "Haven/1.0");
-			return (c.getInputStream());
+			IOException last;
+			int attempt = 0;
+			while (true) {
+				try {
+					URLConnection c;
+					if (resurl.getProtocol().equals("https"))
+						c = ssl.connect(resurl);
+					else
+						c = resurl.openConnection();
+					c.addRequestProperty("User-Agent", "Haven/1.0");
+					return (c.getInputStream());
+				} catch (ConnectException e) {
+					/* Transient refusals happen when the client races the
+					 * server's listener startup; a single failure used to be
+					 * cached forever and left the resource broken for the
+					 * whole session. Retry a few times with a small backoff,
+					 * and log the exact target so bug reports show what was
+					 * actually refused. */
+					last = e;
+					attempt++;
+					if (attempt >= 3)
+						break;
+					System.out.println("res http: connect refused for " + resurl + " (attempt " + attempt + "), retrying");
+					try {
+						Thread.sleep(200 * attempt);
+					} catch (InterruptedException ie) {
+						Thread.currentThread().interrupt();
+						break;
+					}
+				}
+			}
+			System.out.println("res http: load failed for " + resurl + " from " + baseurl + ": " + last);
+			throw (last);
 		}
 
 		public String toString() {

@@ -85,10 +85,28 @@ async fn handle(mut stream: TcpStream, dir: Arc<PathBuf>) -> anyhow::Result<()> 
             .await?;
         return Ok(());
     }
-    let file = dir.join(format!("{path}.res"));
+    // The original game's resource server resolves a name both flat
+    // (gfx/tiles/moor -> gfx/tiles/moor.res) and nested (->
+    // gfx/tiles/moor/moor.res); the shipped pack stores base tilesets
+    // nested, so both candidates must be tried or the client renders
+    // tileless ground and headless avatars.
+    let primary = dir.join(format!("{path}.res"));
+    let nested = match path.rsplit('/').next() {
+        Some(base) if !base.is_empty() => Some(dir.join(format!("{path}/{base}.res"))),
+        _ => None,
+    };
+    let (file, served) = if primary.exists() {
+        (primary, path.clone())
+    } else if nested.as_ref().is_some_and(|f| f.exists()) {
+        let f = nested.unwrap();
+        let served = format!("{path} (nested)");
+        (f, served)
+    } else {
+        (primary, path.clone())
+    };
     match tokio::fs::read(&file).await {
         Ok(data) => {
-            info!(?peer, path = %path, bytes = data.len(), "res 200");
+            info!(?peer, path = %served, bytes = data.len(), "res 200");
             let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n", data.len());
             stream.write_all(head.as_bytes()).await?;
             stream.write_all(&data).await?;
@@ -161,6 +179,20 @@ mod tests {
         let dir = temp_resdir("miss");
         let (status, _) = request(&dir, "gfx/hud/nope").await;
         assert_eq!(status, 404);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Base tilesets live nested in the pack (gfx/tiles/grass/grass.res);
+    /// a flat miss must fall back to <dir>/<basename>.res like the
+    /// original game's resource server did.
+    #[tokio::test]
+    async fn nested_resource_resolves() {
+        let dir = temp_resdir("nested");
+        std::fs::create_dir_all(dir.join("gfx/tiles/grass")).unwrap();
+        std::fs::write(dir.join("gfx/tiles/grass/grass.res"), b"NESTED-DATA").unwrap();
+        let (status, body) = request(&dir, "gfx/tiles/grass").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, b"NESTED-DATA");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

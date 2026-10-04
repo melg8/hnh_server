@@ -10,6 +10,16 @@ reject with SESSERR_AUTH=1, which is still useful to see replies).
 """
 import socket, struct, sys, time, subprocess, hashlib
 
+# Exactly the names CharWnd.baseval/skillval/Belief/Study dereference via
+# glob.cattr.get() in the constructor; one missing name NPEs the client.
+REQUIRED_CATTR = {
+    "str", "agil", "intel", "cons", "perc", "csm", "dxt", "psy",
+    "expmod",
+    "unarmed", "melee", "ranged", "explore", "stealth", "sewing",
+    "smithing", "carpentry", "cooking", "farming", "survive",
+    "life", "night", "civil", "nature", "martial", "change",
+}
+
 def le16(v): return struct.pack("<H", v)
 def le32(v): return struct.pack("<i", v)
 def havstr(s): return s.encode() + b"\x00"
@@ -79,8 +89,12 @@ def main():
     widgets = {}
     charlist_id = None
     mapview_id = None
+    slen_id = None
+    chr_seen = False
+    cattr_names = set()
+    cattr_at_chr = None
     stats = {"mapdata": 0, "objdata": 0, "resid": 0, "tiles": 0, "globlob": 0,
-             "newwdg": 0, "wdgmsg": 0, "bytes": 0}
+             "newwdg": 0, "wdgmsg": 0, "bytes": 0, "cattr": 0}
 
     def send_rel_subs(subs):
         """Bundle sub-message payloads into one MSG_REL datagram."""
@@ -95,7 +109,7 @@ def main():
         sock.sendto(out, server)
 
     def on_rel(t, body):
-        nonlocal charlist_id, mapview_id, rseq, held
+        nonlocal charlist_id, mapview_id, slen_id, chr_seen, cattr_at_chr, rseq, held
         if t == 0:  # NEWWDG
             wid = struct.unpack("<H", body[0:2])[0]
             nend = body.index(0, 2)
@@ -110,12 +124,32 @@ def main():
                 for gy in (-1, 0, 1):
                     for gx in (-1, 0, 1):
                         sock.sendto(bytes([4]) + le32(gx) + le32(gy), server)
+            if name == "slen":
+                slen_id = wid
+                # Simulate the real client: SlenHud.binded() requests the
+                # character sheet the moment the HUD binds, i.e. before any
+                # map data arrives. The server must have already queued the
+                # full CharWnd cattr set by the time it answers with the
+                # `chr` newwidget.
+                if not chr_seen:
+                    send_rel_subs([bytes([1]) + le16(wid) + b"chr\x00" + bytes([0])])
+            if name == "chr":
+                chr_seen = True
+                cattr_at_chr = set(cattr_names)
         elif t == 1:
             stats["wdgmsg"] += 1
         elif t == 4:
             stats["globlob"] += 1
         elif t == 6:
             stats["resid"] += 1
+        elif t == 9:  # CATTR: (name\0 int32 base int32 comp)*
+            stats["cattr"] += 1
+            off = 0
+            while off < len(body):
+                nend = body.index(0, off)
+                nm = body[off:nend].decode()
+                cattr_names.add(nm)
+                off = nend + 9  # name\0 + two LE int32
         elif t == 11:
             stats["tiles"] += 1
 
@@ -171,6 +205,14 @@ def main():
     print("stats:", stats)
     ok = mapview_id is not None and stats["mapdata"] > 0 and stats["objdata"] > 0
     print("WORLD ENTRY:", "OK" if ok else "INCOMPLETE")
+    if chr_seen:
+        missing = REQUIRED_CATTR - (cattr_at_chr or set())
+        if missing:
+            print("CATTR ORDER: FAIL (missing at chr creation:", sorted(missing), ")")
+        else:
+            print("CATTR ORDER: OK (%d names present before chr widget)" % len(REQUIRED_CATTR))
+    else:
+        print("CATTR ORDER: chr widget never created")
     if mapview_id and stats["mapdata"] > 0:
         # Walk test: click 20 tiles east
         click = bytes([1]) + le16(mapview_id) + b"click\x00"

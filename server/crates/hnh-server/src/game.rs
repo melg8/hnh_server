@@ -403,6 +403,57 @@ impl Game {
         }
     }
 
+    /// Snapshot of the CAttr entries the client's CharWnd constructor
+    /// requires. Names must match CharWnd.baseval/skillval/Belief exactly:
+    /// `CharWnd$Attr.<init>` does `glob.cattr.get(nm)` and dereferences the
+    /// result without a null check, so any missing name NPEs the client the
+    /// moment SlenHud.binded() requests the char sheet after entering.
+    /// Internal short keys (agi/int/con/per/cha/dex) map to the client's
+    /// long names (agil/intel/cons/perc/csm/dxt); skills and beliefs are
+    /// synthesized (no progression system behind them yet) and expmod
+    /// defaults to 100 (learning ability percent).
+    fn char_attr_snapshot(&self, sid: SessionId) -> Vec<(&'static str, i32, i32)> {
+        let Some(p) = self.world.player(sid) else {
+            return Vec::new();
+        };
+        let base = |k: &str| p.attrs.get(k).copied().unwrap_or(10);
+        let zero = |k: &str| p.attrs.get(k).copied().unwrap_or(0);
+        let mut v: Vec<(&'static str, i32, i32)> = vec![
+            ("pts", p.lp, p.lp),
+            ("hp", 100, p.hp),
+            ("energy", 100, p.energy),
+            ("stamina", 100, p.stamina),
+            ("str", base("str"), base("str")),
+            ("agil", base("agi"), base("agi")),
+            ("intel", base("int"), base("int")),
+            ("cons", base("con"), base("con")),
+            ("perc", base("per"), base("per")),
+            ("csm", base("cha"), base("cha")),
+            ("dxt", base("dex"), base("dex")),
+            ("psy", base("psy"), base("psy")),
+        ];
+        v.push(("expmod", base("expmod"), base("expmod")));
+        for s in [
+            "unarmed",
+            "melee",
+            "ranged",
+            "explore",
+            "stealth",
+            "sewing",
+            "smithing",
+            "carpentry",
+            "cooking",
+            "farming",
+            "survive",
+        ] {
+            v.push((s, zero(s), zero(s)));
+        }
+        for b in ["life", "night", "civil", "nature", "martial", "change"] {
+            v.push((b, zero(b), zero(b)));
+        }
+        v
+    }
+
     /// Phase 3.2 (session-lifecycle.md): enter the world after `play`.
     fn enter_world(&mut self, sid: SessionId, name: String) {
         // Destroy selection widgets.
@@ -535,6 +586,10 @@ impl Game {
 
         // --- HUD + world bootstrap (order matters; lifecycle doc 3.2) ---
         let player_gob = gob;
+        // Snapshot CharWnd attributes before the session out-queue is
+        // borrowed: they must reach the client before the `chr` widget is
+        // created (SlenHud.binded requests it immediately).
+        let attr_entries = self.char_attr_snapshot(sid);
         let Some(out) = self.sessions.get_mut(&sid) else {
             return;
         };
@@ -626,27 +681,9 @@ impl Game {
         // Global state.
         let (unix, dt, mp, yt) = self.world.astro();
         out.send(wdg::globlob(unix, dt, mp, yt, Some((255, 255, 255, 255))));
-        // Snapshot attributes before pushing cattr (player borrows end here).
-        let attr = |k: &str| {
-            self.world
-                .player(sid)
-                .and_then(|p| p.attrs.get(k).copied())
-                .unwrap_or(10)
-        };
-        out.send(wdg::cattr(&[
-            ("pts", lp, lp),
-            ("hp", 100, hp),
-            ("energy", 100, energy),
-            ("stamina", 100, stamina),
-            ("str", attr("str"), attr("str")),
-            ("agi", attr("agi"), attr("agi")),
-            ("int", attr("int"), attr("int")),
-            ("con", attr("con"), attr("con")),
-            ("per", attr("per"), attr("per")),
-            ("cha", attr("cha"), attr("cha")),
-            ("dex", attr("dex"), attr("dex")),
-            ("psy", attr("psy"), attr("psy")),
-        ]));
+        // Full CharWnd attribute set (client-name mapping) before any
+        // chance of the `chr` widget being created.
+        out.send(wdg::cattr(&attr_entries));
         // Menu paginae: base actions plus every implemented craft recipe
         // (RMSG_PAGINAE; parents resolve from the served resource pack).
         let mut pages: Vec<&'static str> = vec!["paginae/act/add", "paginae/add/study"];
@@ -1106,7 +1143,7 @@ impl Game {
                     };
                     self.world.gobs.frame[tslot] += 1;
                     let pos = self.world.gobs.pos[tslot];
-                    self.spawn_drop_near(pos, "gfx/invobjs/log", 10, "");
+                    self.spawn_drop_near(pos, "gfx/invobjs/wood", 10, "");
                     if let Some(p) = self.world.player_mut(sid) {
                         p.lp += 5;
                     }
@@ -1884,6 +1921,10 @@ impl Game {
 
     /// Open the character sheet window (`chr`) and feed its FEP bar.
     fn open_char_sheet(&mut self, sid: SessionId) {
+        // CharWnd attributes must precede the `chr` newwidget: the client
+        // constructor dereferences glob.cattr.get(name) for every listed
+        // attribute and crashes on the first missing one.
+        let attr_entries = self.char_attr_snapshot(sid);
         let wid = {
             let Some(out) = self.sessions.get_mut(&sid) else {
                 return;
@@ -1892,6 +1933,7 @@ impl Game {
                 w
             } else {
                 let w = out.new_wid("chr");
+                out.send(wdg::cattr(&attr_entries));
                 out.send(wdg::new_wdg(w, "chr", 30, 30, 0, &[]));
                 w
             }

@@ -832,3 +832,68 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 - Next: user git pull (they were 2 commits behind - the report came
   from the old collect-logs), then run-client.bat as usual. If the
   crash ever repeats, the client no longer needs 1872 to boot.
+
+---
+
+## Session end 1791076247
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+## 2026-10-04 - Fix: post-login crash (CharWnd cattr NPE) + headless avatar (missing base resources)
+
+Bug report `bugreport-20261004-034010.zip` (rev 7972d7a): "avatar not
+shown; client falls right after entering". Two independent defects,
+both root-caused from the report's client.log + server.log pairing.
+
+Root cause 1 (crash): `CharWnd$Attr.<init>` does
+`ui.sess.glob.cattr.get(nm)` and dereferences the result unchecked.
+SlenHud.binded() requests the char sheet (`wdgmsg "chr"` on slen) the
+moment the HUD binds - right after entering. The server answered with
+the `chr` newwidget while its cattr stream used SHORT internal names
+(agi/int/con/per/cha/dex) and carried no expmod, no skills, no beliefs.
+`cattr.get("agil")` -> null -> NPE -> client death ~2 s after entering
+(exactly the report's minimap GL NPE then fatal CharWnd NPE).
+
+Root cause 2 (avatar/tiles): the pack stores base tilesets NESTED
+(gfx/tiles/grass/grass.res) but both the client FileSource and res_http
+resolved names FLAT only -> every base tileset (grass/water/moor/...)
+404'd/refused -> tileless ground, minimap GL NPE, and gfx/borka/hair +
+gfx/borka/head do not exist in the 2009-era pack at all (only named
+variants) -> headless avatar.
+
+- Fix (server/game.rs): new `char_attr_snapshot()` builds the exact
+  26-name cattr set CharWnd requires (str/agil/intel/cons/perc/csm/dxt/
+  psy mapped from internal keys, expmod=100, 11 skills, 6 beliefs).
+  Sent in enter_world (replacing the short-name block) and again in
+  open_char_sheet immediately before the `chr` newwidget.
+- Fix (server/res_http.rs): canonical nested lookup - try
+  `<name>.res` then `<name>/<basename>.res` (what the original game's
+  resource server did); 200 logs say "(nested)". Unit test added.
+- Fix (client/Resource.java): FileSource gets the same nested fallback
+  so the client resolves base tilesets from disk without HTTP at all;
+  HttpSource retries ConnectException 3x with backoff and logs the
+  exact URL on final failure (diagnostics for the unexplained loopback
+  refusals from the previous report).
+- Fix (pack): res/compiled/gfx/borka/{hair,head}.res added (copies of
+  the working variants hair-karin/head-spectacles; ver 6 and 1 >= the
+  wired v1; their plalay references resolve to existing subdirs).
+  run-client.bat + start-server.bat guards now probe
+  gameres/gfx/borka/hair.res and regenerate the pack when absent
+  (self-heals stale packs).
+- Fix (server/game.rs): tree-chop drop used gfx/invobjs/log which the
+  pack lacks entirely -> switched to gfx/invobjs/wood (exists).
+- Verified: 40 tests green, clippy -D warnings, fmt clean; live server
+  + extended scripts/test_client.py: WORLD ENTRY OK **and**
+  CATTR ORDER OK (all 26 names present before the chr widget; the test
+  now simulates SlenHud.binded and asserts the ordering); all 12
+  previously failing resources (hair/head/10 base tiles) return HTTP
+  200 with real bytes; audit script scripts/audit_resources.py
+  resolves every referenced resource with pack ver >= wire ver.
+- Next for user: `git pull`, restart the server (start-server.bat
+  rebuilds), then run-client.bat (the stale gameres regenerates
+  automatically). Character sheet must open without a crash and the
+  avatar/head/hair must render. If any refusal lines appear in
+  client.log ("res http: connect refused for <url>"), send the next
+  bugreport - the log now names the exact URL after retries.
