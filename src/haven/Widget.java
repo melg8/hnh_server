@@ -310,13 +310,6 @@ public class Widget {
                         if (!wdg.visible)
                                 continue;
                         Coord cc = xlate(wdg.c, true);
-                        // DIAGNOSTIC: trace the container dispatch chain for map
-                        // click regressions.
-                        System.out.println("Widget.mousedown: w=" + this.getClass().getSimpleName()
-                                        + " child=" + wdg.getClass().getSimpleName()
-                                        + " at=" + c + " cc=" + cc + " sz="
-                                        + ((wdg.hsz == null) ? wdg.sz : wdg.hsz)
-                                        + " isect=" + c.isect(cc, (wdg.hsz == null) ? wdg.sz : wdg.hsz));
                         if (c.isect(cc, (wdg.hsz == null) ? wdg.sz : wdg.hsz)) {
                                 if (wdg.mousedown(c.add(cc.inv()), button)) {
                                         return (true);
