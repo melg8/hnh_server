@@ -12,7 +12,6 @@ mod craft;
 mod farm;
 mod fight;
 mod game;
-mod handoff;
 mod net;
 mod party;
 mod persist;
@@ -250,7 +249,6 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     let _ = cmd_tx.send(game::Cmd::Shutdown {});
     let _ = game_handle.await;
     auth_handle.abort();
-    handoff::refresh(args.seed);
     Ok(())
 }
 
