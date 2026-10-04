@@ -38,14 +38,18 @@ pub enum Species {
 
 impl Species {
     pub fn resname(self) -> &'static str {
+        // The concrete drawable resource per species. Kritter directories
+        // carry plalay pose routers ("gfx/korka"-style) the fork client
+        // cannot resolve - the <dir>/cdv resource is the image+neg sprite
+        // the legacy server actually layered, so spawn that instead.
         match self {
-            Species::Deer => "gfx/kritter/deer",
-            Species::Fox => "gfx/kritter/fox",
-            Species::Wolf => "gfx/kritter/wolf",
-            Species::Boar => "gfx/kritter/boar",
-            Species::Cow => "gfx/kritter/cow",
-            Species::Hare => "gfx/kritter/hare",
-            Species::Aurochs => "gfx/kritter/aurochs",
+            Species::Deer => "gfx/kritter/deer/cdv",
+            Species::Fox => "gfx/kritter/fox/cdv",
+            Species::Wolf => "gfx/kritter/wolf/cdv",
+            Species::Boar => "gfx/kritter/boar/cdv",
+            Species::Cow => "gfx/kritter/cow/cdv",
+            Species::Hare => "gfx/kritter/hare/cdv",
+            Species::Aurochs => "gfx/kritter/aurochs/cdv",
         }
     }
 
@@ -579,27 +583,31 @@ impl World {
                         let s = r.next_bounded(3);
                         match s {
                             0 => "gfx/terobjs/trees/fir",
-                            1 => "gfx/terobjs/trees/pine",
-                            _ => "gfx/terobjs/trees/atree",
+                            // The pack has no pine; atree carries numbered
+                            // image+neg frames (atree/01.res..06.res).
+                            1 => "gfx/terobjs/trees/atree/01",
+                            _ => "gfx/terobjs/trees/atree/02",
                         }
                     }
                     tile::BROADLEAF if roll < 220 => {
                         let s = r.next_bounded(3);
                         match s {
-                            0 => "gfx/terobjs/trees/birch",
+                            // birch/oak ship as numbered frame dirs
+                            // (birch/01.res..), not as single resources.
+                            0 => "gfx/terobjs/trees/birch/01",
                             1 => "gfx/terobjs/trees/maple/01",
-                            _ => "gfx/terobjs/trees/oak",
+                            _ => "gfx/terobjs/trees/oak/01",
                         }
                     }
                     tile::GRASS if roll < 8 => {
                         if r.next_bounded(2) == 0 {
-                            "gfx/terobjs/bumlings/stone1"
+                            "gfx/terobjs/bumlings/01"
                         } else {
-                            "gfx/terobjs/bumlings/boulder"
+                            "gfx/terobjs/bumlings/02"
                         }
                     }
-                    tile::HEATH if roll < 6 => "gfx/terobjs/bumlings/stone1",
-                    tile::MOOR if roll < 4 => "gfx/terobjs/bumlings/boulder",
+                    tile::HEATH if roll < 6 => "gfx/terobjs/bumlings/01",
+                    tile::MOOR if roll < 4 => "gfx/terobjs/bumlings/stal2",
                     _ => continue,
                 };
                 let res_idx = self.res.intern(res);
