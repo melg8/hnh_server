@@ -6,6 +6,7 @@
 
 mod auth;
 mod bots;
+mod build;
 mod chat;
 mod craft;
 mod farm;

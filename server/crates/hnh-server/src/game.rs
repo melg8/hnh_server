@@ -163,9 +163,130 @@ impl Game {
         for (tile, deadline) in saved_tilth {
             world.tilth.insert(tile, deadline);
         }
+        // Restore construction plans (half-built sites keep credited
+        // materials; SavedPlan is resource-name based so process-local
+        // id renumbering cannot corrupt it).
+        for saved in &save.world_state.plans {
+            if (saved.spec as usize) >= crate::build::BUILDABLES.len() {
+                tracing::warn!(spec = saved.spec, tile = ?saved.tile, "saved plan spec out of range: dropped");
+                continue;
+            }
+            if world.plan_at.contains_key(&saved.tile)
+                || world.structure_at.contains_key(&saved.tile)
+            {
+                continue;
+            }
+            let buildable = &crate::build::BUILDABLES[saved.spec as usize];
+            let res_idx = world.res.intern(buildable.res);
+            let credited: Vec<crate::build::Credited> = saved
+                .credited
+                .iter()
+                .filter_map(|(res, count, ql_sum)| {
+                    // Registry names are 'static; saved names must match
+                    // a demand line to keep the accounting honest.
+                    buildable
+                        .demand
+                        .iter()
+                        .find(|(r, _)| r == &res.as_str())
+                        .map(|(r, _)| crate::build::Credited {
+                            res: r,
+                            count: *count,
+                            ql_sum: *ql_sum,
+                        })
+                })
+                .collect();
+            let stage = crate::build::stage_for(buildable, &credited);
+            let gob = world.gobs.spawn(
+                Kind::Plan {
+                    spec: saved.spec,
+                    stage,
+                },
+                (saved.tile.0 * 11 + 5, saved.tile.1 * 11 + 5),
+                res_idx,
+                buildable.hp,
+                0,
+            );
+            world.plans.insert(
+                gob,
+                crate::build::PlanState {
+                    spec: saved.spec,
+                    tile: saved.tile,
+                    credited,
+                },
+            );
+            world.plan_at.insert(saved.tile, gob);
+        }
+        // Restore finished structures and stations.
+        for saved in &save.world_state.structures {
+            if (saved.spec as usize) >= crate::build::BUILDABLES.len() {
+                tracing::warn!(spec = saved.spec, tile = ?saved.tile, "saved structure spec out of range: dropped");
+                continue;
+            }
+            if world.plan_at.contains_key(&saved.tile)
+                || world.structure_at.contains_key(&saved.tile)
+            {
+                continue;
+            }
+            let buildable = &crate::build::BUILDABLES[saved.spec as usize];
+            let res_idx = world.res.intern(buildable.res);
+            let is_station = buildable.station.is_some();
+            let gob = world.gobs.spawn(
+                if is_station {
+                    Kind::Station {
+                        spec: saved.spec,
+                        lit: false,
+                    }
+                } else {
+                    Kind::Structure { spec: saved.spec }
+                },
+                (saved.tile.0 * 11 + 5, saved.tile.1 * 11 + 5),
+                res_idx,
+                buildable.hp,
+                0,
+            );
+            world.structure_at.insert(saved.tile, gob);
+            if is_station {
+                let input = saved.input.as_ref().and_then(|(_res, ql, label)| {
+                    // The label must still map to a known roast chain for
+                    // the station to accept it as work in progress.
+                    crate::craft::roast_result(label).map(|_| {
+                        (world.res.intern("gfx/invobjs/meat"), *ql, {
+                            // Leak the label into the process-static table
+                            // (one entry per restored station input).
+                            let leaked: &'static str = Box::leak(label.clone().into_boxed_str());
+                            leaked
+                        })
+                    })
+                });
+                world.stations.insert(
+                    gob,
+                    crate::build::StationState {
+                        spec: saved.spec,
+                        fuel: saved.fuel,
+                        fuel_ql_sum: saved.fuel_ql_sum,
+                        fuel_seen: saved.fuel_seen,
+                        input,
+                        lit: false,
+                        progress: saved.progress,
+                        quality: saved.quality,
+                    },
+                );
+            }
+        }
         let restored = world.crops.len();
         if restored > 0 {
             info!(crops = restored, "persisted crops restored");
+        }
+        if !world.plans.is_empty() || !world.stations.is_empty() {
+            info!(
+                plans = world.plans.len(),
+                structures = world.stations.len()
+                    + world
+                        .structure_at
+                        .len()
+                        .saturating_sub(world.stations.len()),
+                "persisted build sites restored"
+            );
         }
         Game {
             world,
@@ -279,7 +400,7 @@ impl Game {
                 self.save.snapshot(p, pos, inv_named, labels);
             }
         }
-        // World-state snapshot: growing crops + furrowed tiles.
+        // World-state snapshot: growing crops + furrowed tiles + build sites.
         let mut crops = Vec::with_capacity(self.world.crops.len());
         for (gob, state) in &self.world.crops {
             let Some(slot) = self.world.gobs.get(*gob) else {
@@ -314,6 +435,76 @@ impl Game {
             .iter()
             .map(|(t, v)| (*t, *v))
             .collect();
+        // Build sites: half-built plans keep their credited materials;
+        // finished structures keep quality and station state.
+        let mut plans = Vec::new();
+        for plan in self.world.plans.values() {
+            plans.push(crate::persist::SavedPlan {
+                spec: plan.spec,
+                tile: plan.tile,
+                credited: plan
+                    .credited
+                    .iter()
+                    .map(|c| (c.res.to_owned(), c.count, c.ql_sum))
+                    .collect(),
+            });
+        }
+        self.save.world_state.plans = plans;
+        let mut structures = Vec::new();
+        for (gob, station) in &self.world.stations {
+            let Some(slot) = self.world.gobs.get(*gob) else {
+                continue;
+            };
+            let (posx, posy) = self.world.gobs.pos[slot];
+            structures.push(crate::persist::SavedStructure {
+                spec: station.spec,
+                tile: (posx.div_euclid(11), posy.div_euclid(11)),
+                quality: station.quality,
+                fuel: station.fuel,
+                fuel_ql_sum: station.fuel_ql_sum,
+                fuel_seen: station.fuel_seen,
+                input: station.input.map(|(r, q, l)| {
+                    (
+                        self.world
+                            .res
+                            .name(r)
+                            .unwrap_or("gfx/invobjs/unknown")
+                            .to_owned(),
+                        q,
+                        l.to_owned(),
+                    )
+                }),
+                progress: station.progress,
+            });
+        }
+        for (tile, gob) in &self.world.structure_at {
+            if self.world.stations.contains_key(gob) {
+                continue; // already captured with its station state
+            }
+            let Some(slot) = self.world.gobs.get(*gob) else {
+                continue;
+            };
+            let Kind::Structure { spec } = self.world.gobs.kind[slot] else {
+                continue;
+            };
+            let quality = self
+                .world
+                .res
+                .name(self.world.gobs.res_idx[slot])
+                .map(|_| 10) // plain structures: natural default Q10
+                .unwrap_or(10);
+            structures.push(crate::persist::SavedStructure {
+                spec,
+                tile: *tile,
+                quality,
+                fuel: 0,
+                fuel_ql_sum: 0,
+                fuel_seen: 0,
+                input: None,
+                progress: 0,
+            });
+        }
+        self.save.world_state.structures = structures;
         if let Err(e) = self.save.flush(seed) {
             tracing::warn!(error = %e, "autosave failed");
         }
@@ -391,6 +582,8 @@ impl Game {
             party_wid: 0,
             player_menu: None,
             pending_plow: false,
+            pending_build: None,
+            station_menu: None,
             cursor: None,
             grids_seen: HashSet::new(),
         };
@@ -484,9 +677,7 @@ impl Game {
             (Some("item"), "iact") => self.on_item_iact(sid, wid),
             (Some("mapview"), "itemact") => self.on_map_itemact(sid, &args),
             (Some("mapview"), "click") => self.on_map_click(sid, &args),
-            (Some("mapview"), "place") => {
-                debug!(sid, "placement confirmed (stub)");
-            }
+            (Some("mapview"), "place") => self.on_map_place(sid, &args),
             (Some("scm"), "act") => {
                 let action: Vec<String> = args
                     .iter()
@@ -830,10 +1021,18 @@ impl Game {
         // chance of the `chr` widget being created.
         out.send(wdg::cattr(&attr_entries));
         // Menu paginae: base actions plus every implemented craft recipe
-        // (RMSG_PAGINAE; parents resolve from the served resource pack).
+        // and the build tree (RMSG_PAGINAE; parents resolve from the
+        // served resource pack: paginae/act/build -> paginae/build/cons
+        // -> paginae/build/<id>; ad strings are the Buildable ids).
         let mut pages: Vec<&'static str> =
             vec!["paginae/act/add", "paginae/add/study", "paginae/act/plow"];
         pages.push("paginae/craft/roastmeat");
+        pages.extend([
+            "paginae/act/build",
+            "paginae/build/cons",
+            "paginae/build/oven",
+            "paginae/build/smelter",
+        ]);
         for r in crate::craft::RECIPES {
             pages.push(r.pagina);
         }
@@ -945,6 +1144,8 @@ impl Game {
             let sdt = match kind {
                 Kind::Tree { harvests } => vec![harvests],
                 Kind::Crop { stage, .. } => vec![stage],
+                Kind::Plan { stage, .. } => vec![stage],
+                Kind::Station { lit, .. } => vec![lit as u8],
                 _ => Vec::new(),
             };
             if sdt.is_empty() {
@@ -1364,6 +1565,45 @@ impl Game {
             }
             Kind::Crop { .. } => {
                 self.open_crop_menu(sid, target);
+            }
+            Kind::Plan { spec, stage } => {
+                // Feedback click on a construction plan: the remaining
+                // demand as a chat line (the client has no plan UI).
+                let buildable = &crate::build::BUILDABLES[spec as usize];
+                let lines = buildable
+                    .demand
+                    .iter()
+                    .filter_map(|(res, need)| {
+                        let credited = self
+                            .world
+                            .plans
+                            .get(&target)
+                            .map(|p| {
+                                p.credited
+                                    .iter()
+                                    .find(|c| c.res == *res)
+                                    .map(|c| c.count)
+                                    .unwrap_or(0)
+                            })
+                            .unwrap_or(0);
+                        let left = need.saturating_sub(credited);
+                        (left > 0).then(|| format!("{} x{}", res, left))
+                    })
+                    .collect::<Vec<_>>();
+                let _ = stage;
+                let msg = if lines.is_empty() {
+                    format!("The {} is being built.", buildable.id)
+                } else {
+                    format!("The {} needs: {}", buildable.id, lines.join(", "))
+                };
+                self.system_line(sid, &msg);
+            }
+            Kind::Station { .. } => {
+                self.open_station_menu(sid, target);
+            }
+            Kind::Structure { spec } => {
+                let buildable = &crate::build::BUILDABLES[spec as usize];
+                self.system_line(sid, &format!("A fine {} stands here.", buildable.id));
             }
             Kind::Player { .. } => {
                 self.open_party_invite_menu(sid, target);
@@ -2213,6 +2453,21 @@ impl Game {
             return;
         };
         let label = cursor.label;
+        // Gob-targeted itemact (client sends [cc, mc, modflags, gobid,
+        // gobrc] when the click lands on a gob; MapView.iteminteract):
+        // plans sink the held material, stations take fuel or input.
+        if let Some(gob) = args.get(3).and_then(|a| a.as_int()) {
+            if self.world.plans.contains_key(&gob) {
+                self.sink_material(sid, gob, cursor);
+                return;
+            }
+            if self.world.stations.contains_key(&gob) {
+                self.station_itemact(sid, gob, cursor);
+                return;
+            }
+            // Fall through to the map-space behaviors below for other
+            // gob kinds (legacy iteminteract semantics).
+        }
         match farm::spec_by_seed_label(label) {
             Some(spec) => self.plant_seed(sid, spec, Self::tile_coord(mx, my), cursor),
             None => {
@@ -2542,6 +2797,550 @@ impl Game {
     }
 
     // ------------------------------------------------------------------
+    // Building placement + production stations
+    // (crafting-and-building.md: plans, material sinking, stages)
+    // ------------------------------------------------------------------
+
+    /// Widget id of this session's mapview, if created.
+    fn mapview_wid(out: &SessionOut) -> Option<u16> {
+        out.widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "mapview")
+            .map(|(id, _)| *id)
+    }
+
+    /// Build pagina activated: drive the client into placement mode. The
+    /// mapview `place` uimsg carries (resname, version, on-tile[, radius]);
+    /// the ghost plob follows the mouse until the player commits.
+    fn arm_build_placement(&mut self, sid: SessionId, spec: usize) {
+        let buildable = &crate::build::BUILDABLES[spec];
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        let Some(wid) = Self::mapview_wid(out) else {
+            debug!(sid, "build refused: no mapview yet");
+            return;
+        };
+        let res_idx = self.world.res.intern(buildable.res);
+        let wire = out.res.wire_named(res_idx, buildable.res);
+        if let Some((n, v)) = out.res.pending_announce(wire) {
+            out.send(wdg::resid(wire, n, v));
+            out.res.mark_announced(wire);
+        }
+        // Replace any armed placement: the client's plob is singular.
+        let mut args: Vec<ListVal> = vec![
+            ListVal::S(buildable.res.to_owned()),
+            ListVal::I(1),
+            ListVal::I(buildable.on_tile as i32),
+        ];
+        if let Some(r) = buildable.place_radius {
+            args.push(ListVal::I(r));
+        }
+        out.send(wdg::wdgmsg(wid, "place", &args));
+        out.pending_build = Some(spec);
+        info!(sid, id = buildable.id, "build pagina armed");
+    }
+
+    /// Cancel an armed placement (right-button commit or new flow): drop
+    /// the client ghost and clear the pending build.
+    fn cancel_build(&mut self, sid: SessionId) {
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        if out.pending_build.is_none() {
+            return;
+        }
+        if let Some(wid) = Self::mapview_wid(out) {
+            out.send(wdg::wdgmsg(wid, "unplace", &[]));
+        }
+        out.pending_build = None;
+    }
+
+    /// MapView `place(coord, button, modflags)`: the ghost commit. Button
+    /// 1 places; any other button cancels (server policy, mirroring the
+    /// client's left-click commit / right-click flower-menu split).
+    fn on_map_place(&mut self, sid: SessionId, args: &[hnh_proto::ListArg]) {
+        let mc = args.iter().filter_map(|a| a.as_coord()).next();
+        let button = args.iter().filter_map(|a| a.as_int()).next().unwrap_or(1);
+        if button != 1 {
+            self.cancel_build(sid);
+            return;
+        }
+        let Some((mx, my)) = mc else { return };
+        let Some(spec) = self.sessions.get(&sid).and_then(|o| o.pending_build) else {
+            debug!(sid, "place without armed build: ignoring");
+            return;
+        };
+        self.commit_build(sid, spec, (mx, my));
+    }
+
+    /// Validate a placement commit and spawn the construction plan gob.
+    fn commit_build(&mut self, sid: SessionId, spec: usize, (mx, my): (i32, i32)) {
+        let buildable = &crate::build::BUILDABLES[spec];
+        let tile = Self::tile_coord(mx, my);
+        // Reach: server-side validation of the commit point (client trust
+        // boundary; 5 tiles matches the interaction radius policy).
+        let in_reach = self
+            .world
+            .player(sid)
+            .and_then(|p| self.world.gobs.get(p.gob))
+            .map(|slot| {
+                let (px, py) = self.world.gobs.pos[slot];
+                let (ptx, pty) = (px.div_euclid(11), py.div_euclid(11));
+                (ptx - tile.0).abs() <= 5 && (pty - tile.1).abs() <= 5
+            })
+            .unwrap_or(false);
+        if !in_reach {
+            self.system_line(sid, "Too far away to build there.");
+            return;
+        }
+        // Terrain: passable tiles only (the tile_speed rule table is the
+        // single walkability source; water and cliffs refuse plans).
+        let gc = (tile.0.div_euclid(100), tile.1.div_euclid(100));
+        let (lx, ly) = (
+            tile.0.rem_euclid(100) as usize,
+            tile.1.rem_euclid(100) as usize,
+        );
+        let t = self.world.grids.grid(gc).tile(lx, ly);
+        if crate::state::tile_speed(t).is_none() {
+            debug!(
+                sid,
+                tx = tile.0,
+                ty = tile.1,
+                tile = t,
+                "build refused: terrain"
+            );
+            return;
+        }
+        // Occupancy: one site per tile across crops, plans, structures.
+        if self.world.crop_at.contains_key(&tile)
+            || self.world.plan_at.contains_key(&tile)
+            || self.world.structure_at.contains_key(&tile)
+        {
+            debug!(sid, tx = tile.0, ty = tile.1, "build refused: occupied");
+            return;
+        }
+        let res_idx = self.world.res.intern(buildable.res);
+        let pos = (tile.0 * 11 + 5, tile.1 * 11 + 5);
+        let gob = self.world.gobs.spawn(
+            Kind::Plan {
+                spec: spec as u8,
+                stage: 0,
+            },
+            pos,
+            res_idx,
+            buildable.hp,
+            0,
+        );
+        self.world.plans.insert(
+            gob,
+            crate::build::PlanState {
+                spec: spec as u8,
+                tile,
+                credited: Vec::new(),
+            },
+        );
+        self.world.plan_at.insert(tile, gob);
+        if let Some(out) = self.sessions.get_mut(&sid) {
+            out.pending_build = None;
+            if let Some(wid) = Self::mapview_wid(out) {
+                out.send(wdg::wdgmsg(wid, "unplace", &[]));
+            }
+        }
+        self.broadcast_spawn(gob);
+        info!(sid, id = buildable.id, tile = ?tile, gob, "construction plan placed");
+    }
+
+    /// Sink held material into a construction plan (itemact on the plan
+    /// gob): validate against remaining demand, consume, snapshot the
+    /// delivery quality, advance the stage, and complete when full.
+    fn sink_material(&mut self, sid: SessionId, gob: GobId, mut cursor: InvStack) {
+        let resname = match self.world.res.name(cursor.res) {
+            Some(n) => n,
+            None => return,
+        };
+        let Some(plan) = self.world.plans.get(&gob).cloned() else {
+            return;
+        };
+        let buildable = &crate::build::BUILDABLES[plan.spec as usize];
+        let remaining = crate::build::remaining(buildable, &plan.credited, resname);
+        if remaining == 0 {
+            // Not a demanded material (or already full): the item stays in
+            // hand and the plan does not consume it.
+            self.system_line(sid, &format!("The {} does not need that.", buildable.id));
+            return;
+        }
+        let n = cursor.count.min(remaining);
+        cursor.count -= n;
+        let credited = &mut self
+            .world
+            .plans
+            .get_mut(&gob)
+            .expect("BUG: plan checked above")
+            .credited;
+        match credited.iter_mut().find(|c| c.res == resname) {
+            Some(c) => {
+                c.count += n;
+                c.ql_sum += cursor.ql as u64 * n as u64;
+            }
+            None => credited.push(crate::build::Credited {
+                res: resname,
+                count: n,
+                ql_sum: cursor.ql as u64 * n as u64,
+            }),
+        }
+        let new_stage = crate::build::stage_for(buildable, credited);
+        let complete = self
+            .world
+            .plans
+            .get(&gob)
+            .map(|p| p.complete(buildable))
+            .unwrap_or(false);
+        // Consume from the cursor (empty cursor hands control back).
+        if let Some(out) = self.sessions.get_mut(&sid) {
+            out.cursor = if cursor.count == 0 {
+                None
+            } else {
+                Some(cursor)
+            };
+        }
+        self.refresh_inventory(sid);
+        if complete {
+            self.complete_plan(gob);
+            return;
+        }
+        // Stage advancement: OD_RES re-send with a fresh sdt byte (the
+        // crop-growth render pattern; OCache.cres rebuilds the sprite).
+        let cur_stage = match self.world.gobs.get(gob) {
+            Some(slot) => match self.world.gobs.kind[slot] {
+                Kind::Plan { stage, .. } => stage,
+                _ => return,
+            },
+            None => return,
+        };
+        if new_stage != cur_stage {
+            let spec = plan.spec;
+            if let Some(slot) = self.world.gobs.get(gob) {
+                self.world.gobs.kind[slot] = Kind::Plan {
+                    spec,
+                    stage: new_stage,
+                };
+                self.world.gobs.frame[slot] += 1;
+            }
+            self.restage_gob(gob);
+        }
+        info!(sid, id = buildable.id, n, res = resname, "material sunk");
+    }
+
+    /// Convert a fully-credited plan into the finished structure gob.
+    fn complete_plan(&mut self, gob: GobId) {
+        let Some(plan) = self.world.plans.remove(&gob) else {
+            return;
+        };
+        self.world.plan_at.remove(&plan.tile);
+        let buildable = &crate::build::BUILDABLES[plan.spec as usize];
+        let slot = match self.world.gobs.get(gob) {
+            Some(s) => s,
+            None => return,
+        };
+        let quality = crate::build::structure_quality(&plan.credited);
+        let kind = if buildable.station.is_some() {
+            Kind::Station {
+                spec: plan.spec,
+                lit: false,
+            }
+        } else {
+            Kind::Structure { spec: plan.spec }
+        };
+        // In-place conversion keeps the gob id (and its visibility set):
+        // only the resource/state re-render marks the transition.
+        self.world.gobs.kind[slot] = kind;
+        self.world.gobs.frame[slot] += 1;
+        if buildable.station.is_some() {
+            self.world.stations.insert(
+                gob,
+                crate::build::StationState {
+                    spec: plan.spec,
+                    fuel: 0,
+                    fuel_ql_sum: 0,
+                    fuel_seen: 0,
+                    input: None,
+                    lit: false,
+                    progress: 0,
+                    quality,
+                },
+            );
+            self.world.structure_at.insert(plan.tile, gob);
+        } else {
+            self.world.structure_at.insert(plan.tile, gob);
+        }
+        self.restage_gob(gob);
+        info!(id = buildable.id, gob, quality, "structure completed");
+    }
+
+    /// Re-send a gob's full block (OD_RES with sdt) to every viewer so a
+    /// Kind/resource state change re-renders client-side.
+    fn restage_gob(&mut self, gob: GobId) {
+        let frame = match self.world.gobs.get(gob) {
+            Some(slot) => self.world.gobs.frame[slot],
+            None => return,
+        };
+        let viewers: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, o)| o.visible.contains(&gob))
+            .map(|(s, _)| *s)
+            .collect();
+        for v in viewers {
+            let block = self.encode_gob_block(v, gob, true);
+            if let (Some(out), Some(block)) = (self.sessions.get_mut(&v), block) {
+                out.send_raw(block.clone());
+                out.unacked.entry(gob).or_default().insert(frame, block);
+            }
+        }
+    }
+
+    /// itemact on a finished station: fuel deliveries fill the fuel
+    /// store; the roast input fills the single input slot (unlit only).
+    fn station_itemact(&mut self, sid: SessionId, gob: GobId, mut cursor: InvStack) {
+        let Some(station) = self.world.stations.get(&gob).cloned() else {
+            return;
+        };
+        let buildable = &crate::build::BUILDABLES[station.spec as usize];
+        let Some(station_spec) = buildable.station.as_ref() else {
+            return;
+        };
+        let resname = match self.world.res.name(cursor.res) {
+            Some(n) => n,
+            None => return,
+        };
+        if station_spec.fuel.contains(&resname) {
+            // Fuel delivery: one unit per itemact keeps accounting exact.
+            let station = self
+                .world
+                .stations
+                .get_mut(&gob)
+                .expect("BUG: station checked above");
+            station.fuel += 1;
+            station.fuel_ql_sum += cursor.ql as u64;
+            station.fuel_seen += 1;
+            cursor.count -= 1;
+            if let Some(out) = self.sessions.get_mut(&sid) {
+                out.cursor = if cursor.count == 0 {
+                    None
+                } else {
+                    Some(cursor)
+                };
+            }
+            self.refresh_inventory(sid);
+            self.system_line(sid, "Fuel added to the oven.");
+            info!(sid, gob, "station fueled");
+            return;
+        }
+        if station.lit {
+            self.system_line(sid, "The fire is burning; wait for it to finish.");
+            return;
+        }
+        if station.input.is_some() {
+            self.system_line(sid, "The oven already holds an input.");
+            return;
+        }
+        // Roast input: any raw meat label in craft::ROAST_MAP (the same
+        // chain as the hand-craft roast recipe).
+        if crate::craft::roast_result(cursor.label).is_none() {
+            self.system_line(sid, "The oven cannot process that.");
+            return;
+        }
+        let station = self
+            .world
+            .stations
+            .get_mut(&gob)
+            .expect("BUG: station checked above");
+        station.input = Some((cursor.res, cursor.ql, cursor.label));
+        cursor.count -= 1;
+        if let Some(out) = self.sessions.get_mut(&sid) {
+            out.cursor = if cursor.count == 0 {
+                None
+            } else {
+                Some(cursor)
+            };
+        }
+        self.refresh_inventory(sid);
+        self.system_line(sid, "Input loaded; right-click the oven to light it.");
+        info!(sid, gob, label = cursor.label, "station input loaded");
+    }
+
+    /// Click on a station gob: open the Light/Extinguish flower menu.
+    fn open_station_menu(&mut self, sid: SessionId, target: GobId) {
+        let Some(station) = self.world.stations.get(&target).cloned() else {
+            return;
+        };
+        let buildable = &crate::build::BUILDABLES[station.spec as usize];
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        // One flower menu at a time per session.
+        if let Some((old, _)) = out.crop_menu {
+            out.send(wdg::dst_wdg(old));
+            out.crop_menu = None;
+        }
+        if let Some((old, _)) = out.player_menu {
+            out.send(wdg::dst_wdg(old));
+            out.player_menu = None;
+        }
+        let w = out.new_wid("sm");
+        let option = if station.lit { "Extinguish" } else { "Light" };
+        out.send(wdg::new_wdg(
+            w,
+            "sm",
+            -1,
+            -1,
+            0,
+            &[ListVal::S(option.to_owned())],
+        ));
+        out.station_menu = Some((w, target));
+        let _ = buildable;
+    }
+
+    /// Flower menu choice on a station: Light starts a job (fuel +
+    /// input required), Extinguish cancels the lit state.
+    fn apply_station_choice(&mut self, sid: SessionId, wid: u16, choice: i32) {
+        let pending = self
+            .sessions
+            .get(&sid)
+            .and_then(|o| o.station_menu)
+            .filter(|(w, _)| *w == wid);
+        let Some((_, gob)) = pending else {
+            return;
+        };
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        out.station_menu = None;
+        out.send(wdg::dst_wdg(wid));
+        if choice != 0 {
+            out.send(wdg::wdgmsg(wid, "cancel", &[]));
+            return;
+        }
+        out.send(wdg::wdgmsg(wid, "act", &[ListVal::I(0)]));
+        let Some(station) = self.world.stations.get(&gob).cloned() else {
+            return;
+        };
+        if station.lit {
+            // Extinguish: progress resets (legacy ovens lost the dough;
+            // this server preserves the input, policy documented).
+            let station = self
+                .world
+                .stations
+                .get_mut(&gob)
+                .expect("BUG: station checked above");
+            station.lit = false;
+            station.progress = 0;
+            self.set_station_lit(gob, false);
+            info!(sid, gob, "station extinguished");
+            return;
+        }
+        if station.fuel < crate::build::FUEL_PER_JOB {
+            self.system_line(sid, "The oven needs fuel first.");
+            return;
+        }
+        if station.input.is_none() {
+            self.system_line(sid, "The oven needs an input before lighting.");
+            return;
+        }
+        let station = self
+            .world
+            .stations
+            .get_mut(&gob)
+            .expect("BUG: station checked above");
+        station.lit = true;
+        station.progress = 0;
+        self.set_station_lit(gob, true);
+        info!(sid, gob, "station lit");
+    }
+
+    /// Single source of truth for the wire-visible lit byte: the Kind
+    /// variant carries the sdt re-render, the StationState carries the
+    /// simulation state — both must move together.
+    fn set_station_lit(&mut self, gob: GobId, lit: bool) {
+        if let Some(slot) = self.world.gobs.get(gob) {
+            if let Kind::Station { spec, .. } = self.world.gobs.kind[slot] {
+                self.world.gobs.kind[slot] = Kind::Station { spec, lit };
+                self.world.gobs.frame[slot] += 1;
+            }
+        }
+        self.restage_gob(gob);
+    }
+
+    /// Per-tick station pass: advance lit jobs, burn fuel, and emit the
+    /// output drop beside the station with the station quality formula.
+    fn tick_stations(&mut self) {
+        if self.world.stations.is_empty() {
+            return;
+        }
+        let mut finished: Vec<(GobId, &'static str, u8, String)> = Vec::new();
+        let mut unlit: Vec<GobId> = Vec::new();
+        for (gob, station) in self.world.stations.iter_mut() {
+            if !station.lit {
+                continue;
+            }
+            let buildable = &crate::build::BUILDABLES[station.spec as usize];
+            let Some(spec) = buildable.station.as_ref() else {
+                continue;
+            };
+            station.progress += 1;
+            if station.progress < spec.job_ticks {
+                continue;
+            }
+            // Job complete: burn fuel, consume input, roll the output.
+            station.progress = 0;
+            station.lit = false;
+            unlit.push(*gob);
+            if station.fuel >= crate::build::FUEL_PER_JOB {
+                station.fuel -= crate::build::FUEL_PER_JOB;
+                // Burn at the delivered-fuel average; keep the average
+                // stable across burns.
+                let avg = station.fuel_quality() as u64;
+                station.fuel_ql_sum = station.fuel_ql_sum.saturating_sub(avg);
+                station.fuel_seen = station.fuel_seen.saturating_sub(1);
+            }
+            let Some((_, q_item, label)) = station.input.take() else {
+                continue;
+            };
+            let output_label = crate::craft::roast_result(label).unwrap_or(label);
+            let ql =
+                crate::build::station_output_ql(q_item, station.quality, station.fuel_quality());
+            finished.push((*gob, output_label, ql, label.to_owned()));
+        }
+        for gob in unlit {
+            // Wire re-render of the extinguished state (Kind + sdt byte).
+            self.set_station_lit(gob, false);
+        }
+        for (gob, output_label, ql, raw_label) in finished {
+            let pos = match self.world.gobs.get(gob) {
+                Some(slot) => self.world.gobs.pos[slot],
+                None => continue,
+            };
+            self.spawn_drop_near(pos, "gfx/invobjs/meat", ql, output_label);
+            if let Some(sid) = self
+                .sessions
+                .iter()
+                .find(|(_, o)| o.visible.contains(&gob))
+                .map(|(s, _)| *s)
+            {
+                self.system_line(sid, "The oven finished its work.");
+            }
+            debug!(
+                gob,
+                output = output_label,
+                raw = raw_label,
+                ql,
+                "station job done"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Crafting (crafting-and-building.md: making protocol)
     // ------------------------------------------------------------------
 
@@ -2565,8 +3364,15 @@ impl Game {
             if let Some(out) = self.sessions.get_mut(&sid) {
                 out.pending_plow = true;
             }
-        } else {
-            debug!(sid, ?action, "menu action");
+        } else if !action.is_empty() {
+            // Build paginae send their own ad string ("act(\"oven\")"),
+            // decoded from the res pack action layers.
+            let ad = action[0].as_str();
+            if let Some(spec) = crate::build::buildable_by_ad(ad) {
+                self.arm_build_placement(sid, spec);
+            } else {
+                debug!(sid, ?action, "menu action");
+            }
         }
     }
 
@@ -2872,6 +3678,16 @@ impl Game {
             self.harvest_crop(sid, wid, choice);
             return;
         }
+        // Station Light/Extinguish menus.
+        let station_menu = self
+            .sessions
+            .get(&sid)
+            .and_then(|o| o.station_menu)
+            .map(|(w, _)| w);
+        if station_menu == Some(wid) {
+            self.apply_station_choice(sid, wid, choice);
+            return;
+        }
         let pending = self
             .sessions
             .get(&sid)
@@ -3047,6 +3863,8 @@ impl Game {
         // Farming scheduler (crop growth, tilth decay) is a cheap scan of
         // the live crop set only; no work with an empty map.
         self.tick_farming();
+        // Production stations: bounded by the live station set.
+        self.tick_stations();
         let perf = &mut self.world.perf;
         perf.active_sessions = self.sessions.len();
         perf.phase_us = phase_us;

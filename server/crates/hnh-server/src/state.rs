@@ -146,6 +146,22 @@ pub enum Kind {
         spec: u8,
         stage: u8,
     },
+    /// Construction plan (crafting-and-building.md, building pipeline).
+    /// `spec` indexes `build::BUILDABLES`; `stage` is the wire sdt byte
+    /// re-rendered on every material delivery (crop growth pattern).
+    Plan {
+        spec: u8,
+        stage: u8,
+    },
+    /// Finished station gob; `lit` is the wire sdt byte (0/1).
+    Station {
+        spec: u8,
+        lit: bool,
+    },
+    /// Finished plain structure (no station behavior).
+    Structure {
+        spec: u8,
+    },
     Stone,
     /// Item lying on the ground. `label` carries the display name so food
     /// keeps its fep.conf identity from ground to inventory.
@@ -372,6 +388,11 @@ pub struct SessionOut {
     pub player_menu: Option<(u16, crate::party::PlayerMenu)>,
     /// Plow Field pagina armed: next map click plows the tile.
     pub pending_plow: bool,
+    /// Build pagina armed (`build::BUILDABLES` index): the mapview ghost
+    /// is up and the next mapview `place` wdgmsg commits it.
+    pub pending_build: Option<usize>,
+    /// Open station flower menu: `sm` widget id -> target station gob.
+    pub station_menu: Option<(u16, GobId)>,
     /// Item stack currently held on the cursor (take -> itemact flow).
     pub cursor: Option<InvStack>,
     /// Map grids this client already holds (MAPDATA re-send targeting).
@@ -447,6 +468,14 @@ pub struct World {
     /// (never decays while the crop lives); a non-zero unix-ms deadline
     /// reverts the tile to grass when it passes.
     pub tilth: HashMap<(i32, i32), u64>,
+    /// Construction plans by gob id (sinking + stage lookup).
+    pub plans: HashMap<GobId, crate::build::PlanState>,
+    /// Tile -> plan gob occupying it (one build site per tile).
+    pub plan_at: HashMap<(i32, i32), GobId>,
+    /// Finished stations by gob id (fuel/input/progress state).
+    pub stations: HashMap<GobId, crate::build::StationState>,
+    /// Tile -> finished structure gob occupying it.
+    pub structure_at: HashMap<(i32, i32), GobId>,
     /// Formed parties (small vec; parties are capped and rare, linear
     /// scan by member is fine and keeps the hot paths untouched).
     pub parties: Vec<crate::party::PartyState>,
@@ -488,6 +517,10 @@ impl World {
             crops: HashMap::new(),
             crop_at: HashMap::new(),
             tilth: HashMap::new(),
+            plans: HashMap::new(),
+            plan_at: HashMap::new(),
+            stations: HashMap::new(),
+            structure_at: HashMap::new(),
             parties: Vec::new(),
             tick: 0,
             rng: hnh_world::JavaRandom::new(seed as i64),

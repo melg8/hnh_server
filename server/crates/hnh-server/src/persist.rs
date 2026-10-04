@@ -55,6 +55,46 @@ pub struct SaveData {
     /// Persisted tile overrides (terraforming): (tx, ty) -> tile id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tile_overrides: Vec<((i32, i32), u8)>,
+    /// Persisted construction plans (v3, additive): half-built sites keep
+    /// their credited materials across restarts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plans: Vec<SavedPlan>,
+    /// Persisted finished structures and stations (v3, additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structures: Vec<SavedStructure>,
+}
+
+/// A persisted construction plan. Credited materials are saved by item
+/// resource name with the snapshotted delivery qualities.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedPlan {
+    /// Index into `build::BUILDABLES` (registry order is stable).
+    pub spec: u8,
+    /// Tile coordinates (11x11 map units per tile).
+    pub tile: (i32, i32),
+    /// Credited deliveries: (item resource name, units, quality sum).
+    pub credited: Vec<(String, u32, u64)>,
+}
+
+/// A persisted finished structure (station or plain).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedStructure {
+    pub spec: u8,
+    pub tile: (i32, i32),
+    /// Structure quality snapshotted at completion.
+    pub quality: u8,
+    /// Station fields (zero for plain structures).
+    #[serde(default)]
+    pub fuel: u32,
+    #[serde(default)]
+    pub fuel_ql_sum: u64,
+    #[serde(default)]
+    pub fuel_seen: u64,
+    /// Loaded station input: (item resource name, quality, label).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<(String, u8, String)>,
+    #[serde(default)]
+    pub progress: u32,
 }
 
 /// A persisted growing crop. Resource names keep the entry stable across
@@ -75,7 +115,7 @@ pub struct SavedCrop {
 }
 
 impl SaveData {
-    pub const VERSION: u32 = 2;
+    pub const VERSION: u32 = 3;
 
     pub fn new(seed: u64) -> Self {
         SaveData {
@@ -86,6 +126,8 @@ impl SaveData {
             crops: Vec::new(),
             tilth: Vec::new(),
             tile_overrides: Vec::new(),
+            plans: Vec::new(),
+            structures: Vec::new(),
         }
     }
 }
@@ -112,6 +154,8 @@ pub struct WorldState {
     pub crops: Vec<SavedCrop>,
     pub tilth: Vec<((i32, i32), u64)>,
     pub tile_overrides: Vec<((i32, i32), u8)>,
+    pub plans: Vec<SavedPlan>,
+    pub structures: Vec<SavedStructure>,
 }
 
 impl SaveStore {
@@ -126,6 +170,8 @@ impl SaveStore {
                         crops: data.crops.clone(),
                         tilth: data.tilth.clone(),
                         tile_overrides: data.tile_overrides.clone(),
+                        plans: data.plans.clone(),
+                        structures: data.structures.clone(),
                     };
                     (
                         data.players
@@ -201,6 +247,8 @@ impl SaveStore {
         data.players.sort_by(|a, b| a.name.cmp(&b.name));
         data.crops = self.world_state.crops.clone();
         data.tilth = self.world_state.tilth.clone();
+        data.plans = self.world_state.plans.clone();
+        data.structures = self.world_state.structures.clone();
         let bytes = serde_json::to_vec(&data)?;
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, &bytes)?;

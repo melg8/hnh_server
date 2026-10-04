@@ -201,9 +201,65 @@ All of them share the same server shape: an inventory (per-gob item store), a fu
 - Starter kit policy: fresh characters spawn with branch x2, stone x2,
   beef x1 so the loop is playable; the legacy server granted nothing.
 
+## Server implementation notes (this repo, session 15)
+
+- The building pipeline is live end to end: a build pagina's ad string is
+  the pagina's own id (`paginae/build/oven.res` action layer ad =
+  ["oven"], decoded from lib/haven-res.jar — this also RESOLVES the
+  "build-menu action verb" open question below; the verb is per-object,
+  not a shared "build" verb). `act("oven")` drives the mapview `place`
+  uimsg (resname, ver=1, ontile, [radius]); the client ghost answers
+  `place (coord, button, modflags)`; button 1 commits, any other button
+  cancels via `unplace` (server policy).
+- Commit validation: reach <= 5 tiles (Chebyshev, server policy), the
+  shared tile_speed walkability table refuses water/mountain tiles, and
+  one site per tile across crops/plans/structures (crop_at + plan_at +
+  structure_at maps).
+- Plan gobs reuse the finished-object resource with the build stage in
+  the sdt byte (the crop-growth render pattern: OD_RES re-send, frame
+  bump, OCache.cres rebuild). Stage count is registry data (oven 2,
+  smelter 3); stages advance proportionally with credited units and cap
+  one below final until completion. The stage-to-sprite mapping of the
+  real resource pack may not visualize intermediate stages (the sprite
+  code consumes sdt only for some objects); the wire behavior is exact.
+- Material sinking via mapview itemact with the gob id (client sends
+  [cc, mc, modflags, gobid, gobrc]; gobid is arg index 3): delivery
+  sinks min(cursor units, remaining demand), snapshots the delivery
+  quality per material type, and completion converts the plan in place
+  (same gob id, Kind swap, OD_RES re-render) into a Station or Structure.
+- Structure quality = per-type delivery averages weighted by units
+  (Legacy:Quality buildable rule); station output = (2*q_item +
+  q_station + q_fuel)/4 with q_fuel the delivered-fuel average. Both are
+  unit-tested against the doc formulas.
+- Registry this session: oven (stone x2 + branch x1, HP 1200, station)
+  and smelter (stone x6 + branch x4, HP 2500, plain structure until the
+  metal chain exists). DEVIATION: legacy oven demand is Brick x45 and
+  smelter Brick x35 + Stone x10 + Bar of Hard Metal x3; this server's
+  item economy cannot produce bricks/bars yet, so demands use the
+  obtainable stone/branch pair. Revisit when the metal chain lands.
+- Station (oven) behavior: fuel via itemact (branch; one unit per
+  delivery, delivered-fuel average tracked), single input slot via
+  itemact (any craft::ROAST_MAP raw meat label; legacy had four dough
+  slots — one slot is server policy), Light/Extinguish through the
+  flower menu on the station gob, 8-tick (0.8 s) job at the 10 Hz tick,
+  one fuel unit burned per job, output drops beside the station (legacy
+  used an internal inventory widget; ground-drop output is server
+  policy until container gobs land). Lighting with no fuel or no input
+  is refused with a chat line.
+- The lit state has one wire source of truth: the Kind::Station lit
+  byte and StationState.lit move together (set_station_lit), avoiding a
+  state/render split.
+- Persistence v3 (additive): SavedPlan (spec, tile, credited by item
+  resource name with quality sums) and SavedStructure (spec, tile,
+  quality, fuel bookkeeping, loaded input, progress). Half-built plans
+  and station fuel/input survive restarts; v2 saves stay readable.
+
 ## Open questions
 
-- **Build-menu action verb.** The exact `ad` strings for build paginae (presumably a `build`/`place` verb plus object id) are not recoverable from this client; determine by capturing a live legacy session's menugrid `act` messages, or by diffing a fuller legacy resource pack's `paginae/act/*`/`paginae/build*` resources.
+- **Build-menu action verb.** RESOLVED (session 15): the ad string is the
+  pagina's own object id ("oven", "smelter"), decoded from the shipped
+  res pack. Remaining unknown: whether the legacy server reserved any
+  shared verbs alongside per-object ids.
 - **Per-recipe data.** Ingredient weights `w_i`, tool weights, and softcap attribute pairs per recipe are game data; the wiki documents examples (stone axe, boards, leather, metal products) but not the full legacy table. Extract from legacy resources/wiki object pages as they are digitized.
 - **Legacy smelter/kiln/finery numbers.** Fuel amounts, load sizes, and durations quoted above for the smelter are current-world values; the legacy pages exist (Category:Legacy Structures) but were empty or not yet fetched. Fetch Legacy:Ore Smelter, Legacy:Kiln, Legacy:Finery Forge and reconcile.
 - **Craft All stop reporting.** Whether legacy servers sent an error widget/message when batch crafting stopped early, or stopped silently. Determine from a live capture (watch for `RMSG_NEWWDG` text/error widgets after `make 1`).
