@@ -261,10 +261,17 @@ pub struct Gobs {
     pub mv: Vec<Option<LinMove>>,
     /// Generation counter for id reuse safety.
     pub gen: Vec<u32>,
-    /// Last avatar pose frame streamed to viewers: 255 = standing pose,
-    /// 0..7 = walking-pose cycle frame (server-side pose resolution; the
-    /// fork client renders only concrete image-bearing frame resources).
-    pub pose_frame: Vec<u8>,
+    /// Current facing direction 0..7 (the pack's directional pose index:
+    /// dir 0 = +x, quantized atan2, see `game::move_dir`). Server-side pose
+    /// resolution: the fork client has no plalay/plparts router support,
+    /// so the server layers the concrete directional frame resources and
+    /// the client animates each one natively via its embedded `anim` layer.
+    pub facing: Vec<u8>,
+    /// Last pose state streamed to viewers, encoded (moving<<3 | dir):
+    /// standing dirs 0..7, walking dirs 8..15, u8::MAX = nothing streamed
+    /// yet. One-byte dedupe for the pose-change streams (retargets,
+    /// arrivals, re-facings never re-send an identical layer set).
+    pub pose_streamed: Vec<u8>,
     free: Vec<usize>,
     /// Dirty-cell spatial index maintained by every mutator (spawn, kill,
     /// set_pos); see visidx.rs for the skip-proof semantics.
@@ -284,7 +291,8 @@ impl Gobs {
             speed: Vec::new(),
             mv: Vec::new(),
             gen: Vec::new(),
-            pose_frame: Vec::new(),
+            facing: Vec::new(),
+            pose_streamed: Vec::new(),
             free: Vec::new(),
             vis: crate::visidx::VisIndex::default(),
         }
@@ -313,7 +321,8 @@ impl Gobs {
                 self.speed.push(0);
                 self.mv.push(None);
                 self.gen.push(0);
-                self.pose_frame.push(u8::MAX);
+                self.facing.push(0);
+                self.pose_streamed.push(u8::MAX);
                 self.pos.len() - 1
             }
         };
@@ -326,7 +335,8 @@ impl Gobs {
         self.max_hp[slot] = hp;
         self.speed[slot] = speed;
         self.mv[slot] = None;
-        self.pose_frame[slot] = u8::MAX;
+        self.facing[slot] = 0;
+        self.pose_streamed[slot] = u8::MAX;
         self.frame[slot] = 0;
         self.vis.insert(gob_id_from_slot(slot, self.gen[slot]), pos);
         gob_id_from_slot(slot, self.gen[slot])

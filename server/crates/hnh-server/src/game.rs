@@ -26,52 +26,147 @@ use hnh_world::tile;
 #[allow(dead_code)]
 pub const ITEM_DROP_LIFETIME_TICKS: u64 = 20 * 300; // 5 minutes
 
-/// Standing-pose avatar layer set (frame 0 of each part; also the
-/// charlist portrait layers).
-const POSE_STANDING: [&str; 6] = [
-    "gfx/borka/body/standing/legs-0",
-    "gfx/borka/body/standing/torso/male-0",
-    "gfx/borka/body/standing/head-0",
-    "gfx/borka/body/standing/arm/idle/left-0",
-    "gfx/borka/body/standing/arm/idle/right-0",
-    "gfx/borka/hair-karin/standing/hair-0",
+/// Avatar part resource templates. `{pose}` is `standing` or `walking`;
+/// `{dir}` is the 8-direction sprite index (0..7). Every directional
+/// resource embeds its full animation client-side (standing = 1 frame,
+/// walking = 8 frames @100 ms through the resource's own `anim` layer),
+/// so the server selects ONE direction set per pose and NEVER streams
+/// frames: cycling the direction sets in sequence is what made the
+/// avatar spin around its own axis (session 21 defect).
+const AVATAR_PART_TEMPLATES: [&str; 6] = [
+    "gfx/borka/body/{pose}/legs-{dir}",
+    "gfx/borka/body/{pose}/torso/male-{dir}",
+    "gfx/borka/body/{pose}/head-{dir}",
+    "gfx/borka/body/{pose}/arm/idle/left-{dir}",
+    "gfx/borka/body/{pose}/arm/idle/right-{dir}",
+    "gfx/borka/hair-karin/{pose}/hair-{dir}",
 ];
 
-/// Walking-pose frame sets. The pack ships 8 walking frames per part
-/// (verified: legs, torso/male, head, arm/idle left+right, hair-karin).
-/// ResTable interns `&'static str` names, so the 8 frame sets are baked
-/// as static literals via concat!.
-macro_rules! walk_pose {
-    ($f:literal) => {
-        [
-            concat!("gfx/borka/body/walking/legs-", $f),
-            concat!("gfx/borka/body/walking/torso/male-", $f),
-            concat!("gfx/borka/body/walking/head-", $f),
-            concat!("gfx/borka/body/walking/arm/idle/left-", $f),
-            concat!("gfx/borka/body/walking/arm/idle/right-", $f),
-            concat!("gfx/borka/hair-karin/walking/hair-", $f),
-        ]
-    };
-}
-const POSE_WALKING: [[&str; 6]; 8] = [
-    walk_pose!("0"),
-    walk_pose!("1"),
-    walk_pose!("2"),
-    walk_pose!("3"),
-    walk_pose!("4"),
-    walk_pose!("5"),
-    walk_pose!("6"),
-    walk_pose!("7"),
+/// Equipment-window doll pose: standing with banzai arms (spread), facing
+/// the camera (dir 1 = the +x+y screen-down diagonal). Drawn by
+/// `Equipory.cdraw` from the gob's `Avatar` attribute (OD_AVATAR), which
+/// is distinct from the world drawable (OD_LAYERS) - the doll keeps the
+/// spread-arms pose while the world avatar walks.
+const AVATAR_DOLL_TEMPLATES: [&str; 6] = [
+    "gfx/borka/body/standing/legs-1",
+    "gfx/borka/body/standing/torso/male-1",
+    "gfx/borka/body/standing/head-1",
+    "gfx/borka/body/standing/arm/banzai/left-1",
+    "gfx/borka/body/standing/arm/banzai/right-1",
+    "gfx/borka/hair-karin/standing/hair-1",
 ];
 
-/// Concrete pose-frame resources composing a player avatar.
-/// frame 255 = standing pose; 0..7 = the walking-pose cycle.
-fn pose_layer_names(frame: u8) -> &'static [&'static str; 6] {
-    if frame == u8::MAX {
-        &POSE_STANDING
-    } else {
-        &POSE_WALKING[(frame.min(7)) as usize]
+/// The avatar base resource every OD_LAYERS player block references (a
+/// load gate client-side: it carries only the plalay router the fork
+/// client drops, and is never sprite-created).
+const AVATAR_BASE: &str = "gfx/borka/body";
+
+/// Quantize a movement vector into the pack's 8-direction pose index.
+/// Pure, deterministic, unit-tested: dir 0 = +x, dir 2 = +y, dir 4 = -x,
+/// dir 6 = -y (counterclockwise atan2 octants). The visual orientation of
+/// each art direction is verified on the real client (session 21).
+pub fn move_dir((sx, sy): (i32, i32), (tx, ty): (i32, i32)) -> u8 {
+    let (dx, dy) = (tx - sx, ty - sy);
+    if dx == 0 && dy == 0 {
+        return 0;
     }
+    let deg = (dy as f64).atan2(dx as f64).to_degrees();
+    // Euclidean division keeps the wraparound exact at both ends of the
+    // -180..180 range: -180 deg lands on dir 4, +180 deg on dir 4 too.
+    let octant = ((deg + 22.5).div_euclid(45.0)) as i32;
+    octant.rem_euclid(8) as u8
+}
+
+/// All concrete pose layer names, materialized ONCE as leaked 'static
+/// strings (bounded set: 2 poses x 8 dirs x 6 avatar parts, 1 doll set,
+/// 7 species x 2 poses x 8 dirs) so ResTable interns by reference and
+/// every stream path composes layers with zero allocations (data-
+/// oriented: flat fixed-size tables indexed by pose/dir/species).
+struct PoseTable {
+    /// [pose][dir][part]: pose 0 = standing, 1 = walking.
+    avatar: [[[&'static str; 6]; 8]; 2],
+    /// The equipment-window doll set (banzai arms, camera facing).
+    doll: [&'static str; 6],
+    /// [species][pose][dir], one body part per kritter pose.
+    kritter: [[[&'static str; 8]; 2]; 7],
+    /// [species] pose-router base resources.
+    kritter_base: [&'static str; 7],
+}
+
+static POSES: std::sync::OnceLock<PoseTable> = std::sync::OnceLock::new();
+
+/// Species index order must mirror the enum declaration order (state.rs).
+const SPECIES_FOLDERS: [&str; 7] = ["deer", "fox", "wolf", "boar", "cow", "hare", "aurochs"];
+
+impl PoseTable {
+    fn build() -> PoseTable {
+        let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+        let mut avatar: [[[&'static str; 6]; 8]; 2] = Default::default();
+        for (pi, pose) in ["standing", "walking"].into_iter().enumerate() {
+            for d in 0u8..8 {
+                let dir_char = (b'0' + d) as char;
+                for (ti, t) in AVATAR_PART_TEMPLATES.into_iter().enumerate() {
+                    avatar[pi][d as usize][ti] = leak(
+                        t.replace("{pose}", pose)
+                            .replace("{dir}", &dir_char.to_string()),
+                    );
+                }
+            }
+        }
+        let mut kritter: [[[&'static str; 8]; 2]; 7] = Default::default();
+        for (si, sp) in SPECIES_FOLDERS.into_iter().enumerate() {
+            for (pi, pose) in ["standing/standing", "walking/walking"]
+                .into_iter()
+                .enumerate()
+            {
+                for d in 0u8..8 {
+                    kritter[si][pi][d as usize] = leak(format!("gfx/kritter/{sp}/body/{pose}-{d}"));
+                }
+            }
+        }
+        PoseTable {
+            avatar,
+            doll: AVATAR_DOLL_TEMPLATES,
+            kritter,
+            kritter_base: [
+                "gfx/kritter/deer/body",
+                "gfx/kritter/fox/body",
+                "gfx/kritter/wolf/body",
+                "gfx/kritter/boar/body",
+                "gfx/kritter/cow/body",
+                "gfx/kritter/hare/body",
+                "gfx/kritter/aurochs/body",
+            ],
+        }
+    }
+}
+
+fn poses() -> &'static PoseTable {
+    POSES.get_or_init(PoseTable::build)
+}
+
+/// Concrete avatar layer names for one pose + direction.
+fn avatar_pose_layers(moving: bool, dir: u8) -> &'static [&'static str; 6] {
+    &poses().avatar[usize::from(moving)][(dir & 7) as usize]
+}
+
+/// Equipment doll layer names (banzai pose, camera facing).
+fn avatar_doll_layers() -> &'static [&'static str; 6] {
+    &poses().doll
+}
+
+/// Kritter pose-router base per species (a load gate client-side, never
+/// sprite-created: it carries only the plalay router layer).
+fn kritter_base(sp: Species) -> &'static str {
+    poses().kritter_base[sp as usize]
+}
+
+/// The one kritter body pose part for a species + pose + direction. Each
+/// directional resource embeds its animation (standing = 1 frame, walking
+/// = 8 frames @50 ms), so a single layer carries the whole pose and the
+/// client animates it natively.
+fn kritter_pose_layer(sp: Species, moving: bool, dir: u8) -> &'static str {
+    poses().kritter[sp as usize][usize::from(moving)][(dir & 7) as usize]
 }
 
 /// Commands session tasks send into the game task.
@@ -105,6 +200,9 @@ pub struct Game {
     pub net_rx: tokio::sync::mpsc::UnboundedReceiver<crate::net::NetCmd>,
     pub saturated: bool,
     next_sid: SessionId,
+    /// Sequence for one-shot FX overlay ids (masked to 15 bits; the wire
+    /// id shifts left once for the persist flag, session 21 bite FX).
+    overlay_seq: u32,
     /// Grids already populated with objects/animals.
     populated: HashSet<(i32, i32)>,
     /// Character persistence store (loaded snapshots + live updates).
@@ -343,6 +441,7 @@ impl Game {
             net_rx,
             saturated,
             next_sid: 1,
+            overlay_seq: 0,
             populated: HashSet::new(),
             save,
             fep,
@@ -670,8 +769,9 @@ impl Game {
         // would leave the portrait blank ("no face" bug report). The
         // same frame set layers the in-world avatar, so the login card
         // and the world character match.
-        let mut layer_ids = Vec::with_capacity(Self::player_layer_names().len());
-        for name in Self::player_layer_names() {
+        let portrait_layers = avatar_pose_layers(false, 0);
+        let mut layer_ids = Vec::with_capacity(portrait_layers.len());
+        for name in portrait_layers {
             let global = self.world.res.intern(name);
             let w = out.res.wire_named(global, name);
             if let Some((n, v)) = out.res.pending_announce(w) {
@@ -680,7 +780,7 @@ impl Game {
             }
             layer_ids.push(w);
         }
-        info!(layers = ?Self::player_layer_names(), "charlist portrait layers announced");
+        info!(layers = ?portrait_layers, "charlist portrait layers announced");
         out.send(wdg::new_wdg(
             w_bg,
             "img",
@@ -1277,14 +1377,15 @@ impl Game {
         m.uint8(0); // flags
         m.int32(id);
         m.int32(frame as i32);
-        // Players must NOT be announced via OD_RES: the avatar base resource
-        // (gfx/borka/body) carries no neg layer, so ResDrawable's eager
-        // ImageSprite creation throws "No negative found" inside the
-        // client's session reader thread and kills it - the observed black
-        // screen after entering the world. Players render through
-        // OD_LAYERS (Layered drawable) only.
+        // Players and animals must NOT be announced via OD_RES: the pose
+        // router bases (gfx/borka/body, gfx/kritter/<sp>/body) carry no neg
+        // layer, so ResDrawable's eager ImageSprite creation throws "No
+        // negative found" inside the client's session reader thread and
+        // kills it. Both render through OD_LAYERS (Layered drawable) of
+        // concrete image-bearing pose parts below.
         let is_player = matches!(kind, Kind::Player { .. });
-        if include_res && !is_player {
+        let is_animal = matches!(kind, Kind::Animal { .. });
+        if include_res && !is_player && !is_animal {
             // OD_RES with the resource; sprite dynamic data for plants.
             m.uint8(OD_RES).uint16(wire_res | 0x8000);
             let sdt = match kind {
@@ -1318,29 +1419,57 @@ impl Game {
                 m.uint8(OD_MOVE).coord(pos.0, pos.1);
             }
         }
-        // Player avatar layers.
-        if let Kind::Player { player } = kind {
-            if let Some(p) = self.world.players.get(player) {
-                // The fork client has no plalay/plparts router support: the
-                // "gfx/borka/{body,head,hair}" pose routers carry a custom
-                // layer type the client drops, so any layer resolved from
-                // them has no neg and ImageSprite dies with "No negative
-                // found" on the first render tick (real-client freeze).
-                // The legacy official server resolved poses SERVER-SIDE and
-                // layered concrete image-bearing frame resources instead
-                // (this fork's own JSBot checks layer names like
-                // "gfx/borka/body/sitting/"), so do exactly that: base is
-                // the body router (a load gate client-side, never
-                // sprite-created) and the layers are standing-pose frames.
-                let base = wire_res; // base = gfx/borka/body router
-                m.uint8(OD_LAYERS).uint16(base);
-                for part in Self::player_layer_names() {
+        // Composited drawables (players + animals): server-side pose
+        // resolution of concrete directional frame resources.
+        if is_player || is_animal {
+            let moving = mv.is_some();
+            let facing = self.world.gobs.facing[slot];
+            m.uint8(OD_LAYERS);
+            if let Kind::Player { player } = kind {
+                // Base = the body router (load gate, never sprite-created).
+                m.uint16(wire_res);
+                for part in avatar_pose_layers(moving, facing) {
                     let gi = self.world.res.intern(part);
                     let w = out.res.wire_named(gi, part);
                     m.uint16(w);
                 }
                 m.uint16(65535);
-                m.uint8(OD_BUDDY).string(&p.name).uint8(0).uint8(0);
+                if let Some(p) = self.world.players.get(player) {
+                    // Avatar attribute (OD_AVATAR): drives the Equipment
+                    // window doll (Equipory.cdraw reads Avatar.rend of the
+                    // viewer's own gob) and the isPlayer checks. The own
+                    // viewer gets the banzai doll pose; everyone else gets
+                    // the standing idle set.
+                    let own = out.player_gob == Some(id);
+                    let doll = if own {
+                        avatar_doll_layers()
+                    } else {
+                        avatar_pose_layers(false, facing)
+                    };
+                    m.uint8(OD_AVATAR);
+                    for part in doll {
+                        let gi = self.world.res.intern(part);
+                        let w = out.res.wire_named(gi, part);
+                        m.uint16(w);
+                    }
+                    m.uint16(65535);
+                    m.uint8(OD_BUDDY).string(&p.name).uint8(0).uint8(0);
+                }
+            } else if let Kind::Animal { species } = kind {
+                // Kritter pose parts: one body part per species (the pack
+                // ships standing-N/walking-N directional sets for all of
+                // them). Spawned through OD_LAYERS so each pose embeds its
+                // walk animation and the sprite actually renders (the old
+                // flat cdv spawn left shadow-only gobs - session 21).
+                let base = kritter_base(species);
+                let bi = self.world.res.intern(base);
+                let bw = out.res.wire_named(bi, base);
+                m.uint16(bw);
+                let part = kritter_pose_layer(species, moving, facing);
+                let gi = self.world.res.intern(part);
+                let w = out.res.wire_named(gi, part);
+                m.uint16(w);
+                m.uint16(65535);
             }
         }
         // Health tint.
@@ -1348,23 +1477,6 @@ impl Game {
         m.uint8(OD_HEALTH).uint8(quarters);
         m.uint8(OD_END);
         Some(m.finish())
-    }
-
-    /// Standing-pose frame resources that compose a player avatar. The fork
-    /// client has no plalay/plparts router support (both layer types are
-    /// dropped on load, leaving factories without a neg), so - like the
-    /// legacy official server - the avatar must be layered from concrete
-    /// image-bearing frame resources. Also used verbatim as the charlist
-    /// portrait layers, so the login card and the world avatar match.
-    fn player_layer_names() -> &'static [&'static str] {
-        &[
-            "gfx/borka/body/standing/legs-0",
-            "gfx/borka/body/standing/torso/male-0",
-            "gfx/borka/body/standing/head-0",
-            "gfx/borka/body/standing/arm/idle/left-0",
-            "gfx/borka/body/standing/arm/idle/right-0",
-            "gfx/borka/hair-karin/standing/hair-0",
-        ]
     }
 
     /// Stream a spawn (full state) for one gob to one session, announcing
@@ -1391,20 +1503,35 @@ impl Game {
             out.send(msg);
             out.res.mark_announced(wire);
         }
-        // Player avatar layers: announce base + every concrete frame
+        // Composited drawables: announce the base + every concrete pose
         // resource the OD_LAYERS block references before the spawn block.
         // The client resolves OD_LAYERS ids through these RESIDs; without
         // them the avatar renders invisible ("no doll").
-        if matches!(self.world.gobs.kind[slot], Kind::Player { .. }) {
-            for layer_name in
-                std::iter::once("gfx/borka/body").chain(Self::player_layer_names().iter().copied())
-            {
-                let gi = self.world.res.intern(layer_name);
-                let w = out.res.wire_named(gi, layer_name);
-                if let Some((name, ver)) = out.res.pending_announce(w) {
-                    out.send(wdg::resid(w, name, ver));
-                    out.res.mark_announced(w);
-                }
+        let kind = self.world.gobs.kind[slot];
+        let moving = self.world.gobs.mv[slot].is_some();
+        let facing = self.world.gobs.facing[slot];
+        let layers: Vec<&'static str> = match kind {
+            Kind::Player { .. } => {
+                let mut v = Vec::with_capacity(13);
+                v.push(AVATAR_BASE);
+                v.extend(avatar_pose_layers(moving, facing).iter().copied());
+                v.extend(avatar_doll_layers().iter().copied());
+                v
+            }
+            Kind::Animal { species } => {
+                vec![
+                    kritter_base(species),
+                    kritter_pose_layer(species, moving, facing),
+                ]
+            }
+            _ => Vec::new(),
+        };
+        for layer_name in layers {
+            let gi = self.world.res.intern(layer_name);
+            let w = out.res.wire_named(gi, layer_name);
+            if let Some((name, ver)) = out.res.pending_announce(w) {
+                out.send(wdg::resid(w, name, ver));
+                out.res.mark_announced(w);
             }
         }
         // Encode and register the spawn block (separate borrow scope).
@@ -4243,8 +4370,12 @@ impl Game {
             // avatar visibly snapped back to its start point (the measured
             // "walks then rubber-bands home" defect).
             self.finish_move_broadcast(id, (tx, ty), steps);
-            if matches!(self.world.gobs.kind[slot], Kind::Player { .. }) {
-                self.stream_pose(slot, u8::MAX);
+            // Rest pose: the standing set of the current facing (players
+            // and animals both composite directional pose parts).
+            let dir = self.world.gobs.facing[slot];
+            if self.world.gobs.pose_streamed[slot] != dir {
+                self.world.gobs.pose_streamed[slot] = dir;
+                self.stream_pose(slot);
             }
         }
         // LINSTEP progress frames: only when the client-visible index
@@ -4252,9 +4383,53 @@ impl Game {
         for (id, l) in linsteps {
             self.linstep_broadcast(id, l);
         }
-        // Walking-pose animation: cycle concrete walking frames while a
-        // player avatar is in motion (see stream_pose).
-        self.tick_walk_pose(now);
+    }
+
+    /// One-shot FX overlay broadcast: adds `res_name` (e.g. gfx/fx/bite)
+    /// as a NON-persistent overlay on the gob for every current viewer.
+    /// The client removes the overlay itself once the resource's animation
+    /// completes one cycle (Gob.ctick drops a finished non-persistent
+    /// overlay), so no deletion message is ever needed.
+    fn fx_overlay_broadcast(&mut self, id: GobId, res_name: &'static str) {
+        let Some(slot) = self.world.gobs.get(id) else {
+            return;
+        };
+        let frame = self.world.gobs.frame[slot];
+        let frame_i32 = frame as i32;
+        let gi = self.world.res.intern(res_name);
+        self.overlay_seq = self.overlay_seq.wrapping_add(1);
+        // Wire id: bit 0 = the persist flag (0 = one-shot), the rest is the
+        // client-side overlay id (15-bit sequence keeps it comfortably
+        // positive).
+        let olid = ((self.overlay_seq & 0x7FFF) << 1) as i32;
+        let viewers: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, o)| o.visible.contains(&id))
+            .map(|(s, _)| *s)
+            .collect();
+        for v in viewers {
+            let Some(out) = self.sessions.get_mut(&v) else {
+                continue;
+            };
+            let w = out.res.wire_named(gi, res_name);
+            if let Some((n, ver)) = out.res.pending_announce(w) {
+                out.send(wdg::resid(w, n, ver));
+                out.res.mark_announced(w);
+            }
+            let mut m = MessageBuf::new();
+            m.uint8(MSG_OBJDATA)
+                .uint8(0)
+                .int32(id)
+                .int32(frame_i32)
+                .uint8(OD_OVERLAY)
+                .int32(olid)
+                .uint16(w)
+                .uint8(OD_END);
+            let block = m.finish();
+            out.send_raw(block.clone());
+            out.unacked.entry(id).or_default().insert(frame, block);
+        }
     }
 
     /// Broadcast one LINSTEP for `id` to every session that sees it.
@@ -4320,39 +4495,28 @@ impl Game {
         }
     }
 
-    /// Walking-pose animation driver: every POSE_FRAME_MS of move time the
-    /// next walking-pose frame set is streamed to the viewers of moving
-    /// player avatars (server-side pose resolution; the fork client
-    /// renders only concrete image-bearing frame resources and drops
-    /// plalay/plparts routers, so without this the avatar slides as a
-    /// static standing statue).
-    fn tick_walk_pose(&mut self, now: u64) {
-        const POSE_FRAME_MS: u64 = 150;
-        const POSE_FRAMES: u64 = 8;
-        for pi in 0..self.world.players.len() {
-            let gob = self.world.players[pi].gob;
-            let Some(slot) = self.world.gobs.get(gob) else {
-                continue;
-            };
-            let Some(lm) = self.world.gobs.mv[slot] else {
-                continue;
-            };
-            let f = ((now.saturating_sub(lm.started_ms) / POSE_FRAME_MS) % POSE_FRAMES) as u8;
-            if self.world.gobs.pose_frame[slot] != f {
-                self.stream_pose(slot, f);
-            }
-        }
-    }
-
-    /// Resolve and stream one avatar pose (OD_LAYERS) to every viewer of
-    /// the gob at `slot`: frame 255 = standing pose, 0..7 = the walking
-    /// cycle. Resources unseen by a session are announced first; the
-    /// block also lands in `unacked` so late joiners re-ack it like any
-    /// other frame-carrying update.
-    fn stream_pose(&mut self, slot: usize, frame: u8) {
+    /// Resolve and stream one composited-drawable pose (OD_LAYERS) to
+    /// every viewer of the gob at `slot`. The layer set derives from the
+    /// gob kind + current pose state (moving -> walking set of `facing`,
+    /// standing set otherwise; players 6 parts, animals 1 part). No frame
+    /// streaming: each directional resource embeds its own animation, so
+    /// this fires only on pose/direction CHANGES. Resources unseen by a
+    /// session are announced first; the block lands in `unacked` so late
+    /// joiners re-ack it like any other frame-carrying update.
+    fn stream_pose(&mut self, slot: usize) {
         let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
-        let names = pose_layer_names(frame);
-        let base_global = self.world.res.intern("gfx/borka/body");
+        let kind = self.world.gobs.kind[slot];
+        let moving = self.world.gobs.mv[slot].is_some();
+        let facing = self.world.gobs.facing[slot];
+        let (base_name, layer_names): (&'static str, Vec<&'static str>) = match kind {
+            Kind::Player { .. } => (AVATAR_BASE, avatar_pose_layers(moving, facing).to_vec()),
+            Kind::Animal { species } => (
+                kritter_base(species),
+                vec![kritter_pose_layer(species, moving, facing)],
+            ),
+            _ => return,
+        };
+        let base_global = self.world.res.intern(base_name);
         let frame_i32 = self.world.gobs.frame[slot] as i32;
         let viewers: Vec<SessionId> = self
             .sessions
@@ -4366,14 +4530,14 @@ impl Game {
             };
             // Announce every pose resource this session has not seen.
             let mut announces: Vec<Vec<u8>> = Vec::new();
-            let mut wire_ids: Vec<u16> = Vec::with_capacity(names.len() + 1);
-            let bw = out.res.wire_named(base_global, "gfx/borka/body");
+            let mut wire_ids: Vec<u16> = Vec::with_capacity(layer_names.len() + 1);
+            let bw = out.res.wire_named(base_global, base_name);
             if let Some((n, ver)) = out.res.pending_announce(bw) {
                 announces.push(wdg::resid(bw, n, ver));
                 out.res.mark_announced(bw);
             }
             wire_ids.push(bw);
-            for n in names.iter() {
+            for n in layer_names.iter() {
                 let gi = self.world.res.intern(n);
                 let w = out.res.wire_named(gi, n);
                 if let Some((rn, rv)) = out.res.pending_announce(w) {
@@ -4399,7 +4563,6 @@ impl Game {
                 .or_default()
                 .insert(self.world.gobs.frame[slot], block);
         }
-        self.world.gobs.pose_frame[slot] = frame;
     }
 
     /// The client-visible position of a gob right now: the interpolated
@@ -4485,10 +4648,18 @@ impl Game {
             }
         }
         trace!(id, sx, sy, tx, ty, steps, total_ms, "move started");
-        // Player avatars switch to the walking pose immediately; the
-        // cycle is advanced by tick_walk_pose. Animals keep one sprite.
-        if matches!(self.world.gobs.kind[slot], Kind::Player { .. }) {
-            self.stream_pose(slot, 0);
+        // Face the travel direction and swap to the walking pose set.
+        // One layer stream per pose+direction: each directional resource
+        // embeds its full walk cycle, so the client animates natively and
+        // the server never streams frames. The pose state encodes as
+        // (moving<<3 | dir): standing dirs 0..7, walking dirs 8..15 - a
+        // single byte dedupes retargets, arrival, and re-facings.
+        let dir = move_dir((sx, sy), (tx, ty));
+        let walking = 8 + dir;
+        self.world.gobs.facing[slot] = dir;
+        if self.world.gobs.pose_streamed[slot] != walking {
+            self.world.gobs.pose_streamed[slot] = walking;
+            self.stream_pose(slot);
         }
         true
     }
@@ -4798,6 +4969,12 @@ impl Game {
             }
             if let Some(dmg) = bite {
                 self.hurt_player(pidx, dmg, id);
+                // Attack animation: the one-shot bite FX overlay on the
+                // victim (8-frame anim in the resource; the client removes
+                // the overlay itself once the cycle completes). This is the
+                // native visual cue for animal attacks - the kritter pose
+                // pack ships no dedicated attack pose.
+                self.fx_overlay_broadcast(p_gob, "gfx/fx/bite");
             }
             // Mirror the animal bars into the player's relation view.
             if let Some(out) = self.sessions.get_mut(&p_sid) {
@@ -5365,7 +5542,7 @@ mod tests {
                     OD_MOVE => off += 8,
                     OD_LINBEG => off += 20,
                     OD_LINSTEP => off += 4,
-                    OD_LAYERS => {
+                    OD_LAYERS | OD_AVATAR => {
                         // base u16, then u16 layer ids until the 65535
                         // terminator (variable size since the layers are
                         // the concrete standing-pose frames).
@@ -5925,33 +6102,95 @@ mod tests {
         );
     }
 
-    /// While a player avatar moves, the streamed pose is the walking cycle
-    /// (pose_frame 0..7); when the move ends the standing pose returns
-    /// (pose_frame 255) and the pose resources were announced.
+    /// Direction quantization: the 8 octants map to the pack's
+    /// directional pose index (dir 0 = +x, dir 2 = +y, dir 4 = -x,
+    /// dir 6 = -y, diagonals on odd dirs; wraparound exact at 180 deg).
+    #[test]
+    fn move_dir_quantizes_octants() {
+        assert_eq!(move_dir((0, 0), (10, 0)), 0, "+x");
+        assert_eq!(move_dir((0, 0), (10, 10)), 1, "+x+y diagonal");
+        assert_eq!(move_dir((0, 0), (0, 10)), 2, "+y");
+        assert_eq!(move_dir((0, 0), (-10, 10)), 3, "-x+y");
+        assert_eq!(move_dir((0, 0), (-10, 0)), 4, "-x");
+        assert_eq!(move_dir((0, 0), (-10, -10)), 5, "-x-y");
+        assert_eq!(move_dir((0, 0), (0, -10)), 6, "-y");
+        assert_eq!(move_dir((0, 0), (10, -10)), 7, "+x-y");
+        assert_eq!(move_dir((0, 0), (-10, -1)), 4, "steep -x wraparound");
+        assert_eq!(move_dir((0, 0), (-1, -10)), 6, "steep -y wraparound");
+        assert_eq!(move_dir((5, 5), (5, 5)), 0, "zero vector defaults to dir 0");
+    }
+
+    /// Pose layer composition: walking vs standing sets at a direction,
+    /// plus the fixed banzai doll set and the kritter pose part.
+    #[test]
+    fn pose_layers_compose_direction_and_kind() {
+        let walk = avatar_pose_layers(true, 3);
+        assert!(walk[0].ends_with("walking/legs-3"), "{}", walk[0]);
+        assert!(walk[1].ends_with("walking/torso/male-3"), "{}", walk[1]);
+        assert!(
+            walk[5].starts_with("gfx/borka/hair-karin/walking/"),
+            "{}",
+            walk[5]
+        );
+        let stand = avatar_pose_layers(false, 6);
+        assert!(stand[0].ends_with("standing/legs-6"), "{}", stand[0]);
+        assert!(stand[3].contains("arm/idle/left-6"), "{}", stand[3]);
+        let doll = avatar_doll_layers();
+        assert!(
+            doll.iter().all(|n| n.contains("/standing/")),
+            "doll is a standing pose"
+        );
+        assert!(
+            doll.iter().any(|n| n.contains("arm/banzai/left-1")),
+            "doll arms are banzai (spread), camera facing"
+        );
+        assert!(
+            !doll.iter().any(|n| n.contains("arm/idle")),
+            "doll never uses idle arms"
+        );
+        let wolf = kritter_pose_layer(Species::Wolf, true, 5);
+        assert_eq!(wolf, "gfx/kritter/wolf/body/walking/walking-5");
+        let hare = kritter_pose_layer(Species::Hare, false, 0);
+        assert_eq!(hare, "gfx/kritter/hare/body/standing/standing-0");
+        assert_eq!(kritter_base(Species::Fox), "gfx/kritter/fox/body");
+    }
+
+    /// While a player avatar moves, the streamed pose is the walking set
+    /// of the travel direction (pose_streamed = 8+dir); when the move ends
+    /// the standing set of the same direction returns (pose_streamed =
+    /// dir). No frame streaming ever happens: the pose streams fire only
+    /// on pose/direction changes.
     #[tokio::test]
     async fn walk_layers_swap_between_walking_and_standing() {
         let (mut g, _rx, _raw) = entered_game("walkpose");
         let pgob = g.sessions[&1].player_gob.expect("player gob");
         let slot = g.world.gobs.get(pgob).expect("slot");
         let (sx, sy) = g.world.gobs.pos[slot];
-        // Long walk: 60 tiles at walk speed ~ 20 s.
+        // Long walk east: 60 tiles at walk speed ~ 20 s.
         assert!(g.start_move(slot, (sx + 660, sy)));
-        assert_eq!(g.world.gobs.pose_frame[slot], 0, "walking frame 0 on start");
-        // 2 s in: frames have cycled (150 ms/frame).
+        assert_eq!(g.world.gobs.facing[slot], 0, "east is dir 0");
+        assert_eq!(
+            g.world.gobs.pose_streamed[slot], 8,
+            "walking set of dir 0 streamed on start"
+        );
+        // 2 s in: still the walking pose (the client cycles the frames
+        // natively; the server must not re-stream anything mid-walk).
+        let before = g.world.gobs.pose_streamed[slot];
         for _ in 0..20 {
             g.tick();
         }
-        let f = g.world.gobs.pose_frame[slot];
-        assert!(f < 8, "mid-walk pose must be a walking frame, got {f}");
+        assert_eq!(
+            g.world.gobs.pose_streamed[slot], before,
+            "no frame streaming mid-walk"
+        );
         // Drain the remaining move.
         for _ in 0..210 {
             g.tick();
         }
         assert!(g.world.gobs.mv[slot].is_none(), "move finished");
         assert_eq!(
-            g.world.gobs.pose_frame[slot],
-            u8::MAX,
-            "standing pose restored after arrival"
+            g.world.gobs.pose_streamed[slot], 0,
+            "standing set of dir 0 restored after arrival"
         );
     }
 }
