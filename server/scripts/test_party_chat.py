@@ -372,7 +372,11 @@ class PartyClient:
                     off += 1
                 elif code == OD_BUDDY:
                     end = body.index(0, off)
-                    if body[off:end].decode(errors="replace") == self.username:
+                    nm = body[off:end].decode(errors="replace")
+                    if not hasattr(self, "buddy_names"):
+                        self.buddy_names = {}
+                    self.buddy_names[gobid] = nm
+                    if nm == self.username:
                         self.player_gob = gobid
                     off = end + 3
                 else:
@@ -435,10 +439,14 @@ class PartyClient:
         info = self.gobs.get(self.player_gob)
         return info["pos"] if info else None
 
-    def find_other_player(self):
-        """First visible gob that is another player's avatar."""
-        for gob, info in self.gobs.items():
-            if gob != self.player_gob and info["res"] == "gfx/borka/body":
+    def find_other_player(self, name=None):
+        """First visible gob that is another player's avatar, optionally
+        matched by the OD_BUDDY character name (robust when stale
+        sessions from earlier battery flows still stream their avatars)."""
+        for gob, info in sorted(self.gobs.items()):
+            if gob == self.player_gob or info["res"] != "gfx/borka/body":
+                continue
+            if name is None or (getattr(self, "buddy_names", {}).get(gob) == name):
                 return gob
         return None
 
@@ -513,9 +521,9 @@ def run_chatbot():
     print("back-channel: B -> A relayed")
 
     # System line: A invites B (menu on A), B gets the one-sided prompt.
-    ok = a.wait_for(lambda: a.find_other_player() is not None, 6)
+    ok = a.wait_for(lambda: a.find_other_player(b_name) is not None, 6)
     assert ok, "A never saw B's avatar"
-    b_gob = a.find_other_player()
+    b_gob = a.find_other_player(b_name)
     assert b_gob is not None, "A never saw B's avatar"
     b_pos = a.gobs[b_gob]["pos"]
     a.click_gob(b_gob, b_pos)
@@ -555,9 +563,9 @@ def run_partybot():
     print("two sessions entered world")
 
     # A invites B.
-    ok = a.wait_for(lambda: a.find_other_player() is not None, 6)
+    ok = a.wait_for(lambda: a.find_other_player(b_name) is not None, 6)
     assert ok, "A never saw B's avatar"
-    b_gob = a.find_other_player()
+    b_gob = a.find_other_player(b_name)
     assert b_gob is not None, "A never saw B's avatar"
     a.click_gob(b_gob, a.gobs[b_gob]["pos"])
     ok = a.wait_for(lambda: a.open_sm() is not None, 4)

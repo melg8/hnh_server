@@ -1638,3 +1638,328 @@ Continued the .unlazy/session13 depth-3 tree as .unlazy/session14
   (leaf-1.2.1), then dirty-cell visibility optimization for the 10k
   target (leaf-1.2.2). Optional follow-ups: curiosity/study engine to
   replace the passive LP trickle, party marker position refresh.
+
+---
+
+## Session end 1791112430
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791112446
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791112463
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791112482
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791112503
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791112547
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791112557
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791112610
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791112644
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791112689
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791112741
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791112887
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791112924
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791112940
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791112981
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791113015
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791113087
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791113212
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791113316
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791113431
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791113441
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791113482
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791113491
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791113934
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791113946
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+## 2026-10-04 - Session 15: building pipeline + oven station + dirty-cell visibility (unlazy tree)
+
+Executed the session-14 handoff (leaf-1.2.x) under .unlazy/session15
+(`tree 99` requested; honest decomposition = depth-2 tree, stated in
+PLAN.md). Commits 5bc985b + 16eaecd on origin/master.
+
+- leaf-1.2.1 VERIFIED (building placement): build paginae pushed
+  (paginae/act/build -> paginae/build/cons -> oven/smelter; ad strings
+  decoded from the res pack action layers resolve the "build verb"
+  open question). act("oven") -> mapview place uimsg (resname, ver,
+  ontile[, radius]) -> client ghost -> wdgmsg place (coord, button,
+  modflags); button 1 commits, others cancel via unplace. Commit
+  validation: 5-tile reach, tile_speed terrain rule, one site per tile
+  (crop_at/plan_at/structure_at). Plan gob = finished-object res with
+  the build stage in the sdt byte (crop re-render pattern, frame bump
+  per stage). itemact([cc, mc, modflags, gobid, gobrc], gobid at index
+  3) sinks min(cursor, remaining) units with per-type quality
+  snapshots; completion converts the plan in place (same gob id, Kind
+  swap). Registry: oven (stone x2 + branch x1, HP 1200), smelter
+  (stone x6 + branch x4, HP 2500) - DEVIATION from legacy Brick-based
+  demands documented in the mechanics doc.
+- leaf-1.2.2 VERIFIED (oven station): fuel via itemact (branch, one
+  unit per delivery, delivered-fuel average), single roast input slot
+  (craft::ROAST_MAP labels), Light/Extinguish flower menu on the
+  station gob, 8-tick job at 10 Hz, one fuel burned per job, output
+  drops beside the station with (2*q_item + q_station + q_fuel)/4.
+  CRITICAL bug found by the e2e: Kind::Station{lit} (wire sdt) and
+  StationState.lit (simulation) were separate copies of the truth -
+  lighting mutated only the state, so clients never re-rendered. Fixed
+  by set_station_lit (both move together; frame bump + restage).
+  Persistence v3 (additive): SavedPlan (credited materials by resource
+  name + quality sums), SavedStructure (quality, fuel bookkeeping,
+  loaded input, progress); v2 saves stay readable.
+- leaf-1.2.3 VERIFIED (dirty-cell visibility): visidx.rs coarse square
+  cells (250 subtiles) with per-tick dirty tracking; a session whose
+  own cell is unchanged and whose retract square (2xVIEW_RADIUS + one
+  cell) intersects no dirty cell skips the scan and the retract sweep
+  entirely. Gobs owns the index; spawn/kill/set_pos are the single
+  mutators; movers mark their cell dirty every tick (LINSTEP streaming
+  + boundary exits). Perf counters vis_gob_scans / vis_skipped /
+  vis_cells in the perf log. Scan correctness is unit-proven
+  (cell query == full scan, boundary exit, stationary skip).
+- Verified: 79 cargo tests green, clippy -D warnings clean, fmt clean;
+  gates UNIT/E2E BUILD, UNIT/E2E STATION, BUILD PERSIST, UNIT VISIBLEIDX
+  all pass via server/scripts/verify_build.sh; e2e flows on the new
+  visibility path (BUILD FLOW / FARMING FLOW OK).
+- Found and fixed while testing (not review): itemact gobid arg index
+  (3, not 4), e2e save-file reuse intercepting itemacts (fresh-save
+  policy in ensure_server), stale item widget ids after
+  refresh_inventory (client-side DSTWDG pruning + newest-wid rule).
+- node-1 integration VERIFIED: BATTERY: ALL PASS (world entry + build +
+  station + farming + party/chat in ONE server generation); LOAD
+  VISIDX: ALL PASS (1000/1000 sessions, fights, steady-state EMA
+  mean_tick_us ~44 ms vs the 100 ms budget, vis_cells=160+ proves the
+  dirty-cell index is live; raw entry-burst spikes are transients and
+  excluded from the steady-state gate). FMT CLIPPY / CARGO TEST: ALL
+  PASS.
+- Load-gate honesty note: single-area crowding is the WORST case for
+  the cell query (vis_skipped=0 because every session has moving
+  neighbors in view; the view squares cover most of the 166 occupied
+  cells). The documented 10k lever beyond this session: dedupe the
+  per-session candidate scan for sessions sharing a player cell
+  (shared visibility groups), plus the index skip pays off in the
+  distributed-world shape real gameplay has.
+- Test-harness fixes found by the battery: the shared default save
+  (save/world.json) leaked earlier gates' plans into the battery world
+  (isolated per-gate saves now); stale disconnected avatars (gateuser)
+  were valid click targets for the party test (find_other_player now
+  matches the OD_BUDDY character name).
+
+---
+
+## Session end 1791114286
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791114403
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791114584
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791114632
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791114770
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791114820
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+---
+
+## Session end 1791114969
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
