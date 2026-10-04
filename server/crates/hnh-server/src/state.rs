@@ -19,8 +19,17 @@ pub const TICK_MS: u64 = 1000 / TICK_HZ;
 /// View radius in map subtiles around a player (~45 tiles, legacy ~500px).
 pub const VIEW_RADIUS: i32 = 500;
 
-/// Movement speed in subtiles/second for a player on grass at normal pace.
-pub const BASE_SPEED: i32 = 44; // ~4 tiles/s
+/// Gait speeds in subtiles/second (11 subtiles = 1 tile), indexed by the
+/// speedget widget: 0 crawl, 1 walk, 2 run, 3 sprint.
+/// Source: docs/mechanics/character/attributes-and-vitals.md (RoB Glossary
+/// "Speed"): crawl 1.5, walk 3.0, run 4.5, sprint 6.0 tiles/s.
+pub const GAIT_SPEEDS: [i32; 4] = [16, 33, 50, 66];
+/// Default gait index (walk). The speedget widget is created with
+/// cur = GAIT_WALK, max = 3.
+pub const GAIT_WALK: usize = 1;
+
+/// Legacy alias kept for terrain scaling: the walk-gait speed on grass.
+pub const BASE_SPEED: i32 = GAIT_SPEEDS[GAIT_WALK];
 
 pub type GobId = i32;
 pub type SessionId = u32;
@@ -177,16 +186,65 @@ pub enum Kind {
 }
 
 /// Linear movement state (OD_LINBEG / OD_LINSTEP).
+///
+/// Timing model (verified against src/haven/LinMove.java): the client
+/// interpolates the whole move on its own render clock -
+/// `ctick: a += (dt/1000)/(c*0.06) * 0.9` - so it covers the path in
+/// `c * 66.67 ms` regardless of when LINSTEP frames arrive. `setl` only
+/// ever advances the client progress (`if(a > this.a)`). Therefore the
+/// step count must be derived from the planned duration as
+/// `c = round(total_ms / 66.67)` and LINSTEP indices must match the
+/// server-time progress fraction, or the client visibly outruns the
+/// server (the "character moves too fast" defect).
 #[derive(Debug, Clone, Copy)]
 pub struct LinMove {
     pub sx: i32,
     pub sy: i32,
     pub tx: i32,
     pub ty: i32,
-    /// Total steps for the move (client interpolates per step).
+    /// Client step count: the client covers the path in steps * 66.67 ms.
     pub steps: i32,
-    /// Current progress in steps, monotonically increasing.
+    /// Last LINSTEP index sent (monotonically increasing; setl only
+    /// advances the client-side progress).
     pub step: i32,
+    /// Server-world time (world.now_ms) when the move started.
+    pub started_ms: u64,
+    /// Planned duration in ms at the authored speed.
+    pub total_ms: u32,
+}
+
+impl LinMove {
+    /// Client-consistent step count for a planned duration: c =
+    /// round(total_ms * 3 / 200) because the client walks a move in
+    /// c * 200/3 ms = c * 66.67 ms.
+    pub fn client_steps(total_ms: u32) -> i32 {
+        (((i64::from(total_ms)) * 3 + 100) / 200).max(1) as i32
+    }
+
+    /// Progress fraction 0..1 by server time.
+    pub fn progress(&self, now_ms: u64) -> f32 {
+        let el = now_ms.saturating_sub(self.started_ms) as f32;
+        (el / self.total_ms.max(1) as f32).clamp(0.0, 1.0)
+    }
+
+    /// Interpolated world position at server time `now_ms` (linear
+    /// between (sx,sy) and (tx,ty), exactly the client's getc model).
+    pub fn pos_at(&self, now_ms: u64) -> (i32, i32) {
+        let p = self.progress(now_ms);
+        (
+            self.sx + ((f32::from((self.tx - self.sx) as i16)) * p) as i32,
+            self.sy + ((f32::from((self.ty - self.sy) as i16)) * p) as i32,
+        )
+    }
+
+    /// Client-visible LINSTEP index at server time (floor(progress * c)).
+    pub fn step_at(&self, now_ms: u64) -> i32 {
+        let c = self.steps.max(1);
+        // Both operands are non-negative and bounded (elapsed < u32::MAX
+        // per move, c <= 9000), so the widen-then-narrow multiply is safe.
+        let el = now_ms.saturating_sub(self.started_ms) as i64;
+        (((el * i64::from(c)) / i64::from(self.total_ms.max(1))).min(i64::from(c))) as i32
+    }
 }
 
 /// Per-entity data. Hot columns are separate Vecs; extra state is in the
@@ -203,6 +261,10 @@ pub struct Gobs {
     pub mv: Vec<Option<LinMove>>,
     /// Generation counter for id reuse safety.
     pub gen: Vec<u32>,
+    /// Last avatar pose frame streamed to viewers: 255 = standing pose,
+    /// 0..7 = walking-pose cycle frame (server-side pose resolution; the
+    /// fork client renders only concrete image-bearing frame resources).
+    pub pose_frame: Vec<u8>,
     free: Vec<usize>,
     /// Dirty-cell spatial index maintained by every mutator (spawn, kill,
     /// set_pos); see visidx.rs for the skip-proof semantics.
@@ -222,6 +284,7 @@ impl Gobs {
             speed: Vec::new(),
             mv: Vec::new(),
             gen: Vec::new(),
+            pose_frame: Vec::new(),
             free: Vec::new(),
             vis: crate::visidx::VisIndex::default(),
         }
@@ -250,6 +313,7 @@ impl Gobs {
                 self.speed.push(0);
                 self.mv.push(None);
                 self.gen.push(0);
+                self.pose_frame.push(u8::MAX);
                 self.pos.len() - 1
             }
         };
@@ -262,6 +326,7 @@ impl Gobs {
         self.max_hp[slot] = hp;
         self.speed[slot] = speed;
         self.mv[slot] = None;
+        self.pose_frame[slot] = u8::MAX;
         self.frame[slot] = 0;
         self.vis.insert(gob_id_from_slot(slot, self.gen[slot]), pos);
         gob_id_from_slot(slot, self.gen[slot])
@@ -335,6 +400,8 @@ pub struct Player {
     pub stamina: i32,
     /// Learning points (LP currency).
     pub lp: i32,
+    /// Selected movement gait (speedget index; GAIT_SPEEDS entry).
+    pub gait: u8,
     /// Fractional LP accrual carry (ms toward the next point; see
     /// `skills::accrue`).
     pub lp_carry_ms: u64,
@@ -454,21 +521,26 @@ impl SessionOut {
     }
 }
 
-/// Walkability + speed multiplier per tile (server-side rule, not visible
-/// in this client; documented in map-and-terrain.md "Open questions").
+/// Walkability + per-terrain speed cap as a PERCENT of the mover's gait
+/// speed (server-side rule; documented in map-and-terrain.md "Open
+/// questions"). Returns None for impassable tiles; otherwise 0..100.
+#[inline]
+pub fn tile_speed_pct(t: u8) -> Option<i32> {
+    match t {
+        tile::DEEP_WATER | tile::WATER | tile::MOUNTAIN | tile::CAVE => None,
+        tile::CONIFER | tile::BROADLEAF => Some(60),
+        tile::SWAMP1 => Some(50),
+        tile::SAND => Some(80),
+        tile::MOOR | tile::HEATH => Some(90),
+        _ => Some(100),
+    }
+}
+
+/// Walkability check retained for existing callers: passable tiles are
+/// exactly the tiles with a speed percentage.
 #[inline]
 pub fn tile_speed(t: u8) -> Option<i32> {
-    // Returns allowed speed in subtiles/s, or None for impassable.
-    match t {
-        tile::DEEP_WATER => None,
-        tile::WATER => None,
-        tile::MOUNTAIN | tile::CAVE => None,
-        tile::CONIFER | tile::BROADLEAF => Some((BASE_SPEED * 6) / 10),
-        tile::SWAMP1 => Some((BASE_SPEED * 5) / 10),
-        tile::SAND => Some((BASE_SPEED * 8) / 10),
-        tile::MOOR | tile::HEATH => Some((BASE_SPEED * 9) / 10),
-        _ => Some(BASE_SPEED),
-    }
+    tile_speed_pct(t).map(|_| 1)
 }
 
 /// Full simulation world.
@@ -507,6 +579,9 @@ pub struct World {
     pub parties: Vec<crate::party::PartyState>,
     /// Tick counter for deterministic scheduling.
     pub tick: u64,
+    /// Logical world time in ms, advanced by TICK_MS each game tick (the
+    /// movement clock all LinMove progress math is anchored to).
+    pub now_ms: u64,
     /// Deterministic RNG for AI (seeded from world seed).
     rng: hnh_world::JavaRandom,
     start_instant: Instant,
@@ -555,6 +630,7 @@ impl World {
             structure_at: HashMap::new(),
             parties: Vec::new(),
             tick: 0,
+            now_ms: 0,
             rng: hnh_world::JavaRandom::new(seed as i64),
             start_instant: Instant::now(),
             perf: Perf::default(),

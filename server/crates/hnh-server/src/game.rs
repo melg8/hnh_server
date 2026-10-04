@@ -26,6 +26,54 @@ use hnh_world::tile;
 #[allow(dead_code)]
 pub const ITEM_DROP_LIFETIME_TICKS: u64 = 20 * 300; // 5 minutes
 
+/// Standing-pose avatar layer set (frame 0 of each part; also the
+/// charlist portrait layers).
+const POSE_STANDING: [&str; 6] = [
+    "gfx/borka/body/standing/legs-0",
+    "gfx/borka/body/standing/torso/male-0",
+    "gfx/borka/body/standing/head-0",
+    "gfx/borka/body/standing/arm/idle/left-0",
+    "gfx/borka/body/standing/arm/idle/right-0",
+    "gfx/borka/hair-karin/standing/hair-0",
+];
+
+/// Walking-pose frame sets. The pack ships 8 walking frames per part
+/// (verified: legs, torso/male, head, arm/idle left+right, hair-karin).
+/// ResTable interns `&'static str` names, so the 8 frame sets are baked
+/// as static literals via concat!.
+macro_rules! walk_pose {
+    ($f:literal) => {
+        [
+            concat!("gfx/borka/body/walking/legs-", $f),
+            concat!("gfx/borka/body/walking/torso/male-", $f),
+            concat!("gfx/borka/body/walking/head-", $f),
+            concat!("gfx/borka/body/walking/arm/idle/left-", $f),
+            concat!("gfx/borka/body/walking/arm/idle/right-", $f),
+            concat!("gfx/borka/hair-karin/walking/hair-", $f),
+        ]
+    };
+}
+const POSE_WALKING: [[&str; 6]; 8] = [
+    walk_pose!("0"),
+    walk_pose!("1"),
+    walk_pose!("2"),
+    walk_pose!("3"),
+    walk_pose!("4"),
+    walk_pose!("5"),
+    walk_pose!("6"),
+    walk_pose!("7"),
+];
+
+/// Concrete pose-frame resources composing a player avatar.
+/// frame 255 = standing pose; 0..7 = the walking-pose cycle.
+fn pose_layer_names(frame: u8) -> &'static [&'static str; 6] {
+    if frame == u8::MAX {
+        &POSE_STANDING
+    } else {
+        &POSE_WALKING[(frame.min(7)) as usize]
+    }
+}
+
 /// Commands session tasks send into the game task.
 pub enum Cmd {
     Wdgmsg {
@@ -685,6 +733,35 @@ impl Game {
                     .to_owned();
                 self.enter_world(sid, chosen);
             }
+            (Some("speedget"), "set") => {
+                // Speedget.setspeed: the player picked a gait (0..3).
+                // Clamp against the documented gait table and apply to the
+                // mover speed so subsequent walks use it.
+                let gait = args
+                    .first()
+                    .and_then(|a| a.as_int())
+                    .unwrap_or(GAIT_WALK as i32)
+                    .clamp(0, 3) as usize;
+                if let Some(&pidx) = self.world.by_session.get(&sid) {
+                    self.world.players[pidx].gait = gait as u8;
+                }
+                if let Some(slot) = self
+                    .world
+                    .by_session
+                    .get(&sid)
+                    .map(|&pi| self.world.players[pi].gob)
+                    .and_then(|g| self.world.gobs.get(g))
+                {
+                    self.world.gobs.speed[slot] = GAIT_SPEEDS[gait];
+                }
+                // Confirm the UI selection (Speedget uimsg "cur").
+                if let Some(w) = self.speedget_wid(sid) {
+                    if let Some(o) = self.sessions.get_mut(&sid) {
+                        o.send(crate::fight::uimsg(w, "cur", &[gait as i32]));
+                    }
+                }
+                trace!(sid, gait, "gait set");
+            }
             (Some("slen"), "inv") => {
                 self.open_inventory(sid);
             }
@@ -918,6 +995,7 @@ impl Game {
             stamina,
             lp,
             lp_carry_ms: 0,
+            gait: GAIT_WALK as u8,
             skills: restored_skills,
             attrs,
             inv,
@@ -1007,7 +1085,8 @@ impl Game {
             0,
             0,
             0,
-            &[ListVal::I(2), ListVal::I(4)],
+            // cur = walk (docs: RoB Glossary "Speed"), max = sprint index.
+            &[ListVal::I(GAIT_WALK as i32), ListVal::I(3)],
         ));
         out.send(wdg::new_wdg(w_buffs, "buffs", 0, 0, 0, &[]));
         // Area Chat window (ChatHW factory): title "Area Chat" hides the
@@ -1586,57 +1665,13 @@ impl Game {
         let Some(slot) = self.world.gobs.get(player_gob) else {
             return;
         };
-        let (sx, sy) = self.world.gobs.pos[slot];
-        // Clamp path length and validate walkability server-side.
-        let dx = (target.0 - sx).clamp(-5000, 5000);
-        let dy = (target.1 - sy).clamp(-5000, 5000);
-        let (tx, ty) = (sx + dx, sy + dy);
-        if !path_clear(&mut self.world, sx, sy, tx, ty) {
-            return;
+        // Shared movement entry point: retargets from the interpolated
+        // position when already moving (no destination teleport on rapid
+        // clicks), applies the gait speed and the terrain cap, and derives
+        // the client-consistent step count. See start_move.
+        if !self.start_move(slot, target) {
+            trace!(sid, tx = target.0, ty = target.1, "walk refused");
         }
-        let dist = (tx - sx).abs() + (ty - sy).abs();
-        let speed = self.world.gobs.speed[slot].max(1);
-        let ms = (dist * 1000) / speed; // milliseconds at speed subtile/s
-        let steps = (ms / (TICK_MS as i32)).clamp(1, 1000);
-        self.world.gobs.mv[slot] = Some(LinMove {
-            sx,
-            sy,
-            tx,
-            ty,
-            steps,
-            step: 0,
-        });
-        self.world.gobs.frame[slot] += 1;
-        self.world.gobs.set_pos(slot, (tx, ty)); // logical position = destination
-        let frame = self.world.gobs.frame[slot];
-        // Send LINBEG to all sessions that see this gob.
-        let viewers: Vec<SessionId> = self
-            .sessions
-            .iter()
-            .filter(|(_, o)| o.visible.contains(&player_gob))
-            .map(|(s, _)| *s)
-            .collect();
-        for v in viewers {
-            if let Some(out) = self.sessions.get_mut(&v) {
-                let mut m = MessageBuf::new();
-                m.uint8(MSG_OBJDATA)
-                    .uint8(0)
-                    .int32(player_gob)
-                    .int32(frame as i32)
-                    .uint8(OD_LINBEG)
-                    .coord(sx, sy)
-                    .coord(tx, ty)
-                    .int32(steps)
-                    .uint8(OD_END);
-                let block = m.finish();
-                out.send_raw(block.clone());
-                out.unacked
-                    .entry(player_gob)
-                    .or_default()
-                    .insert(frame, block);
-            }
-        }
-        trace!(sid, sx, sy, tx, ty, steps, "walk");
     }
 
     fn player_interact(
@@ -3077,6 +3112,16 @@ impl Game {
             .map(|(id, _)| *id)
     }
 
+    /// Widget id of this session's speedget, if created.
+    fn speedget_wid(&self, sid: SessionId) -> Option<u16> {
+        self.sessions
+            .get(&sid)?
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "speedget")
+            .map(|(id, _)| *id)
+    }
+
     /// Build pagina activated: drive the client into placement mode. The
     /// mapview `place` uimsg carries (resname, version, on-tile[, radius]);
     /// the ghost plob follows the mouse until the player commits.
@@ -4110,6 +4155,9 @@ impl Game {
 
     fn tick(&mut self) {
         self.world.tick += 1;
+        // Movement clock: all LinMove progress math anchors to this world
+        // time (deterministic across ticks; no wall-clock dependence).
+        self.world.now_ms = self.world.tick * TICK_MS;
         // Per-phase attribution keeps the data-oriented hot loops honest:
         // regressions show up in the phase histogram, not just the total.
         let mut phase_us = [0u128; 5];
@@ -4148,34 +4196,263 @@ impl Game {
     }
 
     fn tick_movement(&mut self) {
+        let now = self.world.now_ms;
+        let mut linsteps: Vec<(GobId, i32)> = Vec::new();
+        let mut finished: Vec<(usize, i32, i32)> = Vec::new();
         for slot in 0..self.world.gobs.alive.len() {
             if !self.world.gobs.alive[slot] {
                 continue;
             }
-            if let Some(lm) = self.world.gobs.mv[slot] {
-                // Active mover: keep its cell dirty so viewers receive
-                // LINSTEP progress and boundary exits are caught.
-                self.world
-                    .gobs
-                    .vis
-                    .mark_mover(gob_id_from_slot(slot, self.world.gobs.gen[slot]));
-                if lm.step < lm.steps {
-                    let new_step = (lm.step + 1).min(lm.steps);
-                    self.world.gobs.mv[slot] = Some(LinMove {
-                        step: new_step,
-                        ..lm
-                    });
-                    if new_step >= lm.steps {
-                        // Move finished: position already set at destination;
-                        // clear movement and bump the frame so clients that
-                        // acked the move get a final static position.
-                        self.world.gobs.mv[slot] = None;
-                        self.world.gobs.frame[slot] += 1;
-                        self.world.gobs.set_pos(slot, (lm.tx, lm.ty));
-                    }
+            let Some(lm) = self.world.gobs.mv[slot] else {
+                continue;
+            };
+            // Active mover: keep its cell dirty so viewers receive LINSTEP
+            // progress and boundary exits are caught.
+            self.world
+                .gobs
+                .vis
+                .mark_mover(gob_id_from_slot(slot, self.world.gobs.gen[slot]));
+            let elapsed = now.saturating_sub(lm.started_ms);
+            if elapsed >= u64::from(lm.total_ms) {
+                // Move finished: the client's own interpolation already
+                // rests at the destination (a = 1); the final LINSTEP with
+                // l >= c removes the client Moving attribute there.
+                finished.push((slot, lm.tx, lm.ty));
+            } else {
+                // Interpolated logical position: visibility scans, combat
+                // reach, and re-click retargeting all see the on-path
+                // position, never the destination ahead of time.
+                let (cx, cy) = lm.pos_at(now);
+                self.world.gobs.set_pos(slot, (cx, cy));
+                let l = lm.step_at(now);
+                if l > lm.step {
+                    self.world.gobs.mv[slot] = Some(LinMove { step: l, ..lm });
+                    linsteps.push((gob_id_from_slot(slot, self.world.gobs.gen[slot]), l));
                 }
             }
         }
+        for (slot, tx, ty) in finished {
+            let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
+            let steps = self.world.gobs.mv[slot].map(|lm| lm.steps).unwrap_or(0);
+            self.world.gobs.mv[slot] = None;
+            self.world.gobs.frame[slot] += 1;
+            self.world.gobs.set_pos(slot, (tx, ty));
+            // l >= c: the client clears the Moving attribute and idles.
+            self.linstep_broadcast(id, steps);
+            if matches!(self.world.gobs.kind[slot], Kind::Player { .. }) {
+                self.stream_pose(slot, u8::MAX);
+            }
+        }
+        // LINSTEP progress frames: only when the client-visible index
+        // actually advanced (setl only moves progress forward).
+        for (id, l) in linsteps {
+            self.linstep_broadcast(id, l);
+        }
+        // Walking-pose animation: cycle concrete walking frames while a
+        // player avatar is in motion (see stream_pose).
+        self.tick_walk_pose(now);
+    }
+
+    /// Broadcast one LINSTEP for `id` to every session that sees it.
+    fn linstep_broadcast(&mut self, id: GobId, l: i32) {
+        let Some(slot) = self.world.gobs.get(id) else {
+            return;
+        };
+        let frame = self.world.gobs.frame[slot];
+        let viewers: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, o)| o.visible.contains(&id))
+            .map(|(s, _)| *s)
+            .collect();
+        for v in viewers {
+            if let Some(out) = self.sessions.get_mut(&v) {
+                let mut m = MessageBuf::new();
+                m.uint8(MSG_OBJDATA)
+                    .uint8(0)
+                    .int32(id)
+                    .int32(frame as i32)
+                    .uint8(OD_LINSTEP)
+                    .int32(l)
+                    .uint8(OD_END);
+                let block = m.finish();
+                out.send_raw(block.clone());
+                out.unacked.entry(id).or_default().insert(frame, block);
+            }
+        }
+    }
+
+    /// Walking-pose animation driver: every POSE_FRAME_MS of move time the
+    /// next walking-pose frame set is streamed to the viewers of moving
+    /// player avatars (server-side pose resolution; the fork client
+    /// renders only concrete image-bearing frame resources and drops
+    /// plalay/plparts routers, so without this the avatar slides as a
+    /// static standing statue).
+    fn tick_walk_pose(&mut self, now: u64) {
+        const POSE_FRAME_MS: u64 = 150;
+        const POSE_FRAMES: u64 = 8;
+        for pi in 0..self.world.players.len() {
+            let gob = self.world.players[pi].gob;
+            let Some(slot) = self.world.gobs.get(gob) else {
+                continue;
+            };
+            let Some(lm) = self.world.gobs.mv[slot] else {
+                continue;
+            };
+            let f = ((now.saturating_sub(lm.started_ms) / POSE_FRAME_MS) % POSE_FRAMES) as u8;
+            if self.world.gobs.pose_frame[slot] != f {
+                self.stream_pose(slot, f);
+            }
+        }
+    }
+
+    /// Resolve and stream one avatar pose (OD_LAYERS) to every viewer of
+    /// the gob at `slot`: frame 255 = standing pose, 0..7 = the walking
+    /// cycle. Resources unseen by a session are announced first; the
+    /// block also lands in `unacked` so late joiners re-ack it like any
+    /// other frame-carrying update.
+    fn stream_pose(&mut self, slot: usize, frame: u8) {
+        let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
+        let names = pose_layer_names(frame);
+        let base_global = self.world.res.intern("gfx/borka/body");
+        let frame_i32 = self.world.gobs.frame[slot] as i32;
+        let viewers: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, o)| o.visible.contains(&id))
+            .map(|(s, _)| *s)
+            .collect();
+        for v in viewers {
+            let Some(out) = self.sessions.get_mut(&v) else {
+                continue;
+            };
+            // Announce every pose resource this session has not seen.
+            let mut announces: Vec<Vec<u8>> = Vec::new();
+            let mut wire_ids: Vec<u16> = Vec::with_capacity(names.len() + 1);
+            let bw = out.res.wire_named(base_global, "gfx/borka/body");
+            if let Some((n, ver)) = out.res.pending_announce(bw) {
+                announces.push(wdg::resid(bw, n, ver));
+                out.res.mark_announced(bw);
+            }
+            wire_ids.push(bw);
+            for n in names.iter() {
+                let gi = self.world.res.intern(n);
+                let w = out.res.wire_named(gi, n);
+                if let Some((rn, rv)) = out.res.pending_announce(w) {
+                    announces.push(wdg::resid(w, rn, rv));
+                    out.res.mark_announced(w);
+                }
+                wire_ids.push(w);
+            }
+            for a in announces {
+                out.send(a);
+            }
+            let mut m = MessageBuf::new();
+            m.uint8(MSG_OBJDATA).uint8(0).int32(id).int32(frame_i32);
+            m.uint8(OD_LAYERS).uint16(wire_ids[0]);
+            for w in &wire_ids[1..] {
+                m.uint16(*w);
+            }
+            m.uint16(65535).uint8(OD_END);
+            let block = m.finish();
+            out.send_raw(block.clone());
+            out.unacked
+                .entry(id)
+                .or_default()
+                .insert(self.world.gobs.frame[slot], block);
+        }
+        self.world.gobs.pose_frame[slot] = frame;
+    }
+
+    /// The client-visible position of a gob right now: the interpolated
+    /// on-path position for movers (LinMove::pos_at, the same math as the
+    /// client's LinMove.getc), or the stored position for idle gobs.
+    fn interpolated_pos(&self, slot: usize) -> (i32, i32) {
+        match self.world.gobs.mv[slot] {
+            Some(lm) => lm.pos_at(self.world.now_ms),
+            None => self.world.gobs.pos[slot],
+        }
+    }
+
+    /// World tile at a subtile coordinate (None outside the generated
+    /// area; grid loading is deterministic, see GridStore).
+    fn tile_at(&mut self, (x, y): (i32, i32)) -> Option<u8> {
+        let gc = (x.div_euclid(1100), y.div_euclid(1100));
+        let ix = (x.div_euclid(11)).rem_euclid(100) as usize;
+        let iy = (y.div_euclid(11)).rem_euclid(100) as usize;
+        Some(self.world.grids.grid(gc).tile(ix, iy))
+    }
+
+    /// Begin (or retarget) a linear move for the gob at `slot` toward
+    /// `target`. Shared by player clicks, animal AI, and combat chase so
+    /// every mover uses one timing model (`LinMove::client_steps`) and
+    /// one retarget rule: when already moving, the new move starts from
+    /// the CURRENTLY INTERPOLATED position - never from the old
+    /// destination, which is what teleported the avatar on rapid clicks.
+    fn start_move(&mut self, slot: usize, target: (i32, i32)) -> bool {
+        let (sx, sy) = self.interpolated_pos(slot);
+        self.world.gobs.set_pos(slot, (sx, sy));
+        let (tx, ty) = (
+            target.0.clamp(sx - 5000, sx + 5000),
+            target.1.clamp(sy - 5000, sy + 5000),
+        );
+        if !path_clear(&mut self.world, sx, sy, tx, ty) {
+            return false;
+        }
+        let dist = ((tx - sx).abs() + (ty - sy).abs()).max(1);
+        let speed = self.world.gobs.speed[slot].max(1);
+        // Terrain caps the gait speed (percent of the mover's own speed,
+        // read at the starting tile; see map-and-terrain.md).
+        let pct = self
+            .tile_at((sx, sy))
+            .and_then(crate::state::tile_speed_pct)
+            .unwrap_or(100);
+        let eff = (speed * pct / 100).max(1);
+        let total_ms = ((i64::from(dist) * 1000) / i64::from(eff)).clamp(60, 600_000) as u32;
+        let steps = LinMove::client_steps(total_ms);
+        self.world.gobs.mv[slot] = Some(LinMove {
+            sx,
+            sy,
+            tx,
+            ty,
+            steps,
+            step: 0,
+            started_ms: self.world.now_ms,
+            total_ms,
+        });
+        self.world.gobs.frame[slot] += 1;
+        let frame = self.world.gobs.frame[slot];
+        let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
+        let viewers: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, o)| o.visible.contains(&id))
+            .map(|(s, _)| *s)
+            .collect();
+        for v in viewers {
+            if let Some(out) = self.sessions.get_mut(&v) {
+                let mut m = MessageBuf::new();
+                m.uint8(MSG_OBJDATA)
+                    .uint8(0)
+                    .int32(id)
+                    .int32(frame as i32)
+                    .uint8(OD_LINBEG)
+                    .coord(sx, sy)
+                    .coord(tx, ty)
+                    .int32(steps)
+                    .uint8(OD_END);
+                let block = m.finish();
+                out.send_raw(block.clone());
+                out.unacked.entry(id).or_default().insert(frame, block);
+            }
+        }
+        trace!(id, sx, sy, tx, ty, steps, total_ms, "move started");
+        // Player avatars switch to the walking pose immediately; the
+        // cycle is advanced by tick_walk_pose. Animals keep one sprite.
+        if matches!(self.world.gobs.kind[slot], Kind::Player { .. }) {
+            self.stream_pose(slot, 0);
+        }
+        true
     }
 
     /// Animal AI: parallel intent pass over the SoA columns (read-only),
@@ -4274,7 +4551,6 @@ impl Game {
             return;
         };
         let (sx, sy) = self.world.gobs.pos[slot];
-        let speed = self.world.gobs.speed[slot].max(1);
         let (tx, ty) = match action {
             AnimalAction::Chase(pgob) => {
                 let Some(pslot) = self.world.gobs.get(pgob) else {
@@ -4324,46 +4600,9 @@ impl Game {
         };
         let tx = tx.clamp(-1_000_000, 1_000_000);
         let ty = ty.clamp(-1_000_000, 1_000_000);
-        if !path_clear(&mut self.world, sx, sy, tx, ty) {
-            return;
-        }
-        let dist = (tx - sx).abs() + (ty - sy).abs();
-        let ms = (dist * 1000) / speed;
-        let steps = (ms / (TICK_MS as i32)).clamp(1, 600);
-        self.world.gobs.mv[slot] = Some(LinMove {
-            sx,
-            sy,
-            tx,
-            ty,
-            steps,
-            step: 0,
-        });
-        self.world.gobs.frame[slot] += 1;
-        self.world.gobs.set_pos(slot, (tx, ty));
-        let frame = self.world.gobs.frame[slot];
-        let viewers: Vec<SessionId> = self
-            .sessions
-            .iter()
-            .filter(|(_, o)| o.visible.contains(&id))
-            .map(|(s, _)| *s)
-            .collect();
-        for v in viewers {
-            if let Some(out) = self.sessions.get_mut(&v) {
-                let mut m = MessageBuf::new();
-                m.uint8(MSG_OBJDATA)
-                    .uint8(0)
-                    .int32(id)
-                    .int32(frame as i32)
-                    .uint8(OD_LINBEG)
-                    .coord(sx, sy)
-                    .coord(tx, ty)
-                    .int32(steps)
-                    .uint8(OD_END);
-                let block = m.finish();
-                out.send_raw(block.clone());
-                out.unacked.entry(id).or_default().insert(frame, block);
-            }
-        }
+        // Shared movement entry point (timing model + interpolated
+        // retargeting; see start_move).
+        self.start_move(slot, (tx, ty));
     }
 
     fn tick_combat(&mut self) {
@@ -4399,45 +4638,9 @@ impl Game {
             if (px - tx).abs() > REACH || (py - ty).abs() > REACH {
                 // In engagement range but not swinging: chase instead.
                 if self.world.gobs.mv[pslot].is_none() {
-                    let dist = (tx - px).abs() + (ty - py).abs();
-                    let speed = self.world.gobs.speed[pslot].max(1);
-                    let ms = (dist * 1000) / speed;
-                    let steps = (ms / (TICK_MS as i32)).clamp(1, 600);
-                    let (sx, sy) = (px, py);
-                    self.world.gobs.mv[pslot] = Some(LinMove {
-                        sx,
-                        sy,
-                        tx,
-                        ty,
-                        steps,
-                        step: 0,
-                    });
-                    self.world.gobs.frame[pslot] += 1;
-                    self.world.gobs.set_pos(pslot, (tx, ty));
-                    let frame = self.world.gobs.frame[pslot];
-                    let viewers: Vec<SessionId> = self
-                        .sessions
-                        .iter()
-                        .filter(|(_, o)| o.visible.contains(&pgob))
-                        .map(|(s, _)| *s)
-                        .collect();
-                    for v in viewers {
-                        if let Some(out) = self.sessions.get_mut(&v) {
-                            let mut m = MessageBuf::new();
-                            m.uint8(MSG_OBJDATA)
-                                .uint8(0)
-                                .int32(pgob)
-                                .int32(frame as i32)
-                                .uint8(OD_LINBEG)
-                                .coord(sx, sy)
-                                .coord(tx, ty)
-                                .int32(steps)
-                                .uint8(OD_END);
-                            let b = m.finish();
-                            out.send_raw(b.clone());
-                            out.unacked.entry(pgob).or_default().insert(frame, b);
-                        }
-                    }
+                    // Shared movement entry point (client-consistent timing;
+                    // see start_move).
+                    self.start_move(pslot, (tx, ty));
                 }
                 continue;
             }
@@ -5552,5 +5755,165 @@ mod tests {
             assert_eq!(&types[..3], &[RMSG_RESID, RMSG_RESID, RMSG_RESID]);
         }
         assert!(types.contains(&RMSG_NEWWDG));
+    }
+
+    // ------------------------------------------------------------------
+    // Session 20: movement fidelity (timing, retargeting, gaits, poses)
+    // ------------------------------------------------------------------
+
+    /// The client covers a move in c * 66.67 ms (LinMove.ctick: a +=
+    /// (dt/1000)/(c*0.06) * 0.9). client_steps must round-trip the planned
+    /// duration within one tick so the client and the server agree on when
+    /// the gob arrives.
+    #[test]
+    fn movement_timing_client_steps_match_planned_duration() {
+        for total_ms in [
+            100u32, 250, 500, 1000, 1667, 3333, 5000, 10000, 30000, 60000, 120000,
+        ] {
+            let c = LinMove::client_steps(total_ms);
+            let client_ms = i64::from(c) * 200; // c * 200/3 ms exact
+            let err = (client_ms - i64::from(total_ms) * 3).abs();
+            assert!(
+                err <= 300,
+                "client_steps({total_ms}) = {c} => client time {client_ms}/3 ms, err {err} ms"
+            );
+        }
+    }
+
+    /// A walk of 30 tiles at walk gait (33 subtile/s) must take 10 s and
+    /// produce the client-consistent step count; the server-side logical
+    /// position must track the interpolated path (not jump to the
+    /// destination) and land exactly on the target when the move ends.
+    #[tokio::test]
+    async fn movement_timing_walk_duration_and_interpolated_pos() {
+        let (mut g, _rx, _raw) = entered_game("walktiming");
+        let pgob = g.sessions[&1].player_gob.expect("player gob");
+        let slot = g.world.gobs.get(pgob).expect("slot");
+        let (sx, sy) = g.world.gobs.pos[slot];
+        let target = (sx + 330, sy); // 30 tiles
+        assert!(g.start_move(slot, target), "walk must be accepted");
+        let lm = g.world.gobs.mv[slot].expect("mv");
+        assert_eq!(lm.total_ms, 10_000, "30 tiles at 33 subtile/s = 10 s");
+        assert_eq!(lm.steps, 150, "client steps for 10 s at 66.67 ms/step");
+        assert_eq!(g.world.gobs.speed[slot], GAIT_SPEEDS[GAIT_WALK]);
+
+        // Halfway through, the logical position is on the path...
+        for _ in 0..50 {
+            g.tick();
+        }
+        let (mx, my) = g.world.gobs.pos[slot];
+        assert!(
+            (mx - (sx + 165)).abs() <= 2 && (my - sy).abs() <= 2,
+            "mid-move logical pos ({mx},{my}) must be ~midpath ({},{})",
+            sx + 165,
+            sy
+        );
+        // ...and a viewer saw LINSTEP progress ~halfway.
+        assert!(g.world.gobs.mv[slot].is_some(), "still moving halfway");
+
+        // Completion: exactly on the target, movement cleared.
+        for _ in 0..55 {
+            g.tick();
+        }
+        assert!(g.world.gobs.mv[slot].is_none(), "move finished");
+        assert_eq!(g.world.gobs.pos[slot], target);
+    }
+
+    /// Rapid re-clicks must NOT teleport: a second walk order while moving
+    /// starts from the interpolated on-path position, never from the old
+    /// destination.
+    #[tokio::test]
+    async fn movement_reclick_starts_from_interpolated_position() {
+        let (mut g, _rx, _raw) = entered_game("reclick");
+        let pgob = g.sessions[&1].player_gob.expect("player gob");
+        let slot = g.world.gobs.get(pgob).expect("slot");
+        let (sx, sy) = g.world.gobs.pos[slot];
+        let far = (sx + 330, sy);
+        assert!(g.start_move(slot, far));
+        // Walk ~2 s (20 ticks), then click somewhere else.
+        for _ in 0..20 {
+            g.tick();
+        }
+        let (cx, cy) = g.world.gobs.pos[slot];
+        let back = (sx, sy);
+        assert!(g.start_move(slot, back), "retarget accepted");
+        let lm = g.world.gobs.mv[slot].expect("mv after retarget");
+        assert_eq!(
+            (lm.sx, lm.sy),
+            (cx, cy),
+            "new move must start from the interpolated position, not the old destination"
+        );
+        assert_ne!(
+            lm.sx,
+            lm.tx + 330,
+            "sanity: not teleporting from destination"
+        );
+        // The move completes back at the start point without a position jump
+        // larger than one path leg.
+        for _ in 0..(lm.total_ms as u64 / TICK_MS) + 2 {
+            g.tick();
+        }
+        assert!(g.world.gobs.mv[slot].is_none());
+        assert_eq!(g.world.gobs.pos[slot], back);
+    }
+
+    /// Gait speeds must match docs/mechanics/character/attributes-and-vitals.md
+    /// (RoB Glossary "Speed"): crawl 1.5, walk 3.0, run 4.5, sprint 6.0
+    /// tiles/s = 16/33/50/66 subtile/s, and the speedget "set" message must
+    /// apply the picked gait to the mover speed.
+    #[tokio::test]
+    async fn gait_speeds_match_docs_and_speedget_set_applies() {
+        assert_eq!(GAIT_SPEEDS, [16, 33, 50, 66]);
+        assert_eq!(GAIT_SPEEDS[GAIT_WALK], 33, "walk = 3 tiles/s");
+        let (mut g, _rx, _raw) = entered_game("gaits");
+        let pgob = g.sessions[&1].player_gob.expect("player gob");
+        let slot = g.world.gobs.get(pgob).expect("slot");
+        assert_eq!(g.world.gobs.speed[slot], 33, "default gait is walk");
+        let wid = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "speedget")
+            .map(|(k, _)| *k)
+            .expect("speedget widget");
+        g.on_wdgmsg(1, wid, "set", vec![hnh_proto::ListArg::Int(2)]);
+        assert_eq!(g.world.gobs.speed[slot], 50, "run gait applied");
+        g.on_wdgmsg(1, wid, "set", vec![hnh_proto::ListArg::Int(9)]);
+        assert_eq!(
+            g.world.gobs.speed[slot], 66,
+            "out-of-range clamps to sprint"
+        );
+    }
+
+    /// While a player avatar moves, the streamed pose is the walking cycle
+    /// (pose_frame 0..7); when the move ends the standing pose returns
+    /// (pose_frame 255) and the pose resources were announced.
+    #[tokio::test]
+    async fn walk_layers_swap_between_walking_and_standing() {
+        let (mut g, _rx, _raw) = entered_game("walkpose");
+        let pgob = g.sessions[&1].player_gob.expect("player gob");
+        let slot = g.world.gobs.get(pgob).expect("slot");
+        let (sx, sy) = g.world.gobs.pos[slot];
+        // Long walk: 60 tiles at walk speed ~ 20 s.
+        assert!(g.start_move(slot, (sx + 660, sy)));
+        assert_eq!(g.world.gobs.pose_frame[slot], 0, "walking frame 0 on start");
+        // 2 s in: frames have cycled (150 ms/frame).
+        for _ in 0..20 {
+            g.tick();
+        }
+        let f = g.world.gobs.pose_frame[slot];
+        assert!(f < 8, "mid-walk pose must be a walking frame, got {f}");
+        // Drain the remaining move.
+        for _ in 0..210 {
+            g.tick();
+        }
+        assert!(g.world.gobs.mv[slot].is_none(), "move finished");
+        assert_eq!(
+            g.world.gobs.pose_frame[slot],
+            u8::MAX,
+            "standing pose restored after arrival"
+        );
     }
 }
