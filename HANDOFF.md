@@ -739,3 +739,40 @@ Continuation under .unlazy/session17 (tree 99). Commits 0a45392
   target. If the user still reports a frozen client after this
   session: ask for logs/bugreport-*.zip (collect-logs.bat) - with the
   stale-jar guard the client rev in the log header must match HEAD.
+
+## 2026-10-04 - Session 18: real-GL-client reproduction killed the post-enter freeze
+Continuation under /unlazy tree 99 (scope .unlazy/session18). Commits
+1ee1a1c (shared flat+nested res resolver), 172211d (mapview-before-slen
+bootstrap + real avatar frame layers), 5dff2fb (spawn only existing
+resources). Pushed to master.
+
+- New local verification capability (outside the repo, scripts/jogl/):
+  the REAL client runs under Xvfb + Mesa llvmpipe with Temurin JDK 8
+  (JDK 21's XRender GC breaks JOGL 1.1 visual selection) and JOGL
+  1.1.1 natives extracted from Ubuntu debs; a DriveAgent javaagent
+  drives the real login/charselect widget chain and prints UI state.
+  This closed the gap every headless probe had: actual rendering.
+- Bug (b) "client frozen after entering" was THREE stacked defects,
+  each fatal only in the render path: (1) file_version() announced
+  ver 1 for nested tilesets while the served file carries the real
+  version - the client dies on "Wrong res version"; fixed by one
+  shared resolve_res_file() used by both the HTTP source and the
+  version reader; (2) slen was created before mapview, the fork's
+  SlenHud builds MinimapPanel capturing ui.mapview at construction,
+  NPE in MiniMap.draw killed the render thread; bootstrap reordered;
+  (3) avatar layers were pose routers (plalay/plparts layers the
+  client drops) -> "No negative found"; the server now layers
+  concrete standing-pose frames like the legacy server did. Also
+  bumlings/trees/kritters referenced non-existent resources; all
+  spawn names verified against the pack.
+- Bug (a) "no face at login" re-verified visually: the portrait
+  layers composite a full character (rendered to PNG through the
+  same imgc/z-order logic as AvaRender). If the user still sees an
+  empty card, their jar is stale (rev guard handles it).
+- Verified: real client 70+ s alive after world entry, 0 resource
+  errors, session stable (DriveAgent state log); cargo test 66/66;
+  fmt+clippy clean; test_client WORLD ENTRY: OK; UI PROBE CHARLIST OK.
+- NEXT (handoff): mapview "drop" ground-drop flow; walking-pose
+  animation client-side (static standing frames slide while moving);
+  equipment effects (armor class, avatar layer changes); craft
+  paginae ad->action wiring; grid-owner partitioning for 10k.
