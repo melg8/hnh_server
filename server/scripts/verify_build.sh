@@ -25,13 +25,16 @@ case "${1:-all}" in
   persist-build)
     # Fresh world: place a plan, sink one material, kill the server before
     # completion, restart, and verify the restored plan kept its credit.
-    rm -f server/target/build-test-save.json
-    (cd server && (./target/release/hnh-server --seed 42 > /tmp/g-pb.log 2>&1 &))
+    # The save is isolated so shared default-save state cannot intercept.
+    rm -f server/target/persist-save.json
+    (cd server && (HNH_SAVE_FILE=target/persist-save.json \
+      ./target/release/hnh-server --seed 42 > /tmp/g-pb.log 2>&1 &))
     sleep 3
     python3 server/scripts/test_build.py persistbot | tail -1 | grep -q "PERSIST: OK" \
       || { stop_server; fail "persist bot"; }
     stop_server
-    (cd server && (./target/release/hnh-server --seed 42 > /tmp/g-pb2.log 2>&1 &))
+    (cd server && (HNH_SAVE_FILE=target/persist-save.json \
+      ./target/release/hnh-server --seed 42 > /tmp/g-pb2.log 2>&1 &))
     sleep 3
     grep -q "persisted build sites restored" /tmp/g-pb2.log || { stop_server; fail "no restored plan"; }
     python3 server/scripts/test_build.py persistcheck | tail -1 | grep -q "PERSIST: OK" \
