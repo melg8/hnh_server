@@ -397,7 +397,26 @@ impl Game {
                     })
                     .collect();
                 let labels: Vec<String> = p.inv.iter().map(|s| s.label.to_owned()).collect();
-                self.save.snapshot(p, pos, inv_named, labels);
+                let equip_named: Vec<(usize, String, u32, u8, String)> = p
+                    .equip
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(slot, e)| {
+                        let s = e.as_ref()?;
+                        Some((
+                            slot,
+                            self.world
+                                .res
+                                .name(s.res)
+                                .unwrap_or("gfx/invobjs/unknown")
+                                .to_owned(),
+                            s.count,
+                            s.ql,
+                            s.label.to_owned(),
+                        ))
+                    })
+                    .collect();
+                self.save.snapshot(p, pos, inv_named, labels, equip_named);
             }
         }
         // World-state snapshot: growing crops + furrowed tiles + build sites.
@@ -667,15 +686,18 @@ impl Game {
                 self.open_inventory(sid);
             }
             (Some("slen"), "equ") => {
-                // Equipment window: static empty container for now.
-                if let Some(out) = self.sessions.get_mut(&sid) {
-                    let w = out.new_wid("inv");
-                    out.send(wdg::new_wdg(w, "inv", 400, 200, 0, &[]));
-                }
+                self.open_epry(sid);
             }
             (Some("slen"), "chr") => self.open_char_sheet(sid),
             (Some("slen"), _) | (None, "bud") => {}
-            (Some("inv"), "drop") => self.inv_drop(sid, wid, &args),
+            (Some("epry"), "drop") => self.epry_drop(sid, &args),
+            (Some("epry"), "take") => self.epry_take(sid, &args),
+            (Some("epry"), "itemact") | (Some("epry"), "transfer") | (Some("epry"), "iact") => {
+                // Activate/transfer semantics on equipped items are not
+                // modeled yet; acknowledge silently so the client stays
+                // responsive.
+            }
+            (Some("invwnd") | Some("inv"), "drop") => self.inv_drop(sid, wid, &args),
             // "take" originates from the item widget itself (Item.mousedown).
             (Some("item"), "take") => self.inv_take(sid, wid),
             (Some("item"), "iact") => self.on_item_iact(sid, wid),
@@ -808,6 +830,17 @@ impl Game {
                 .iter()
                 .filter_map(|s| crate::skills::catalog_get(s).map(|d| d.name))
                 .collect();
+            let mut restored_equip: Vec<Option<InvStack>> = vec![None; 16];
+            for (slot, resname, count, ql, label) in &saved.equip {
+                let idx = self.world.res.intern(leak_static(resname));
+                let s = (*slot).min(15);
+                restored_equip[s] = Some(InvStack {
+                    res: idx,
+                    count: *count,
+                    ql: *ql,
+                    label: leak_static(label),
+                });
+            }
             (
                 saved.pos,
                 saved.hp,
@@ -817,44 +850,48 @@ impl Game {
                 saved.attrs.clone(),
                 restored_inv,
                 restored_skills,
+                restored_equip,
             )
         });
-        let (spawn_pos, hp, energy, stamina, lp, attrs, inv, restored_skills) = match &saved_state {
-            Some((pos, hp, energy, stamina, lp, attrs, inv, skills)) => {
-                info!(sid, %name, "restoring persisted character");
-                (
-                    *pos,
-                    *hp,
-                    *energy,
-                    *stamina,
-                    *lp,
-                    attrs.clone(),
-                    inv.clone(),
-                    skills.clone(),
-                )
-            }
-            None => {
-                let mut fresh = HashMap::new();
-                // All eight base attributes (CharWnd lists str..psy; the
-                // FEP requirement is the highest of them).
-                for k in ["str", "agi", "int", "con", "per", "cha", "dex", "psy"] {
-                    fresh.insert(k.to_owned(), 10);
+        let (spawn_pos, hp, energy, stamina, lp, attrs, inv, restored_skills, restored_equip) =
+            match &saved_state {
+                Some((pos, hp, energy, stamina, lp, attrs, inv, skills, equip)) => {
+                    info!(sid, %name, "restoring persisted character");
+                    (
+                        *pos,
+                        *hp,
+                        *energy,
+                        *stamina,
+                        *lp,
+                        attrs.clone(),
+                        inv.clone(),
+                        skills.clone(),
+                        equip.clone(),
+                    )
                 }
-                fresh.insert("hp".to_owned(), 100);
-                fresh.insert("energy".to_owned(), 100);
-                fresh.insert("lp".to_owned(), 0);
-                (
-                    self.find_spawn_position(),
-                    100,
-                    100,
-                    100,
-                    100,
-                    fresh,
-                    Vec::new(),
-                    HashSet::new(),
-                )
-            }
-        };
+                None => {
+                    let mut fresh = HashMap::new();
+                    // All eight base attributes (CharWnd lists str..psy; the
+                    // FEP requirement is the highest of them).
+                    for k in ["str", "agi", "int", "con", "per", "cha", "dex", "psy"] {
+                        fresh.insert(k.to_owned(), 10);
+                    }
+                    fresh.insert("hp".to_owned(), 100);
+                    fresh.insert("energy".to_owned(), 100);
+                    fresh.insert("lp".to_owned(), 0);
+                    (
+                        self.find_spawn_position(),
+                        100,
+                        100,
+                        100,
+                        100,
+                        fresh,
+                        Vec::new(),
+                        HashSet::new(),
+                        vec![None; 16],
+                    )
+                }
+            };
         let res_body = self.world.res.intern("gfx/borka/body");
         let _res_head = self.world.res.intern("gfx/borka/head");
         let _res_hair = self.world.res.intern("gfx/borka/hair");
@@ -881,6 +918,7 @@ impl Game {
             skills: restored_skills,
             attrs,
             inv,
+            equip: restored_equip,
             fep: crate::craft::FepState::default(),
             fight_target: None,
             atk_cd: 0,
@@ -1019,6 +1057,11 @@ impl Game {
                 ListVal::I(0),
             ],
         ));
+        // Equipment paperdoll (Equipory, widget type "epry"): the
+        // user-reported missing doll. Created during bootstrap with a full
+        // "set" sync and the "ava" avatar gob binding.
+        let w_epry = out.new_wid("epry");
+        out.send(wdg::new_wdg(w_epry, "epry", 0, 0, 0, &[]));
         // Global state.
         let (unix, dt, mp, yt) = self.world.astro();
         out.send(wdg::globlob(unix, dt, mp, yt, Some((255, 255, 255, 255))));
@@ -1042,6 +1085,9 @@ impl Game {
             pages.push(r.pagina);
         }
         out.send(wdg::paginae_add(&pages));
+        // Initial paperdoll contents ("set" + "ava") now that the player
+        // and the epry widget both exist.
+        self.send_epry_state(sid);
         info!(sid, %name, gob, "player entered world");
     }
 
@@ -2444,25 +2490,152 @@ impl Game {
     }
 
     fn inv_drop(&mut self, sid: SessionId, _wid: u16, _args: &[hnh_proto::ListArg]) {
-        // Drop the last stack onto the ground at the player's feet.
-        let (gob, stack) = match self.world.player_mut(sid) {
-            Some(p) => match p.inv.pop() {
-                Some(s) => (p.gob, s),
-                None => return,
-            },
-            None => return,
+        // Inventory "drop": the client sends it when the held (cursor) item
+        // is released onto an inventory grid; the stack returns to storage.
+        // Ground drops ride the mapview `drop` wdgmsg instead.
+        let stack = {
+            let Some(out) = self.sessions.get_mut(&sid) else {
+                return;
+            };
+            out.cursor.take()
         };
-        let Some(slot) = self.world.gobs.get(gob) else {
+        let Some(stack) = stack else {
             return;
         };
-        let pos = self.world.gobs.pos[slot];
-        let name = self
-            .world
-            .res
-            .name(stack.res)
-            .unwrap_or("gfx/invobjs/stone");
-        self.spawn_drop_near(pos, leak_static(name), stack.ql, stack.label);
+        if let Some(p) = self.world.player_mut(sid) {
+            p.inv.push(stack);
+        }
         self.refresh_inventory(sid);
+    }
+
+    // ------------------------------------------------------------------
+    // Equipment (the Equipory paperdoll, docs/mechanics/items/
+    // items-and-quality.md): widget type "epry", 16 wire-indexed slots,
+    // full-state "set" sync + "ava" avatar gob binding. Equipping rides
+    // the cursor item: "drop" onto a slot stores it, "take" retrieves it.
+    // ------------------------------------------------------------------
+
+    fn epry_window(&self, sid: SessionId) -> Option<u16> {
+        self.sessions
+            .get(&sid)?
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "epry")
+            .map(|(id, _)| *id)
+    }
+
+    /// Create the paperdoll window if absent, then resync its contents.
+    fn open_epry(&mut self, sid: SessionId) {
+        if self.epry_window(sid).is_none() {
+            let Some(out) = self.sessions.get_mut(&sid) else {
+                return;
+            };
+            let w = out.new_wid("epry");
+            out.send(wdg::new_wdg(w, "epry", 0, 0, 0, &[]));
+        }
+        self.send_epry_state(sid);
+    }
+
+    /// Full paperdoll resync: RMSG_WDGMSG "set" (for each of the 16 slots
+    /// in order: -1, or wire resid + quality + optional tooltip) followed
+    /// by "ava" (the avatar gob the window previews).
+    fn send_epry_state(&mut self, sid: SessionId) {
+        let Some(w) = self.epry_window(sid) else {
+            return;
+        };
+        let Some(&pidx) = self.world.by_session.get(&sid) else {
+            return;
+        };
+        // Phase 1 (world borrow): snapshot the equipped stacks together
+        // with their resource names.
+        let equipped: Vec<Option<(InvStack, &'static str)>> = self.world.players[pidx]
+            .equip
+            .iter()
+            .map(|slot| {
+                slot.map(|s| {
+                    let name = self.world.res.name(s.res).unwrap_or("gfx/invobjs/unknown");
+                    (s, name)
+                })
+            })
+            .collect();
+        let gob = self.world.players[pidx].gob;
+        // Phase 2 (session borrow): wire ids, announcements, uimsgs.
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        let mut args: Vec<ListVal> = Vec::with_capacity(48);
+        for slot in &equipped {
+            match slot {
+                Some((s, name)) => {
+                    let wire = out.res.wire_named(s.res, name);
+                    if let Some((n, v)) = out.res.pending_announce(wire) {
+                        out.send(wdg::resid(wire, n, v));
+                        out.res.mark_announced(wire);
+                    }
+                    args.push(ListVal::I(wire as i32));
+                    args.push(ListVal::I(s.ql as i32));
+                    if !s.label.is_empty() {
+                        args.push(ListVal::S(s.label.to_owned()));
+                    }
+                }
+                None => args.push(ListVal::I(-1)),
+            }
+        }
+        out.send(wdg::wdgmsg(w, "set", &args));
+        out.send(wdg::wdgmsg(w, "ava", &[ListVal::I(gob)]));
+    }
+
+    /// epry "drop" (slot): store the held cursor item into slot `ep`.
+    /// Slot -1 (window background) is a deliberate no-op.
+    fn epry_drop(&mut self, sid: SessionId, args: &[hnh_proto::ListArg]) {
+        let ep = args.first().and_then(|a| a.as_int()).unwrap_or(-1);
+        if !(0..16).contains(&ep) {
+            return;
+        }
+        let Some(&pidx) = self.world.by_session.get(&sid) else {
+            return;
+        };
+        if self.world.players[pidx].equip[ep as usize].is_some() {
+            return; // slot occupied
+        }
+        let stack = {
+            let Some(out) = self.sessions.get_mut(&sid) else {
+                return;
+            };
+            out.cursor.take()
+        };
+        let Some(stack) = stack else {
+            return; // empty hand
+        };
+        self.world.players[pidx].equip[ep as usize] = Some(stack);
+        self.send_epry_state(sid);
+    }
+
+    /// epry "take" (slot): pick the equipped item back onto the cursor.
+    fn epry_take(&mut self, sid: SessionId, args: &[hnh_proto::ListArg]) {
+        let ep = args.first().and_then(|a| a.as_int()).unwrap_or(-1);
+        if !(0..16).contains(&ep) {
+            return;
+        }
+        let Some(&pidx) = self.world.by_session.get(&sid) else {
+            return;
+        };
+        if self
+            .sessions
+            .get(&sid)
+            .map(|o| o.cursor.is_some())
+            .unwrap_or(true)
+        {
+            return; // hand already full
+        }
+        let Some(stack) = self.world.players[pidx].equip[ep as usize].take() else {
+            return; // empty slot
+        };
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        out.cursor = Some(stack);
+        self.send_epry_state(sid);
     }
 
     // ------------------------------------------------------------------
@@ -4605,7 +4778,26 @@ impl Game {
             })
             .collect();
         let labels: Vec<String> = p.inv.iter().map(|s| s.label.to_owned()).collect();
-        self.save.snapshot(p, pos, inv_named, labels);
+        let equip_named: Vec<(usize, String, u32, u8, String)> = p
+            .equip
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, e)| {
+                let s = e.as_ref()?;
+                Some((
+                    slot,
+                    self.world
+                        .res
+                        .name(s.res)
+                        .unwrap_or("gfx/invobjs/unknown")
+                        .to_owned(),
+                    s.count,
+                    s.ql,
+                    s.label.to_owned(),
+                ))
+            })
+            .collect();
+        self.save.snapshot(p, pos, inv_named, labels, equip_named);
     }
 
     fn on_session_closed(&mut self, sid: SessionId) {
@@ -4694,6 +4886,144 @@ impl Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Enter the world as `name` on a fresh single-session game and return
+    /// the game plus the outgoing message receivers (shared setup for the
+    /// equipment tests).
+    fn entered_game(
+        name: &str,
+    ) -> (
+        Game,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    ) {
+        let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut g = Game::new(
+            42,
+            cmd_rx,
+            net_rx,
+            false,
+            std::env::temp_dir().join(format!("hnh-equip-test-{}.json", name)),
+        );
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        g.session_connected(1, tx, raw_tx);
+        let wid = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "charlist")
+            .map(|(k, _)| *k)
+            .expect("charlist widget");
+        g.on_wdgmsg(
+            1,
+            wid,
+            "play",
+            vec![hnh_proto::ListArg::Str(name.to_owned())],
+        );
+        for _ in 0..3 {
+            g.tick();
+        }
+        (g, rx, raw_rx)
+    }
+
+    /// The paperdoll must exist right after world entry with a full "set"
+    /// sync and the "ava" gob binding (the user-reported missing doll).
+    #[tokio::test]
+    async fn epry_is_bootstrapped_with_set_and_ava() {
+        let (g, mut rx, _raw) = entered_game("dolluser");
+        assert!(
+            g.epry_window(1).is_some(),
+            "epry widget must exist after world entry"
+        );
+        let mut saw_set = false;
+        let mut saw_ava = false;
+        while let Ok(msg) = rx.try_recv() {
+            // RMSG_WDGMSG payload: type byte, u16 wid, NUL-terminated name.
+            if msg.first() == Some(&RMSG_WDGMSG) && msg.len() > 4 {
+                let nul = msg[3..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .map(|p| 3 + p)
+                    .unwrap_or(msg.len());
+                let n = String::from_utf8_lossy(&msg[3..nul]);
+                if n == "set" {
+                    saw_set = true;
+                }
+                if n == "ava" {
+                    saw_ava = true;
+                }
+            }
+        }
+        assert!(saw_set, "bootstrap must queue the epry \"set\" sync");
+        assert!(saw_ava, "bootstrap must queue the epry \"ava\" gob id");
+    }
+
+    /// Equip via cursor ("drop"), unequip via "take"; occupied and invalid
+    /// slots are rejected without losing the held stack.
+    #[tokio::test]
+    async fn epry_equips_and_unequips_via_cursor() {
+        let (mut g, _rx, _raw) = entered_game("equipuser");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        assert!(g.world.players[pidx].equip.iter().all(|s| s.is_none()));
+
+        // Open the inventory and take the first stack onto the cursor.
+        let slen = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "slen")
+            .map(|(k, _)| *k)
+            .unwrap();
+        g.on_wdgmsg(1, slen, "inv", vec![]);
+        let item_wid = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .item_wids
+            .iter()
+            .find(|(_, &idx)| idx == 0)
+            .map(|(&w, _)| w)
+            .expect("first inventory item widget");
+        g.on_wdgmsg(1, item_wid, "take", vec![]);
+        assert!(
+            g.sessions.get(&1).unwrap().cursor.is_some(),
+            "take -> cursor"
+        );
+
+        let epry = g.epry_window(1).unwrap();
+        // Equip into slot 3.
+        g.on_wdgmsg(1, epry, "drop", vec![hnh_proto::ListArg::Int(3)]);
+        assert!(
+            g.world.players[pidx].equip[3].is_some(),
+            "cursor item must land in slot 3"
+        );
+        assert!(g.sessions.get(&1).unwrap().cursor.is_none());
+
+        // Occupied slot: the take has to refill the hand first.
+        let held = g.world.players[pidx].equip[3];
+        g.on_wdgmsg(1, epry, "drop", vec![hnh_proto::ListArg::Int(3)]);
+        assert_eq!(g.world.players[pidx].equip[3], held, "occupied slot kept");
+
+        // Invalid slot: no panic, no state change.
+        g.on_wdgmsg(1, epry, "drop", vec![hnh_proto::ListArg::Int(16)]);
+        g.on_wdgmsg(1, epry, "drop", vec![hnh_proto::ListArg::Int(-1)]);
+
+        // Unequip: back onto the cursor.
+        g.on_wdgmsg(1, epry, "take", vec![hnh_proto::ListArg::Int(3)]);
+        assert!(g.world.players[pidx].equip[3].is_none());
+        assert!(g.sessions.get(&1).unwrap().cursor.is_some());
+
+        // Empty slot take with a full hand: rejected.
+        g.on_wdgmsg(1, epry, "take", vec![hnh_proto::ListArg::Int(4)]);
+        assert!(g.world.players[pidx].equip[4].is_none());
+        assert!(g.sessions.get(&1).unwrap().cursor.is_some(), "hand kept");
+    }
 
     /// Regression test (avatar bug): the player's own gob must be streamed
     /// to the session with OD_BUDDY naming the character. A double insert

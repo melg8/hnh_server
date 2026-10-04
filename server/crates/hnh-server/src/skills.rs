@@ -301,6 +301,7 @@ mod tests {
         buy(&mut owned, &mut lp, "cheese").unwrap();
         let saved = SavedPlayer {
             name: "RoundTrip".to_owned(),
+            equip: Vec::new(),
             pos: (0, 0),
             hp: 100,
             energy: 100,

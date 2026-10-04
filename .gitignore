@@ -22,3 +22,5 @@ docs/javadoc/
 /logs/
 __pycache__/
 *.pyc
+build-classes/
+chats/

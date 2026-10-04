@@ -36,6 +36,11 @@ pub struct SavedPlayer {
     /// values live in `attrs`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
+    /// Equipped paperdoll items as (slot 0..15, resource name, count,
+    /// quality, label); only occupied slots are stored (v4, additive;
+    /// absent in older saves -> everything unequipped).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equip: Vec<(usize, String, u32, u8, String)>,
 }
 
 /// Top-level save container. Bump VERSION on incompatible changes.
@@ -115,7 +120,7 @@ pub struct SavedCrop {
 }
 
 impl SaveData {
-    pub const VERSION: u32 = 3;
+    pub const VERSION: u32 = 4;
 
     pub fn new(seed: u64) -> Self {
         SaveData {
@@ -212,13 +217,15 @@ impl SaveStore {
 
     /// Snapshot one online player. `inv_named` carries the inventory already
     /// translated from process-local indices to resource names, with the
-    /// display labels parallel to the stacks.
+    /// display labels parallel to the stacks. `equip_named` carries the
+    /// occupied paperdoll slots as (slot, resname, count, ql, label).
     pub fn snapshot(
         &mut self,
         p: &Player,
         pos: (i32, i32),
         inv_named: Vec<(String, u32, u8)>,
         inv_labels: Vec<String>,
+        equip_named: Vec<(usize, String, u32, u8, String)>,
     ) {
         self.players.insert(
             p.name.clone(),
@@ -233,6 +240,7 @@ impl SaveStore {
                 inv: inv_named,
                 inv_labels,
                 skills: p.skills.iter().map(|s| s.to_string()).collect(),
+                equip: equip_named,
             },
         );
     }
@@ -272,6 +280,7 @@ mod tests {
             &Player {
                 name: "tester".to_owned(),
                 gob: 1,
+                equip: Vec::new(),
                 session: 1,
                 hp: 77,
                 energy: 55,
@@ -288,6 +297,7 @@ mod tests {
             (123, -456),
             vec![("gfx/invobjs/stone".to_owned(), 3, 7)],
             vec![String::new()],
+            Vec::new(),
         );
         store.flush(42).unwrap();
 
@@ -311,6 +321,7 @@ mod tests {
         store.snapshot(
             &Player {
                 name: "a".to_owned(),
+                equip: Vec::new(),
                 gob: 1,
                 session: 1,
                 hp: 10,
@@ -326,6 +337,7 @@ mod tests {
                 atk_cd: 0,
             },
             (0, 0),
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         );

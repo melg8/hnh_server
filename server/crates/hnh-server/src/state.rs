@@ -340,6 +340,11 @@ pub struct Player {
     pub attrs: HashMap<String, i32>,
     /// Inventory stacks.
     pub inv: Vec<InvStack>,
+    /// Equipment (the Equipory paperdoll, widget type "epry"): exactly 16
+    /// slots indexed by the wire slot index 0..15. Slot semantics are
+    /// server-side (docs/mechanics/items/items-and-quality.md); the client
+    /// addresses slots purely by index. Occupied slots hold one stack.
+    pub equip: Vec<Option<InvStack>>,
     /// Food Event Point accumulators (integer tenths per attribute).
     pub fep: crate::craft::FepState,
     /// Currently open fight target (gob id) or none.
