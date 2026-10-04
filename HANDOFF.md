@@ -776,3 +776,62 @@ resources). Pushed to master.
   animation client-side (static standing frames slide while moving);
   equipment effects (armor class, avatar layer changes); craft
   paginae ad->action wiring; grid-owner partitioning for 10k.
+
+## 2026-10-04 - Session 19: the frozen character root-caused and fixed (real-client verified)
+Continuation under .unlazy/session19 (tree 99; honest decomposition is a
+depth-2 tree, see the PLAN). Commits 07e9abc (probe), dea3f67 (reader
+hardening + neg pack), a463788 (THE fix), 8c1b245, da34b6b (harness +
+AGENTS.md), e29538f, plus the test_farming parser fix.
+
+- New environment capability, now COMMITTED (scripts/jogl/): deploy
+  script (Temurin 8, JOGL 1.1.1 natives from old-releases.ubuntu.com,
+  X11 libs, Ant, DriveAgent javaagent) and the e2e runner: fresh server
+  + Xvfb + the REAL GL client, login through the real widget chain,
+  real AWT Robot clicks, MOVEMENT verdicts from Gob.position(). The
+  session-18 setup was never committed and died with the sandbox.
+- AGENTS.md now REQUIRES real-client verification for client-visible
+  changes; wire probes alone are insufficient (this session proves it).
+- BUG (b) "character stands rooted on clicks" was TWO stacked defects:
+  1) hnh-proto list(): the legacy client's Message.addlist encodes
+     wdgmsg args WITHOUT the T_END terminator (list ends at EOM). The
+     strict parser errored on every real click and net.rs'
+     unwrap_or_default() dropped ALL args ("map click received nargs=0"
+     at TRACE). on_map_click saw no mc -> no LINBEG. Wire probes never
+     caught it: they append T_END manually. Fixed at the parser (EOF
+     ends the list; explicit T_END still terminates early) with two
+     regression tests.
+  2) OCache.cres (client): one bad resource (gfx/invobjs/meat - animal
+     loot drop - and gfx/invobjs/wood - tree-chop drop - ship WITHOUT
+     the mandatory neg layer) threw out of ResDrawable init on the
+     Session RWorker thread and KILLED the reader; after that the
+     client never processed LINBEG/OBJDATA again - a zombie that renders
+     old state. cres now catches sprite-init failures (gob renders
+     nothing); the pack gains synthesized neg layers
+     (scripts/add_neg_layer.py, res/compiled overlay).
+  Diagnostic chain that found them: MapView.mousedown branch print ->
+  RemoteUI.rcvmsg print -> "click args=Coord..Coord..Integer..Integer"
+  sent vs "nargs=0" received. The click diagnostics are now gated
+  behind -Dhaven.debugclicks=true.
+- Bug (a) "no head/torso at login" re-verified on the REAL client: the
+  in-world avatar renders head/torso/legs (screenshot: /tmp evidence in
+  the session run; world + minimap + menu grid + chat all render). The
+  remaining plausible user-side cause is the stale-jar guard (fixed in
+  session 17) - their report likely predates it.
+- test_client.py's walk click targeted ~570 tiles off-spawn (spawn is
+  tile (50,50) -> subtile (555,555)); it verified nothing. New
+  probe_walk.py asserts OD_LINBEG + OD_LINSTEP for the player gob
+  identified from mapview args: MOVE PROBE: OK.
+- test_farming.py: OD_LAYERS parse is variable-length now (5 pose
+  frames) - fixed stride had broken player detection since session 18.
+  test_craft.py eats by fep label (seeds/axe are not food).
+- Verified this session: cargo test 85 green (11+66+8); fmt+clippy -D
+  warnings clean; WORLD ENTRY + CATTR ORDER OK; MOVE PROBE OK;
+  CRAFT/EAT OK; FARMING OK; CHAT+PARTY OK; E2E EQUIP OK; REAL CLIENT
+  MOVEMENT: MOVED x2 (driveuser36-40 runs); load 1000/1000 saturated
+  bots, steady tick ~42 ms vs 100 ms budget, fights live, RSS ~820 MB
+  on this 2-core/4 GB box.
+- NEXT (handoff): mapview "drop" ground-drop flow; walking-pose
+  animation; equipment effects (armor class, avatar layer changes);
+  craft paginae ad->action wiring; grid-owner partitioning for 10k;
+  shared visibility groups (dedupe per-cell candidate scans) as the
+  documented 10k lever.
