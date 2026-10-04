@@ -4939,6 +4939,14 @@ impl Game {
                 }
                 continue;
             }
+            // Animal offence builds every tick while in reach (mirrors the
+            // player's own_off regen). Without this the offence stayed at
+            // its initial 0 forever: the swing condition below could never
+            // fire and predators NEVER attacked (session 21: the missing
+            // attack animation had no attack behind it).
+            if let Some(af) = self.world.animal_fights.get_mut(&id) {
+                af.off = (af.off + crate::fight::OFF_REGEN).min(crate::fight::BAR_FULL);
+            }
             let animal_off = self
                 .world
                 .animal_fights
@@ -5916,6 +5924,145 @@ mod tests {
         assert!(
             killed,
             "stationary player must kill a predator in 3000 ticks"
+        );
+    }
+
+    /// A stationary player in reach must be BITTEN: the animal's offence
+    /// builds every tick, swings chip the player's defence, the bite lands
+    /// (hp drop) and the one-shot bite FX overlay (gfx/fx/bite) is
+    /// broadcast to the victim - the animal attack animation path.
+    #[tokio::test]
+    async fn predator_bites_and_broadcasts_bite_overlay() {
+        let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut g = Game::new(
+            42,
+            cmd_rx,
+            net_rx,
+            true,
+            std::env::temp_dir().join("hnh-game-test-save.json"),
+        );
+        let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        g.session_connected(1, tx, raw_tx);
+        let wid = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "charlist")
+            .map(|(k, _)| *k)
+            .expect("charlist widget");
+        g.on_wdgmsg(
+            1,
+            wid,
+            "play",
+            vec![hnh_proto::ListArg::Str("prey".to_owned())],
+        );
+        g.on_mapreq(1, (0, 0));
+        let (pred_id, pred_slot) = g
+            .world
+            .animal_gobs
+            .iter()
+            .filter_map(|&id| {
+                g.world.gobs.get(id).map(|slot| {
+                    let aggro = matches!(
+                        g.world.gobs.kind[slot],
+                        Kind::Animal { species } if species.aggressive()
+                    );
+                    if aggro {
+                        Some((id, slot))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .flatten()
+            .next()
+            .expect("saturated grid spawns predators");
+        let (ax, ay) = g.world.gobs.pos[pred_slot];
+        let keep = pred_id;
+        let others: Vec<GobId> = g
+            .world
+            .animal_gobs
+            .iter()
+            .copied()
+            .filter(|&id| id != keep)
+            .collect();
+        for id in others {
+            g.world.gobs.kill(id);
+        }
+        g.world.animal_gobs.retain(|&id| id == keep);
+        let pgob = g.world.players[0].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        g.world.gobs.set_pos(pslot, (ax + 5, ay));
+        let mut bitten = false;
+        let mut saw_overlay = false;
+        for tick in 0..900 {
+            if tick % 4 == 0 {
+                g.world.gobs.set_pos(pslot, (ax + 5, ay));
+            }
+            g.tick();
+            if g.world.players[0].hp < 100 {
+                bitten = true;
+            }
+        }
+        // Scan the raw OBJDATA stream for a bite overlay on the player gob.
+        while let Ok(msg) = raw_rx.try_recv() {
+            if msg.first() != Some(&MSG_OBJDATA) || msg.len() < 10 {
+                continue;
+            }
+            let gid = i32::from_le_bytes([msg[2], msg[3], msg[4], msg[5]]);
+            if gid != pgob as i32 {
+                continue;
+            }
+            // Walk the op stream: find OD_OVERLAY (12) before OD_END (0).
+            let mut off = 10;
+            while off < msg.len() {
+                let op = msg[off];
+                off += 1;
+                match op {
+                    0 => break,     // OD_END
+                    1 => off += 8,  // OD_MOVE
+                    3 => off += 20, // OD_LINBEG
+                    4 => off += 4,  // OD_LINSTEP
+                    6 | 9 => {
+                        // OD_LAYERS / OD_AVATAR: u16 ids to 65535.
+                        if op == 6 {
+                            off += 2;
+                        }
+                        while off + 1 < msg.len() {
+                            let id = u16::from_le_bytes([msg[off], msg[off + 1]]);
+                            off += 2;
+                            if id == 65535 {
+                                break;
+                            }
+                        }
+                    }
+                    12 => {
+                        saw_overlay = true;
+                        break;
+                    }
+                    14 => off += 1, // OD_HEALTH
+                    15 => {
+                        // OD_BUDDY: string + 2 bytes.
+                        match msg[off..].iter().position(|&b| b == 0) {
+                            Some(p) => off += p + 1 + 2,
+                            None => break,
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            if saw_overlay {
+                break;
+            }
+        }
+        assert!(bitten, "predator must land a bite (player hp drop)");
+        assert!(
+            saw_overlay,
+            "bite must broadcast the one-shot FX overlay to the victim"
         );
     }
 
