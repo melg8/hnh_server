@@ -16,12 +16,12 @@ pack automatically on first start.
 
 | Script | What it does |
 | --- | --- |
-| `run-client.bat` | **The one command.** Builds `build/haven.jar` if missing, auto-starts the server in its own window when it is not answering, waits until auth (1871) and resources (1872) respond, then starts the Java client. Client console output is captured to `logs/client.log`. |
+| `run-client.bat` | **The one command.** Builds `build/haven.jar` if missing, generates `gameres/` if missing, auto-starts the server in its own window when it is not answering, waits until auth (1871) and resources (1872) actually answer, then starts the Java client. The client loads its base resources from `gameres/` on disk (`-Dhaven.resdir`), so a res-server hiccup cannot crash it. Client console output is captured to `logs/client.log`. |
 | `start-server.bat` | Server only: builds, generates `gameres/` if needed, creates `save/`, runs the seed-42 server. Extra arguments pass through. Log file: `logs/server.log` (append). |
 | `collect-logs.bat` | Bundles `logs/*.log` + environment info (git rev, java/cargo versions, server port status) into `logs/bugreport-<timestamp>.zip`. Safe to run while the server is up - logs are copied even while the server writes them. Run this and send the single zip when something breaks. |
 | `build-server.bat` | `cargo build --release` for the Rust server. |
 | `make-gameres.ps1` | Extracts `lib/haven-res.jar` into `gameres/` and overlays `res/compiled/` (auto-invoked by the start script when `gameres/` is missing). |
-| `wait-server.ps1` | Helper used by `run-client.bat`: blocks until ports 1871+1872 answer (prevents the client racing a still-booting server). |
+| `wait-server.ps1` | Helper used by `run-client.bat`: blocks until auth (1871) accepts TCP **and** the resource server (1872) answers a real HTTP GET for `gfx/hud/fbtn` (prevents the client racing a still-booting or half-serving server). |
 | `loadtest.bat` | Same as start but with 600 in-process bots in a saturated world and the 5-second `--perf` report. |
 
 ## Typical flow

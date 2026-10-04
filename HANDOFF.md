@@ -788,3 +788,47 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
   PSScriptRoot fallback without -RepoRoot.
 - Next: user git pull, re-run windows\collect-logs.bat (server may keep
   running), send the printed zip.
+
+---
+
+## Session end 1791073363
+
+- Server exited cleanly (seed 42).
+- See HANDOFF.md top section for current state.
+
+
+## 2026-10-04 - Fix: client crash root-caused to a hard HTTP dependency + path fixes
+
+- Bug report (now arriving as a single zip - collect-logs works) showed
+  the same crash as before: Delayed error gfx/hud/fbtn -> Connection
+  refused on http://127.0.0.1:1872/ -> Window.<clinit> NPE. This time
+  the server had been up for 12 minutes, watchdog silent (listeners
+  healthy every 10 s probe), auth session accepted fine, and the server
+  log contained zero res requests: none of the client's HTTP fetches
+  ever reached the server, while same-process probes kept succeeding.
+- Client-side root cause: the client's base-resource chain is
+  custom_res -> ./res -> haven.resdir -> JarSource -> HTTP. The repo's
+  res/ lacks gfx/hud/fbtn (it is a custom resource living in
+  res/compiled -> gameres), JarSource double-prefixes /res/ so the
+  build\res classpath dir never matches, leaving HTTP as the only
+  source for half the UI. Any transient HTTP refusal = delayed crash
+  after login. The loopback refusal itself (java refused while
+  same-host probes passed) remains environmental - likely a WFP/AV
+  filter on the user's box - so the fix is to remove the dependency.
+- Fix (client): run-client.bat passes -Dhaven.resdir=<repo>/gameres
+  (full pack: jar extract + custom overlay) and generates gameres if
+  missing. The client now boots fully from disk; HTTP is a fallback
+  only. wait-server.ps1 upgraded: 1872 must answer a real HTTP GET for
+  gfx/hud/fbtn, not just accept TCP.
+- Fix (server): res_http wraps every request in a 30 s timeout so
+  silent clients cannot hold tasks/sockets forever (unit test added);
+  default_repo_dir now prefers exe-anchored candidates over
+  cwd-relative ones - the user's server was loading/saving
+  ../save/world.json OUTSIDE the repo (stale E:\work\legacy_hnh\save
+  from an older layout beat the repo-root save dir).
+- Verified: 39 tests, clippy -D warnings, fmt clean; live boot: fbtn
+  HTTP 200, 32/32 parallel fetches OK, save path exe-anchored, wire
+  test WORLD ENTRY OK.
+- Next: user git pull (they were 2 commits behind - the report came
+  from the old collect-logs), then run-client.bat as usual. If the
+  crash ever repeats, the client no longer needs 1872 to boot.

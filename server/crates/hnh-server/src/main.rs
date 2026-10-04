@@ -46,10 +46,14 @@ fn first_existing(cands: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
 /// name; creators (the start script, dev-cert generation, persistence)
 /// own making the directory.
 fn default_repo_dir(name: &str) -> std::path::PathBuf {
-    let mut cands = vec![
-        std::path::PathBuf::from(format!("../{name}")),
-        std::path::PathBuf::from(name),
-    ];
+    let mut cands = Vec::new();
+    // Exe-anchored candidates first: the built exe lives inside the repo
+    // (server/target/<profile>), so this anchor is exact for every
+    // build-based launch regardless of cwd. Cwd-relative candidates follow
+    // as the fallback for a standalone exe copy. Cwd-first ordering was a
+    // real bug: launched from the repo root with a stale ../save from an
+    // older layout, the server loaded and persisted world.json outside the
+    // repository.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             // target/release -> server/target/release/../../.. -> repo root
@@ -57,6 +61,8 @@ fn default_repo_dir(name: &str) -> std::path::PathBuf {
             cands.push(dir.join(format!("../../{name}")));
         }
     }
+    cands.push(std::path::PathBuf::from(format!("../{name}")));
+    cands.push(std::path::PathBuf::from(name));
     first_existing(&cands).unwrap_or_else(|| std::path::PathBuf::from(name))
 }
 

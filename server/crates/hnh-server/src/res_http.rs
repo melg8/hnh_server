@@ -12,6 +12,11 @@ use tracing::{info, warn};
 
 pub const RES_PORT: u16 = 1872;
 
+/// Whole-request budget: a client that connects but never completes a
+/// request (hung process, half-open socket, probe gone silent) must not
+/// hold its task and socket forever.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Bind the resource HTTP listener. Separate from [`serve`] so startup can
 /// fail fast (and loudly) when the port is taken, instead of leaving a
 /// half-alive server that only errors on the client side.
@@ -31,8 +36,14 @@ pub async fn serve(listener: TcpListener, res_dir: PathBuf) {
             Ok((stream, _)) => {
                 let dir = Arc::clone(&dir);
                 tokio::spawn(async move {
-                    if let Err(e) = handle(stream, dir).await {
-                        tracing::debug!(error = %e, "resource request failed");
+                    match tokio::time::timeout(REQUEST_TIMEOUT, handle(stream, dir)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            tracing::debug!(error = %e, "resource request failed");
+                        }
+                        Err(_) => {
+                            tracing::debug!("resource request dropped (timed out)");
+                        }
                     }
                 });
             }
@@ -159,5 +170,31 @@ mod tests {
         let (status, _) = request(&dir, "../Cargo.toml").await;
         assert_eq!(status, 403);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A client that connects but never sends a request must be dropped
+    /// after the timeout instead of holding its task forever.
+    #[tokio::test]
+    async fn silent_client_is_dropped_after_timeout() {
+        let dir_path = temp_resdir("timeout");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let listener = TcpListener::from_std(listener).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let started = std::time::Instant::now();
+        let dir = Arc::new(dir_path.clone());
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::time::timeout(Duration::from_millis(50), handle(server, dir)),
+        )
+        .await
+        .unwrap();
+        assert!(outcome.is_err(), "handle must time out, not complete");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // The client socket is still usable for a later request.
+        assert!(client.write_all(b"GET / HTTP/1.1\r\n\r\n").await.is_ok());
+        std::fs::remove_dir_all(&dir_path).ok();
     }
 }
