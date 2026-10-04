@@ -16,11 +16,11 @@ pack automatically on first start.
 
 | Script | What it does |
 | --- | --- |
-| `run-client.bat` | **The one command.** Builds `build/haven.jar` if missing, generates `gameres/` if missing, auto-starts the server in its own window when it is not answering, waits until auth (1871) and resources (1872) actually answer, then starts the Java client. The client loads its base resources from `gameres/` on disk (`-Dhaven.resdir`), so a res-server hiccup cannot crash it. Client console output is captured to `logs/client.log`. |
-| `start-server.bat` | Server only: builds, generates `gameres/` if needed, creates `save/`, runs the seed-42 server. Extra arguments pass through. Log file: `logs/server.log` (append). |
+| `run-client.bat` | **The one command.** Rebuilds `build/haven.jar` whenever it is missing or the checked-out HEAD moved since the last build (stale-jar guard: a `git pull` can never silently run old client code), generates `gameres/` when stale, auto-starts the server in its own window when it is not answering, waits until auth (1871) and resources (1872) actually answer, then starts the Java client. The client loads its base resources from `gameres/` on disk (`-Dhaven.resdir`), so a res-server hiccup cannot crash it. Client console output is captured to `logs/client.log`. |
+| `start-server.bat` | Server only: builds, regenerates `gameres/` when it is missing or older than the checked-out tree (rev-stamped `gameres/.genrev`), creates `save/`, runs the seed-42 server. Extra arguments pass through. Log file: `logs/server.log` (append). |
 | `collect-logs.bat` | Bundles `logs/*.log` + environment info (git rev, java/cargo versions, server port status) into `logs/bugreport-<timestamp>.zip`. Safe to run while the server is up - logs are copied even while the server writes them. Run this and send the single zip when something breaks. |
 | `build-server.bat` | `cargo build --release` for the Rust server. |
-| `make-gameres.ps1` | Extracts `lib/haven-res.jar` into `gameres/` and overlays `res/compiled/` (auto-invoked by the start script when `gameres/` is missing). |
+| `make-gameres.ps1` | Extracts `lib/haven-res.jar` into `gameres/` and overlays `res/compiled/` (auto-invoked by the start script when the pack is stale). |
 | `wait-server.ps1` | Helper used by `run-client.bat`: blocks until auth (1871) accepts TCP **and** the resource server (1872) answers a real HTTP GET for `gfx/hud/fbtn` (prevents the client racing a still-booting or half-serving server). |
 | `loadtest.bat` | Same as start but with 600 in-process bots in a saturated world and the 5-second `--perf` report. |
 

@@ -11,10 +11,23 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "build\haven.jar" (
-    echo Building client jar...
+REM Stale-jar guard: client sources change across `git pull`, and a jar
+REM built from older code silently resurrects fixed bugs (the avatar and
+REM encodeurl fixes all live in src\haven). Rebuild whenever HEAD moved
+REM since the last build, not only when the jar is missing.
+set "NEEDBUILD="
+if not exist "build\haven.jar" set "NEEDBUILD=1"
+set "HEADREV="
+for /f %%i in ('git rev-parse HEAD 2^>nul') do set "HEADREV=%%i"
+set "BUILTREV="
+if exist "build\.clientrev" set /p BUILTREV=<"build\.clientrev"
+if not "%HEADREV%"=="%BUILTREV%" set "NEEDBUILD=1"
+if "%HEADREV%"=="" if not exist "build\.clientrev" set "NEEDBUILD=1"
+if defined NEEDBUILD (
+    echo Building client jar ^(rev %HEADREV%^)...
     call ant jar
     if errorlevel 1 exit /b 1
+    if not "%HEADREV%"=="" >"build\.clientrev" echo %HEADREV%
 )
 
 REM 0. The full resource pack (gameres\) must exist before the client

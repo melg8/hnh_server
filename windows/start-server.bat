@@ -4,6 +4,11 @@ REM Ports: 1871/tcp TLS auth, 1870/udp game, 1872/tcp resources HTTP.
 setlocal enabledelayedexpansion
 cd /d "%~dp0.."
 
+REM 0. Current source revision: drives the staleness guards below and
+REM    the HNH_REV log stamp (empty when git is unavailable).
+set "GITREV="
+for /f %%i in ('git rev-parse HEAD 2^>nul') do set "GITREV=%%i"
+
 REM 1. Build. Always run cargo: it is incremental, so on an up-to-date
 REM    source tree this is a sub-second no-op, but after a git pull it
 REM    guarantees the binary matches the code instead of silently
@@ -12,15 +17,22 @@ call "%~dp0build-server.bat"
 if errorlevel 1 exit /b 1
 
 REM 2. Generate gameres\ from lib\haven-res.jar + res\compiled overlay.
-REM    The hair.res probe regenerates stale packs that predate the base
-REM    hair/head aliases (missing ones break the client avatar).
-if not exist "gameres\gfx\borka\hair.res" (
-    echo Generating gameres resource pack...
+REM    Stale-pack guard: regenerate when the pack is missing OR when HEAD
+REM    moved since it was generated - a pack from an older tree silently
+REM    misses newer resources and breaks the client avatar.
+set "GENRES="
+if not exist "gameres\gfx\borka\hair.res" set "GENRES=1"
+set "GENREV="
+if exist "gameres\.genrev" set /p GENREV=<"gameres\.genrev"
+if not "%GITREV%"=="%GENREV%" set "GENRES=1"
+if defined GENRES (
+    echo Generating gameres resource pack ^(rev %GITREV%^)...
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0make-gameres.ps1"
     if errorlevel 1 (
         echo [ERROR] gameres generation failed.
         exit /b 1
     )
+    if not "%GITREV%"=="" >"gameres\.genrev" echo %GITREV%
 )
 
 REM 3. Ensure the save directory exists.
