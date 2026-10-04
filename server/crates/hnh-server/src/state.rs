@@ -200,6 +200,9 @@ pub struct Gobs {
     /// Generation counter for id reuse safety.
     pub gen: Vec<u32>,
     free: Vec<usize>,
+    /// Dirty-cell spatial index maintained by every mutator (spawn, kill,
+    /// set_pos); see visidx.rs for the skip-proof semantics.
+    pub vis: crate::visidx::VisIndex,
 }
 
 impl Gobs {
@@ -216,6 +219,7 @@ impl Gobs {
             mv: Vec::new(),
             gen: Vec::new(),
             free: Vec::new(),
+            vis: crate::visidx::VisIndex::default(),
         }
     }
 
@@ -255,6 +259,7 @@ impl Gobs {
         self.speed[slot] = speed;
         self.mv[slot] = None;
         self.frame[slot] = 0;
+        self.vis.insert(gob_id_from_slot(slot, self.gen[slot]), pos);
         gob_id_from_slot(slot, self.gen[slot])
     }
 
@@ -263,10 +268,19 @@ impl Gobs {
         if slot < self.alive.len() && self.alive[slot] {
             self.alive[slot] = false;
             self.mv[slot] = None;
+            self.vis.remove(id);
             true
         } else {
             false
         }
+    }
+
+    /// The single position mutator outside `spawn`: reindexes the
+    /// dirty-cell index so visibility skips stay provably correct.
+    pub fn set_pos(&mut self, slot: usize, pos: (i32, i32)) {
+        self.pos[slot] = pos;
+        self.vis
+            .reposition(gob_id_from_slot(slot, self.gen[slot]), pos);
     }
 
     #[inline]
@@ -397,6 +411,9 @@ pub struct SessionOut {
     pub cursor: Option<InvStack>,
     /// Map grids this client already holds (MAPDATA re-send targeting).
     pub grids_seen: HashSet<(i32, i32)>,
+    /// Last tick's player cell (dirty-cell skip decision; None = first
+    /// tick, which always scans).
+    pub vis_cell: Option<(i32, i32)>,
 }
 
 impl SessionOut {
@@ -501,6 +518,12 @@ pub struct Perf {
     /// Per-phase microseconds of the last tick: [movement, ai, combat,
     /// vitals, visibility]. Load-test hot-loop attribution.
     pub phase_us: [u128; 5],
+    /// Visibility optimization counters (cumulative): total gob distance
+    /// checks issued by scans, session-ticks skipped entirely, and the
+    /// live cell count. Log-time proof the index is active.
+    pub vis_gob_scans: u64,
+    pub vis_skipped: u64,
+    pub vis_cells: usize,
 }
 
 impl World {

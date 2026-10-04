@@ -544,6 +544,9 @@ impl Game {
             phase_combat_us = ph[2] as u64,
             phase_vitals_us = ph[3] as u64,
             phase_vis_us = ph[4] as u64,
+            vis_gob_scans = self.world.perf.vis_gob_scans,
+            vis_skipped = self.world.perf.vis_skipped,
+            vis_cells = self.world.perf.vis_cells,
             "perf"
         );
     }
@@ -586,6 +589,7 @@ impl Game {
             station_menu: None,
             cursor: None,
             grids_seen: HashSet::new(),
+            vis_cell: None,
         };
         // Character selection UI (session-lifecycle.md 3.1).
         let w_bg = out.new_wid("img");
@@ -1260,8 +1264,11 @@ impl Game {
     fn update_visibility(&mut self) {
         let mut updates: Vec<(SessionId, Vec<GobId>)> = Vec::new();
         let session_ids: Vec<SessionId> = self.sessions.keys().copied().collect();
-        // --- Phase A: pure distance filtering per session (parallel when
-        // multiple sessions are present; O(sessions x gobs) dominates). ---
+        // --- Phase A: skip decision + candidate positions. A session
+        // whose own cell did not change and whose retract square (the
+        // 2xVIEW_RADIUS bound the retract sweep enforces, expanded by one
+        // cell) intersects no dirty cell cannot have anything new to
+        // spawn, move, or retract: the whole scan is skipped.
         let candidates: Vec<(SessionId, (i32, i32))> = session_ids
             .iter()
             .filter_map(|sid| {
@@ -1270,19 +1277,43 @@ impl Game {
                 Some((*sid, self.world.gobs.pos[pslot]))
             })
             .collect();
-        let in_range: Vec<Vec<GobId>> = if self.workers > 1 && candidates.len() > 8 {
-            candidates
+        let mut to_scan: Vec<(SessionId, (i32, i32))> = Vec::new();
+        for (sid, (px, py)) in candidates {
+            let cell = crate::visidx::cell_of(px, py);
+            let moved = self.sessions[&sid].vis_cell != Some(cell);
+            if !moved
+                && !self
+                    .world
+                    .gobs
+                    .vis
+                    .any_dirty_in_view(px, py, VIEW_RADIUS * 2)
+            {
+                self.world.perf.vis_skipped += 1;
+                continue;
+            }
+            if let Some(out) = self.sessions.get_mut(&sid) {
+                out.vis_cell = Some(cell);
+            }
+            to_scan.push((sid, (px, py)));
+        }
+        // --- Phase A2: cell-bucketed candidate scan (parallel when
+        // multiple sessions are present). The cell query replaces the
+        // O(all gobs) sweep; the exact distance filter is unchanged. ---
+        let in_range: Vec<Vec<GobId>> = if self.workers > 1 && to_scan.len() > 8 {
+            to_scan
                 .par_iter()
                 .map(|(_sid, (px, py))| self.scan_visible(*px, *py))
                 .collect()
         } else {
-            candidates
+            to_scan
                 .iter()
                 .map(|(_sid, (px, py))| self.scan_visible(*px, *py))
                 .collect()
         };
+        self.world.perf.vis_gob_scans += in_range.iter().map(|v| v.len() as u64).sum::<u64>();
+        self.world.perf.vis_cells = self.world.gobs.vis.cell_count();
         // --- Phase B: serial application per session. ---
-        for ((sid, (px, py)), cand) in candidates.into_iter().zip(in_range) {
+        for ((sid, (px, py)), cand) in to_scan.into_iter().zip(in_range) {
             let mut moving: Vec<GobId> = Vec::new();
             for id in cand {
                 let Some(slot) = self.world.gobs.get(id) else {
@@ -1371,17 +1402,21 @@ impl Game {
     }
 
     /// Pure in-range gob scan around a point (no mutation; rayon-friendly).
+    /// In-range gob scan around a point: query the dirty-cell index for
+    /// the view cells, then apply the exact distance filter (cells are
+    /// coarse buckets; the filter preserves the old O(all gobs) result).
     fn scan_visible(&self, px: i32, py: i32) -> Vec<GobId> {
+        let candidates = self.world.gobs.vis.gobs_in_view(px, py, VIEW_RADIUS);
         let mut out = Vec::new();
-        for slot in 0..self.world.gobs.alive.len() {
-            if !self.world.gobs.alive[slot] {
+        for id in candidates {
+            let Some(slot) = self.world.gobs.get(id) else {
                 continue;
-            }
+            };
             let (gx, gy) = self.world.gobs.pos[slot];
             if (gx - px).abs() > VIEW_RADIUS || (gy - py).abs() > VIEW_RADIUS {
                 continue;
             }
-            out.push(gob_id_from_slot(slot, self.world.gobs.gen[slot]));
+            out.push(id);
         }
         out
     }
@@ -1466,7 +1501,7 @@ impl Game {
             step: 0,
         });
         self.world.gobs.frame[slot] += 1;
-        self.world.gobs.pos[slot] = (tx, ty); // logical position = destination
+        self.world.gobs.set_pos(slot, (tx, ty)); // logical position = destination
         let frame = self.world.gobs.frame[slot];
         // Send LINBEG to all sessions that see this gob.
         let viewers: Vec<SessionId> = self
@@ -3865,6 +3900,9 @@ impl Game {
         self.tick_farming();
         // Production stations: bounded by the live station set.
         self.tick_stations();
+        // The dirty set served this tick's visibility pass; spawn marks
+        // after this point (farming/station drops) dirty the next pass.
+        self.world.gobs.vis.clear_dirty();
         let perf = &mut self.world.perf;
         perf.active_sessions = self.sessions.len();
         perf.phase_us = phase_us;
@@ -3882,6 +3920,12 @@ impl Game {
                 continue;
             }
             if let Some(lm) = self.world.gobs.mv[slot] {
+                // Active mover: keep its cell dirty so viewers receive
+                // LINSTEP progress and boundary exits are caught.
+                self.world
+                    .gobs
+                    .vis
+                    .mark_mover(gob_id_from_slot(slot, self.world.gobs.gen[slot]));
                 if lm.step < lm.steps {
                     let new_step = (lm.step + 1).min(lm.steps);
                     self.world.gobs.mv[slot] = Some(LinMove {
@@ -3894,7 +3938,7 @@ impl Game {
                         // acked the move get a final static position.
                         self.world.gobs.mv[slot] = None;
                         self.world.gobs.frame[slot] += 1;
-                        self.world.gobs.pos[slot] = (lm.tx, lm.ty);
+                        self.world.gobs.set_pos(slot, (lm.tx, lm.ty));
                     }
                 }
             }
@@ -4062,7 +4106,7 @@ impl Game {
             step: 0,
         });
         self.world.gobs.frame[slot] += 1;
-        self.world.gobs.pos[slot] = (tx, ty);
+        self.world.gobs.set_pos(slot, (tx, ty));
         let frame = self.world.gobs.frame[slot];
         let viewers: Vec<SessionId> = self
             .sessions
@@ -4136,7 +4180,7 @@ impl Game {
                         step: 0,
                     });
                     self.world.gobs.frame[pslot] += 1;
-                    self.world.gobs.pos[pslot] = (tx, ty);
+                    self.world.gobs.set_pos(pslot, (tx, ty));
                     let frame = self.world.gobs.frame[pslot];
                     let viewers: Vec<SessionId> = self
                         .sessions
@@ -4466,7 +4510,7 @@ impl Game {
                 let gob = p.gob;
                 if let Some(slot) = self.world.gobs.get(gob) {
                     self.world.gobs.mv[slot] = None;
-                    self.world.gobs.pos[slot] = (550, 550);
+                    self.world.gobs.set_pos(slot, (550, 550));
                     self.world.gobs.hp[slot] = 50;
                     self.world.gobs.frame[slot] += 1;
                 }
@@ -4750,7 +4794,7 @@ mod tests {
         // Put the player on a known grass spot and populate its grid.
         let pgob = g.world.players[0].gob;
         let pslot = g.world.gobs.get(pgob).unwrap();
-        g.world.gobs.pos[pslot] = (550, 550);
+        g.world.gobs.set_pos(pslot, (550, 550));
         // The farming skill value gates planting; grant it the way the
         // sattr purchase would (the wire flow is covered by skillbot).
         g.world.players[0].attrs.insert("farming".to_owned(), 1);
@@ -4940,7 +4984,7 @@ mod tests {
         let (ax, ay) = g.world.gobs.pos[pslot];
         let pgob = g.world.players[0].gob;
         let pslot2 = g.world.gobs.get(pgob).unwrap();
-        g.world.gobs.pos[pslot2] = (ax + 5, ay);
+        g.world.gobs.set_pos(pslot2, (ax + 5, ay));
         info!(?ax, ?ay, "teleported player next to predator");
         // Run ticks until the engagement opens.
         let mut fought = false;
@@ -5023,7 +5067,7 @@ mod tests {
         g.world.animal_gobs.retain(|&id| id == keep);
         let pgob = g.world.players[0].gob;
         let pslot = g.world.gobs.get(pgob).unwrap();
-        g.world.gobs.pos[pslot] = (ax + 5, ay);
+        g.world.gobs.set_pos(pslot, (ax + 5, ay));
         let mut killed = false;
         let mut saw_damage = false;
         // Track the predator currently engaged (the dense pack may swap
@@ -5031,7 +5075,7 @@ mod tests {
         for tick in 0..3000 {
             if tick % 4 == 0 {
                 // Hold position next to the predator (stationary player).
-                g.world.gobs.pos[pslot] = (ax + 5, ay);
+                g.world.gobs.set_pos(pslot, (ax + 5, ay));
             }
             g.tick();
             // The target may vanish (killed): check both paths.

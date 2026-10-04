@@ -20,6 +20,7 @@ mod res_http;
 mod resources;
 mod skills;
 mod state;
+mod visidx;
 
 use std::sync::Arc;
 use std::time::Duration;
