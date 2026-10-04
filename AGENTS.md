@@ -172,6 +172,42 @@ If the change touches `unsafe` code, additionally run `cargo miri test` for
 the affected crate. If you cannot run the toolchain in your environment, state
 that explicitly in your summary instead of claiming success.
 
+## MANDATORY: Verify Client-Visible Changes on the REAL Client
+
+Every change that can affect what the user sees or does in the game
+(bootstrap, widgets, movement, combat, resources, rendering) MUST be
+verified end to end in YOUR environment on the REAL GL client before you
+claim the fix works. Headless probes (UiProbe, wire-level python
+scripts) are necessary but NOT sufficient: they cannot catch render-path
+deaths, resource-load failures on real sprites, widget-chain freezes,
+or input dispatch problems - each of which has already shipped a
+"fixed" bug to the user that was not fixed (frozen character, blank
+portrait, black screen).
+
+The committed harness (`scripts/jogl/`) boots the real client in an
+agent sandbox:
+
+```bash
+# One-time per sandbox (downloads Temurin 8, JOGL 1.1.1 natives, X11
+# libs, Ant; builds DriveAgent). Idempotent.
+scripts/jogl/deploy-agent-env.sh
+
+# Full loop: fresh server + Xvfb + real client, login through the REAL
+# widget chain, a real AWT Robot map click, and MOVEMENT verdicts read
+# from the client's own gob position:
+scripts/jogl/run-real-client-e2e.sh <username> <tag>
+```
+
+`MOVEMENT: MOVED` (twice: two clicks) is the pass line; the client log
+is at `/tmp/client_<tag>.log`, the server trace at `/tmp/server_<tag>.log`.
+For visual verification (portrait, avatar, rendering) the agent saves
+full-window screenshots to `/tmp/client_world_*.png` - READ them, do not
+assume. The client debug flag `-Dhaven.debugclicks=true` traces which
+branch consumes a map click when you need to debug input handling.
+
+Rule of thumb: a fix is done when the wire test passes AND the real
+client demonstrates the behavior. Record both evidences in HANDOFF.md.
+
 ## Commit Discipline
 
 - Small, focused commits with clear English messages (imperative mood).
