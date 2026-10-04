@@ -1289,3 +1289,40 @@ variants) -> headless avatar.
 - Server exited cleanly (seed 42).
 - See HANDOFF.md top section for current state.
 
+
+## 2026-10-04 - Crop farming implemented (plow/plant/grow/harvest) + two critical wire fixes
+
+Leaf-1.1.1 of the .unlazy/session13 plan (tree depth 99 requested; honest
+decomposition is depth 3, stated in the plan). Commit f1e6f38.
+
+- Implemented full crop farming per farming-and-plants.md: farm.rs crop
+  registry (8 crops), quality roll, soil quality; plow pagina ->
+  furrowed tile (PLOWED tile id, grid overrides persisted in save v2,
+  MAPDATA re-send to holders); take -> cursor -> itemact planting;
+  staged growth tick (OD_RES sdt updates); harvest flower menu with
+  per-stage yields; tilth decay; crops/tilth/overrides persisted
+  (save v1 files stay readable). HNH_CROP_TIME_SCALE env (default 60)
+  scales legacy hours; tests use 1e7.
+- CRITICAL fix 1 (interactive clicks): on_map_click read modflags as
+  button and used the screen coord c0 as the world target - every map
+  click only worked when Shift was held and moved the player to
+  screen-space coords. Now button = first int, target = second coord
+  (mc). Same fix for mapview itemact.
+- CRITICAL fix 2 (the reported missing avatar): update_visibility
+  double-inserted gobs into the session visible set, so stream_spawn
+  skipped the spawn block - the client NEVER received its own gob
+  (no avatar layers). Regression test added
+  (player_gob_is_streamed_with_buddy).
+- Also fixed: item "take" was routed to the inv widget (client sends it
+  from the item widget); cursor stacks were lost on log-out (now
+  returned to inventory before persist); crop_at registry cleanup on
+  harvest.
+- Starter kit now includes 5 Wheat + 5 Carrot seeds so the farming loop
+  is playable immediately; plow pagina pushed to every session.
+- Verified: 47 cargo tests green, clippy -D warnings clean, fmt clean;
+  wire e2e server/scripts/test_farming.py: FARMING FLOW: OK (auto-starts
+  a fast-clock isolated server, plants/grows/harvests, asserts yields).
+- NEXT (handed off, leaf-1.1.2/1.1.3 WAITING in .unlazy/session13):
+  party + chat relay (wire e2e test_party_chat.py planned), skill/LP
+  economy gating planting (farming skill cost table), then building
+  placement/stations and the dirty-cell visibility optimization.
