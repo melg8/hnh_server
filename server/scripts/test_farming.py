@@ -12,7 +12,10 @@ Auto-starts the server binary on an isolated save with a fast crop clock
 otherwise reuses the already-running server (crop clock then follows its
 configuration, so stages advance in minutes rather than milliseconds).
 
-Modes: default runs the full plant-grow-harvest flow.
+Modes: default runs the full plant-grow-harvest flow; `skillbot` verifies
+the skill gate (planting refused without the Farming skill value, purchased
+via the char sheet sattr contract at the legacy cost, then planting works,
+unknown buys refused).
 """
 import os
 import socket
@@ -26,6 +29,7 @@ BIN = os.path.join(REPO, "server", "target", "release", "hnh-server")
 
 LIST_END, LIST_INT, LIST_STR, LIST_COORD = 0, 1, 2, 3
 MSG_REL, MSG_MAPDATA, MSG_OBJDATA = 1, 5, 6
+RMSG_WDGMSG, RMSG_RESID, RMSG_CATTR = 1, 6, 9
 OD_MOVE, OD_RES, OD_LINBEG, OD_LINSTEP, OD_BUDDY, OD_END = 1, 2, 3, 4, 15, 255
 OD_LAYERS, OD_HEALTH = 6, 14
 
@@ -91,6 +95,7 @@ def ensure_server():
         pass
     env = dict(os.environ)
     env["HNH_CROP_TIME_SCALE"] = "10000000"
+    env["HNH_LP_RATE"] = "1000"
     env["HNH_SAVE_FILE"] = os.path.join(REPO, "server", "target", "farm-test-save.json")
     proc = subprocess.Popen(
         [BIN, "--seed", "42"],
@@ -125,6 +130,11 @@ class FarmClient:
         self.charlist_id = None
         self.mapview_id = None
         self.scm_id = None
+        self.chr_id = None
+        self.chat_id = None
+        self.exp_seen = None
+        self.attrs = {}  # cattr name -> compiled value
+        self.chat_lines = []  # (text, color or None)
         self.items = {}  # wid -> tooltip
         self.resids = {}  # wire id -> name
         self.gobs = {}  # gobid -> {"res": name, "sdt": bytes, "pos": (x,y)}
@@ -234,15 +244,39 @@ class FarmClient:
                         self.sock.sendto(bytes([4]) + le32(gx) + le32(gy), self.server)
             elif name == "scm":
                 self.scm_id = wid
+            elif name == "chr":
+                self.chr_id = wid
+            elif name == "slenchat":
+                self.chat_id = wid
             elif name == "item" and len(args) >= 4:
                 # args: [res, ql, flags, (drag coord), tooltip, num]
                 tooltip = args[3] if isinstance(args[3], str) else ""
                 self.items[wid] = tooltip
-        elif t == 6:  # RESID: u16 wire, str name, u16 ver
+        elif t == RMSG_WDGMSG:
+            wid = struct.unpack("<H", body[0:2])[0]
+            nend = body.index(0, 2)
+            name = body[2:nend].decode()
+            args = list(self.parse_args(body[nend + 1 :]))
+            if name == "exp" and wid == self.chr_id:
+                self.exp_seen = args[0] if args else None
+            elif name == "log" and wid == self.chat_id:
+                color = next((a for a in args if isinstance(a, tuple)), None)
+                self.chat_lines.append((args[0] if args else "", color))
+        elif t == RMSG_RESID:  # RESID: u16 wire, str name, u16 ver
             wire = struct.unpack("<H", body[0:2])[0]
             end = body.index(0, 2)
             name = body[2:end].decode()
             self.resids[wire] = name
+        elif t == RMSG_CATTR:
+            # entries (string name, i32 base, i32 compiled) until eom
+            off = 0
+            while off < len(body):
+                nend = body.index(0, off)
+                nm = body[off:nend].decode()
+                off = nend + 1
+                base, comp = struct.unpack("<ii", body[off : off + 8])
+                off += 8
+                self.attrs[nm] = comp
 
     def parse_args(self, buf):
         off = 0
@@ -383,11 +417,35 @@ class FarmClient:
         }
 
 
+def buy_farming_value(c):
+    """Raise the Farming skill value to 1 through the real char sheet
+    contract (slen 'chr' -> sattr pairs). Returns the LP balance seen at
+    sheet open."""
+    slen_wid = next(w for w, n in c.widgets.items() if n == "slen")
+    c.wdgmsg(slen_wid, "chr", bytes([LIST_END]))
+    ok = c.wait_for(lambda: c.chr_id is not None and c.exp_seen is not None, 5)
+    assert ok, "char sheet never opened (widgets=%s)" % sorted(set(c.widgets.values()))
+    exp_before = c.exp_seen
+    c.wdgmsg(
+        c.chr_id,
+        "sattr",
+        bytes([LIST_STR]) + havstr("farming")
+        + bytes([LIST_INT]) + le32(1)
+        + bytes([LIST_END]),
+    )
+    ok = c.wait_for(lambda: c.attrs.get("farming", 0) >= 1, 5)
+    assert ok, "farming value never raised (attrs=%s)" % (c.attrs,)
+    return exp_before
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "farmbot"
     server_proc = ensure_server()
     try:
-        run(mode)
+        if mode == "skillbot":
+            run_skillbot()
+        else:
+            run(mode)
     finally:
         if server_proc is not None:
             server_proc.terminate()
@@ -421,6 +479,11 @@ def run(mode):
         c.pump(0.3)
     c.wait_for(lambda: any(n == "inv" for n in c.widgets.values()), 4)
     print("world entry: player gob", c.player_gob)
+
+    # The Farming skill value gates planting: buy it through the char
+    # sheet before the plow/plant loop (legacy cost 100 for point 1).
+    buy_farming_value(c)
+    print("farming skill value raised via sattr")
 
     ppos = c.gobs[c.player_gob]["pos"] or (0, 0)
     ptile = (ppos[0] // 11, ppos[1] // 11)
@@ -495,6 +558,120 @@ def run(mode):
     assert ok, "no yield item landed in inventory"
     print("harvest yields:", sorted(set(new_yields())))
     print("FARMING FLOW: OK")
+
+
+def run_skillbot():
+    """Skill-gate verification: planting refused without the Farming skill
+    value; sattr purchase at the exact legacy cost; planting then works;
+    unknown catalog buys are refused."""
+    username = "skill%d%d" % (int(time.time()) % 100000, os.getpid() % 1000)
+    c = FarmClient(username)
+    c.connect()
+    print("session accepted")
+    c.pump(1.5)
+    c.play(username)
+    ok = c.wait_for(lambda: c.mapview_id is not None and c.player_gob is not None, 12)
+    assert ok or c.player_gob is not None, "world entry incomplete"
+    assert c.chat_id is not None, "Area Chat widget missing"
+    slen_wid = next(w for w, n in c.widgets.items() if n == "slen")
+    for _ in range(4):
+        c.wdgmsg(slen_wid, "inv", bytes([LIST_END]))
+        c.pump(0.3)
+    c.wait_for(lambda: any(n == "inv" for n in c.widgets.values()), 4)
+
+    ppos = c.gobs[c.player_gob]["pos"] or (0, 0)
+    ptile = (ppos[0] // 11, ppos[1] // 11)
+    wheat_item = c.find_item("Wheat Seeds")
+    assert wheat_item is not None, "starter wheat seeds missing"
+
+    def plant_gobs():
+        return {
+            g
+            for g, info in c.gobs.items()
+            if (info["res"] or "").startswith("gfx/terobjs/plants/")
+        }
+
+    def tile_free(tx, ty):
+        # Skip tiles a previous run's persisted crop still occupies.
+        for g in c.gobs.values():
+            pos = g["pos"]
+            if pos and (pos[0] // 11, pos[1] // 11) == (tx, ty):
+                if (g["res"] or "").startswith("gfx/terobjs/plants/"):
+                    return False
+        return True
+
+    def plant_at(tile):
+        """Plow + act with the cursor seed; returns the set of NEW plant
+        gobs that appeared (diff against the pre-action snapshot). The
+        cursor persists between attempts, so a re-take is only sent when
+        the previous attempt could not have left a seed armed."""
+        before = plant_gobs()
+        c.arm_plow()
+        c.pump(0.25)
+        c.click_tile(tile)
+        c.pump(0.3)
+        if not cursor_held:
+            c.take_item(wheat_item)
+            c.pump(0.25)
+        c.map_itemact(tile)
+        c.wait_for(lambda: len(plant_gobs()) > len(before), 2.5)
+        return plant_gobs() - before
+
+    # The cursor is armed by the first take and stays armed: the refusal
+    # path consumes nothing, and a successful plant consumes exactly one
+    # unit out of the 5-seed stack.
+    cursor_held = False
+
+    # --- 1. planting is refused while the farming value is 0 -------------
+    tile = next((tx, ty) for dx in range(1, 6) for tx, ty in [(ptile[0] + dx, ptile[1])] if tile_free(tx, ty))
+    new_crops = plant_at(tile)
+    cursor_held = True  # the take was sent; the refusal consumed nothing
+    assert not new_crops, (
+        "planting must be refused without the Farming skill (spawned=%s)"
+        % (new_crops,)
+    )
+    refused = any("Farming skill" in t for t, _ in c.chat_lines)
+    assert refused, "no refusal system line arrived (lines=%s)" % (c.chat_lines,)
+    print("gate: planting refused with a colored system line")
+
+    # --- 2. buy the farming point through the char sheet ------------------
+    exp_before = buy_farming_value(c)
+    print("farming purchased; LP", exp_before, "->", c.exp_seen)
+    # Legacy curve: one point from 0 costs exactly 100 LP. Fast LP accrual
+    # (HNH_LP_RATE) may add a few points between the two reads.
+    assert exp_before - 100 <= c.exp_seen <= exp_before - 40, (
+        "sattr charge off the legacy curve: %s -> %s" % (exp_before, c.exp_seen)
+    )
+
+    # The cursor still holds the seed (the gate consumed nothing).
+    tile2 = next((tx, ty) for dx in range(1, 8) for tx, ty in [(ptile[0] + dx, ptile[1])] if tile_free(tx, ty) and (tx, ty) != tile)
+    c.arm_plow()
+    c.pump(0.25)
+    c.click_tile(tile2)
+    c.pump(0.3)
+    c.map_itemact(tile2)
+    ok = c.wait_for(
+        lambda: any(
+            (r or "").startswith("gfx/terobjs/plants/")
+            for r in (info["res"] for info in c.gobs.values())
+        ),
+        4.0,
+    )
+    assert ok, "planting still refused after buying the Farming skill"
+    print("gate lifted: crop gob spawned after purchase")
+
+    # --- 3. unknown catalog buy is refused --------------------------------
+    c.wdgmsg(
+        c.chr_id,
+        "buy",
+        bytes([LIST_STR]) + havstr("nosuchskill") + bytes([LIST_END]),
+    )
+    ok = c.wait_for(
+        lambda: any("unknown to this server" in t for t, _ in c.chat_lines), 3
+    )
+    assert ok, "unknown skill buy was not refused (lines=%s)" % (c.chat_lines,)
+    print("unknown buy refused with a system line")
+    print("SKILL GATE: OK")
 
 
 if __name__ == "__main__":

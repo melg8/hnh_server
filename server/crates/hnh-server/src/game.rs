@@ -66,6 +66,9 @@ pub struct Game {
     /// Number of parallel grid-owner workers used by the tick (data-parallel
     /// intent computation over SoA columns; apply stays on the game task).
     pub workers: usize,
+    /// Milliseconds of online time per granted LP (skills.rs accrual;
+    /// precomputed once from HNH_LP_RATE, u64::MAX = disabled).
+    lp_ms_per_lp: u64,
 }
 
 impl Game {
@@ -175,6 +178,15 @@ impl Game {
             save,
             fep,
             workers: 1,
+            lp_ms_per_lp: {
+                // HNH_LP_RATE scales the passive accrual (skills.rs);
+                // malformed values disable accrual rather than wedge boot.
+                let rate = std::env::var("HNH_LP_RATE")
+                    .ok()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(1.0);
+                crate::skills::ms_per_lp(rate)
+            },
         }
     }
 
@@ -498,6 +510,11 @@ impl Game {
                 self.on_chat_msg(sid, line);
             }
             (Some("pv"), "leave") => self.party_leave(sid),
+            (Some("chr"), "buy") => {
+                let name = args.first().and_then(|a| a.as_str()).unwrap_or("");
+                self.on_skill_buy(sid, name);
+            }
+            (Some("chr"), "sattr") => self.on_skill_attrs(sid, &args),
             _ => {
                 trace!(sid, wid, name, "unhandled wdgmsg");
             }
@@ -591,6 +608,11 @@ impl Game {
                     label,
                 });
             }
+            let restored_skills: HashSet<&'static str> = saved
+                .skills
+                .iter()
+                .filter_map(|s| crate::skills::catalog_get(s).map(|d| d.name))
+                .collect();
             (
                 saved.pos,
                 saved.hp,
@@ -599,10 +621,11 @@ impl Game {
                 saved.lp,
                 saved.attrs.clone(),
                 restored_inv,
+                restored_skills,
             )
         });
-        let (spawn_pos, hp, energy, stamina, lp, attrs, inv) = match &saved_state {
-            Some((pos, hp, energy, stamina, lp, attrs, inv)) => {
+        let (spawn_pos, hp, energy, stamina, lp, attrs, inv, restored_skills) = match &saved_state {
+            Some((pos, hp, energy, stamina, lp, attrs, inv, skills)) => {
                 info!(sid, %name, "restoring persisted character");
                 (
                     *pos,
@@ -612,6 +635,7 @@ impl Game {
                     *lp,
                     attrs.clone(),
                     inv.clone(),
+                    skills.clone(),
                 )
             }
             None => {
@@ -632,6 +656,7 @@ impl Game {
                     100,
                     fresh,
                     Vec::new(),
+                    HashSet::new(),
                 )
             }
         };
@@ -657,6 +682,8 @@ impl Game {
             energy,
             stamina,
             lp,
+            lp_carry_ms: 0,
+            skills: restored_skills,
             attrs,
             inv,
             fep: crate::craft::FepState::default(),
@@ -1293,6 +1320,8 @@ impl Game {
                         p.lp += 5;
                     }
                     self.push_cattr(sid);
+                    // Refresh the char sheet LP balance if it is open.
+                    self.push_lp_msgs(sid);
                 } else {
                     // Tree exhausted: remove and leave a stump.
                     let pos = self.world.gobs.pos[tslot];
@@ -1310,6 +1339,8 @@ impl Game {
                     p.lp += 3;
                 }
                 self.push_cattr(sid);
+                // Refresh the char sheet LP balance if it is open.
+                self.push_lp_msgs(sid);
             }
             Kind::Drop { .. } => {
                 // Pick up: move into inventory.
@@ -1690,6 +1721,150 @@ impl Game {
             out.send(wdg::party(&[wdg::PartyRec::List(&[])]));
             self.system_line(s, "You left the party.");
         }
+    }
+
+    /// Widget id of the session's open character sheet, if any.
+    fn chr_window(&self, sid: SessionId) -> Option<u16> {
+        self.sessions.get(&sid)?.chr_window()
+    }
+
+    /// Push the LP balance + skill lists to an open character sheet
+    /// (CharWnd `exp`/`nsk`/`psk` uimsgs). Only catalog names whose pack
+    /// resource exists are pushed; `nsk` carries (name, cost) pairs of
+    /// everything the character does not own yet.
+    fn push_lp_msgs(&mut self, sid: SessionId) {
+        let Some(wid) = self.chr_window(sid) else {
+            return;
+        };
+        let Some(pidx) = self.world.by_session.get(&sid).copied() else {
+            return;
+        };
+        let p = &self.world.players[pidx];
+        let lp = p.lp;
+        let mut owned: Vec<&'static str> = p.skills.iter().copied().collect();
+        owned.sort_unstable();
+        let available: Vec<(&'static str, i32)> = crate::skills::CATALOG
+            .iter()
+            .filter(|s| !p.skills.contains(s.name))
+            .map(|s| (s.name, s.cost))
+            .collect();
+        let Some(out) = self.sessions.get(&sid) else {
+            return;
+        };
+        out.send(wdg::wdgmsg(wid, "exp", &[ListVal::I(lp)]));
+        let nsk_args: Vec<ListVal> = available
+            .iter()
+            .flat_map(|(n, c)| [ListVal::S(n.to_string()), ListVal::I(*c)])
+            .collect();
+        out.send(wdg::wdgmsg(wid, "nsk", &nsk_args));
+        let psk_args: Vec<ListVal> = owned.iter().map(|n| ListVal::S(n.to_string())).collect();
+        out.send(wdg::wdgmsg(wid, "psk", &psk_args));
+    }
+
+    /// chr "buy": purchase a non-incrementable skill from the catalog.
+    fn on_skill_buy(&mut self, sid: SessionId, name: &str) {
+        let Some(pidx) = self.world.by_session.get(&sid).copied() else {
+            return;
+        };
+        let outcome = {
+            let p = &mut self.world.players[pidx];
+            crate::skills::buy(&mut p.skills, &mut p.lp, name)
+        };
+        match outcome {
+            Ok(def) => {
+                info!(sid, skill = def.name, "skill purchased");
+                self.system_line(sid, &format!("You learned {}.", def.label));
+            }
+            Err(crate::skills::BuyError::Unknown) => {
+                debug!(sid, skill = name, "buy refused: unknown skill");
+                self.system_line(sid, "That skill is unknown to this server.");
+            }
+            Err(crate::skills::BuyError::Owned) => {
+                self.system_line(sid, "You already know that skill.");
+            }
+            Err(crate::skills::BuyError::TooExpensive) => {
+                self.system_line(sid, "Not enough learning points.");
+            }
+        }
+        self.push_lp_msgs(sid);
+    }
+
+    /// chr "sattr": raise incrementable skill values. The client sends
+    /// EVERY SAttr as (name, targetBaseValue) pairs on each Buy click —
+    /// untouched ones carry their current value and are skipped here.
+    /// The batch is priced first and applied all-or-nothing (the client
+    /// prediction is advisory; the server is authoritative).
+    fn on_skill_attrs(&mut self, sid: SessionId, args: &[hnh_proto::ListArg]) {
+        let mut pairs: Vec<(&str, i32)> = Vec::new();
+        let mut it = args.iter();
+        while let (Some(nm), Some(tv)) = (it.next(), it.next()) {
+            if let (Some(nm), Some(tv)) = (nm.as_str(), tv.as_int()) {
+                pairs.push((nm, tv));
+            }
+        }
+        let Some(pidx) = self.world.by_session.get(&sid).copied() else {
+            return;
+        };
+        let mut total: i64 = 0;
+        let mut plan: Vec<(&str, i32, i32)> = Vec::new();
+        for (nm, target) in pairs {
+            if !crate::skills::SKILL_VALUES.contains(&nm) {
+                self.system_line(sid, "Unknown skill value.");
+                return;
+            }
+            let from = self.world.players[pidx].attrs.get(nm).copied().unwrap_or(0);
+            if target == from {
+                continue;
+            }
+            let Some(cost) = crate::skills::sattr_cost(from, target) else {
+                self.system_line(sid, "That skill value is out of range.");
+                return;
+            };
+            total += cost as i64;
+            plan.push((nm, from, target));
+        }
+        let wallet = self.world.players[pidx].lp as i64;
+        if total > wallet {
+            self.system_line(sid, "Not enough learning points.");
+            // Refresh the balance the client priced the batch against.
+            self.push_lp_msgs(sid);
+            return;
+        }
+        // i64 total of <= 11 bounded costs always fits i32; try_from keeps
+        // the numeric-safety rule explicit.
+        let total = i32::try_from(total).unwrap_or(i32::MAX);
+        {
+            let p = &mut self.world.players[pidx];
+            for (nm, _from, to) in &plan {
+                p.attrs.insert(nm.to_string(), *to);
+            }
+            p.lp = p.lp.saturating_sub(total);
+        }
+        if !plan.is_empty() {
+            info!(
+                sid,
+                spent = total,
+                raises = plan.len(),
+                "skill values raised"
+            );
+        }
+        // Re-push the FULL attribute snapshot: CharWnd SAttr widgets
+        // re-render when their cattr entry updates, and skill values just
+        // changed (push_cattr only carries vitals).
+        let snapshot = self.char_attr_snapshot(sid);
+        let Some(out) = self.sessions.get(&sid) else {
+            return;
+        };
+        out.send(wdg::cattr(&snapshot));
+        self.push_lp_msgs(sid);
+    }
+
+    /// True when the player's incrementable skill value `name` is >= `min`.
+    fn has_skill_value(&self, sid: SessionId, name: &str, min: i32) -> bool {
+        self.world
+            .player(sid)
+            .map(|p| p.attrs.get(name).copied().unwrap_or(0) >= min)
+            .unwrap_or(false)
     }
 
     fn start_fight(&mut self, sid: SessionId, target: GobId, species: Species) {
@@ -2126,6 +2301,17 @@ impl Game {
 
     /// Plant one seed unit from the cursor on a plowed, empty tile.
     fn plant_seed(&mut self, sid: SessionId, spec: usize, (tx, ty): (i32, i32), cursor: InvStack) {
+        // The Farming skill value gates planting (learning-points-and-
+        // curiosity.md server notes). The seed stays on the cursor so the
+        // player can re-act after learning the skill.
+        if !self.has_skill_value(sid, "farming", 1) {
+            debug!(sid, tx, ty, "plant refused: farming skill value 0");
+            self.system_line(
+                sid,
+                "You need the Farming skill (Character Sheet -> Skill Values) to plant.",
+            );
+            return;
+        }
         if !self.world.tilth.contains_key(&(tx, ty)) {
             debug!(sid, tx, ty, "plant refused: tile not plowed");
             return;
@@ -2827,6 +3013,9 @@ impl Game {
                 w
             }
         };
+        // LP balance + skill lists ride the sheet every time it opens
+        // (the client prices purchases against the pushed exp balance).
+        self.push_lp_msgs(sid);
         let _ = wid;
         self.push_food_msg(sid);
     }
@@ -3428,6 +3617,10 @@ impl Game {
         let tick = self.world.tick;
         for pidx in 0..self.world.players.len() {
             let p = &mut self.world.players[pidx];
+            // Passive LP accrual (skills.rs): the legacy curiosity study
+            // system is not implemented yet; the trickle is documented in
+            // learning-points-and-curiosity.md server notes.
+            crate::skills::accrue(&mut p.lp, &mut p.lp_carry_ms, TICK_MS, self.lp_ms_per_lp);
             // Energy decays ~1 per 30 s; hp regen when energy is high.
             if tick.is_multiple_of(300) {
                 p.energy = (p.energy - 1).max(0);
@@ -3740,6 +3933,9 @@ mod tests {
         let pgob = g.world.players[0].gob;
         let pslot = g.world.gobs.get(pgob).unwrap();
         g.world.gobs.pos[pslot] = (550, 550);
+        // The farming skill value gates planting; grant it the way the
+        // sattr purchase would (the wire flow is covered by skillbot).
+        g.world.players[0].attrs.insert("farming".to_owned(), 1);
         g.on_mapreq(1, (0, 0));
         // Find a grass tile near the player (avoid trees/stones/animals).
         let mut tile = None;

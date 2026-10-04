@@ -31,6 +31,11 @@ pub struct SavedPlayer {
     /// as empty strings. Kept additive so v1 files stay readable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inv_labels: Vec<String>,
+    /// Purchased non-incrementable skills as `gfx/hud/skills/` basenames
+    /// (v2, additive; absent in v1 saves -> empty). Incrementable skill
+    /// values live in `attrs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
 }
 
 /// Top-level save container. Bump VERSION on incompatible changes.
@@ -181,6 +186,7 @@ impl SaveStore {
                 attrs: p.attrs.clone(),
                 inv: inv_named,
                 inv_labels,
+                skills: p.skills.iter().map(|s| s.to_string()).collect(),
             },
         );
     }
@@ -223,6 +229,8 @@ mod tests {
                 energy: 55,
                 stamina: 99,
                 lp: 12,
+                lp_carry_ms: 0,
+                skills: std::collections::HashSet::new(),
                 attrs: HashMap::from([("str".to_owned(), 14)]),
                 inv: Vec::new(),
                 fep: crate::craft::FepState::default(),
@@ -261,6 +269,8 @@ mod tests {
                 energy: 10,
                 stamina: 10,
                 lp: 0,
+                lp_carry_ms: 0,
+                skills: std::collections::HashSet::new(),
                 attrs: HashMap::new(),
                 inv: Vec::new(),
                 fep: crate::craft::FepState::default(),

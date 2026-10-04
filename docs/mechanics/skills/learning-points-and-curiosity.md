@@ -172,6 +172,46 @@ The implementing server must model, persist, and expose:
 10. **Persistence**: LP balance, expmod, attributes, skill values, learned skills, study slots (item identity, quality, elapsed), discovered-set, per character and family line, in the server database; the client holds none of it.
 11. **Cheat surface**: the client predicts costs and gains for display only. Never trust client-side arithmetic: recompute attention sums, duplicate checks, cost curves, and LP grants server-side. Note the client already refuses to forward messages from unbound `Item`/`Inventory` widgets (`CharWnd.wdgmsg`), but the server must still validate every `sattr`/`buy`/item-move it receives.
 
+### Implemented state (this server)
+
+- **Wallet + skill values + catalog are live.** `skills.rs` owns the 11
+  client-hardcoded skill-value names, the legacy sattr cost curve
+  (`sattr_cost`: point from 0 costs 100; the bulk closed form
+  `50*(k+n)*n`, `k=2*from+1`, matches `SAttr` exactly; no-op pairs cost 0
+  so the client's send-every-SAttr batch stays valid), and an 8-entry
+  non-incrementable catalog (names restricted to `gfx/hud/skills/*.res`
+  verified present in `lib/haven-res.jar`; costs are server-defined data,
+  see the open questions).
+- **Wire flow**: opening the character sheet pushes `exp`, `nsk`, `psk`;
+  `sattr` is priced first and applied all-or-nothing (rejects unknown
+  names, targets below the current value, anything past 100, and
+  underfunded batches, refreshing `exp` so the client re-prices); `buy`
+  charges via the catalog and re-pushes `exp`/`nsk`/`psk`. Refusals are
+  delivered as Area Chat system lines (communication.md).
+- **After `sattr`, the FULL CATTR snapshot is re-pushed** (not just
+  vitals): `SAttr` widgets re-render from their `cattr` entry, so a
+  vitals-only push would leave the sheet showing stale values. Caught by
+  the wire e2e (`skillbot`), not by review.
+- **Planting gate**: planting a seed on a plowed tile requires the
+  `farming` skill value >= 1 (attrs key `farming`; fresh chars have no
+  entry, i.e. 0). Refusal keeps the cursor stack and sends the system
+  line "You need the Farming skill ...". One point from 0 costs exactly
+  100 LP - the fresh-character wallet - so the gate is passable out of
+  the box.
+- **Passive LP accrual (deliberate deviation)**: the curiosity study
+  system is not implemented yet, so the server grants a trickle of 2 LP
+  per online minute (`skills::accrue`, integer-millisecond carry;
+  remainder resets at the i32::MAX saturation point). `HNH_LP_RATE`
+  multiplies the rate (0 or malformed disables accrual; the wire e2e
+  uses 1000 to compress time). Action LP from tree/stone harvesting
+  (implemented earlier) also refreshes the open sheet's `exp`.
+- **Persistence**: `SavedPlayer.skills` (v2 additive, basenames) and the
+  `attrs` map (skill values) round-trip; unknown saved skill names from
+  older catalogs load as nothing.
+- **Deferred** (blueprint items above still open): study/curio engine,
+  acquisition LP and the family-line discovered set, property, and any
+  expmod/attention interactions.
+
 ## Open questions
 
 - **Did legacy curiosities cost Experience to study?** The current-game RoB table has an "Experience Cost" column and the Curiosity page says study "allows hearthlings to gain Learning Points at the cost of Experience Points"; the legacy client (`curio.conf`, `CuriosityStat`, tooltips) shows no EXP cost anywhere. Determine by inspecting legacy server behavior/records or 2011-2016 forum threads; if yes, the server needs an additional per-attribute or global EXP pool that study consumes.

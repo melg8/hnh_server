@@ -17,6 +17,7 @@ mod party;
 mod persist;
 mod res_http;
 mod resources;
+mod skills;
 mod state;
 
 use std::sync::Arc;

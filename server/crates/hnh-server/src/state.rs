@@ -301,6 +301,11 @@ pub struct Player {
     pub stamina: i32,
     /// Learning points (LP currency).
     pub lp: i32,
+    /// Fractional LP accrual carry (ms toward the next point; see
+    /// `skills::accrue`).
+    pub lp_carry_ms: u64,
+    /// Purchased non-incrementable skills (`gfx/hud/skills/` basenames).
+    pub skills: HashSet<&'static str>,
     /// Base attributes (docs: str/agi/int/vit/con/psy/emp...).
     pub attrs: HashMap<String, i32>,
     /// Inventory stacks.
