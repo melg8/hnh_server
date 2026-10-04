@@ -102,20 +102,17 @@ async fn handle(mut stream: TcpStream, dir: Arc<PathBuf>) -> anyhow::Result<()> 
     // (gfx/tiles/moor -> gfx/tiles/moor.res) and nested (->
     // gfx/tiles/moor/moor.res); the shipped pack stores base tilesets
     // nested, so both candidates must be tried or the client renders
-    // tileless ground and headless avatars.
-    let primary = dir.join(format!("{path}.res"));
-    let nested = match path.rsplit('/').next() {
-        Some(base) if !base.is_empty() => Some(dir.join(format!("{path}/{base}.res"))),
-        _ => None,
-    };
-    let (file, served) = if primary.exists() {
-        (primary, path.clone())
-    } else if nested.as_ref().is_some_and(|f| f.exists()) {
-        let f = nested.unwrap();
-        let served = format!("{path} (nested)");
-        (f, served)
-    } else {
-        (primary, path.clone())
+    // tileless ground and headless avatars. The SAME resolution backs
+    // the version announcements (resources::file_version) - the two
+    // must never disagree or the client rejects the download with
+    // "Wrong res version".
+    let (file, served) = {
+        let f = crate::resources::resolve_res_file(&dir, &path);
+        if f == dir.join(format!("{path}.res")) {
+            (f, path.clone())
+        } else {
+            (f, format!("{path} (nested)"))
+        }
     };
     match tokio::fs::read(&file).await {
         Ok(data) => {

@@ -17,6 +17,30 @@ pub fn init_res_dir(dir: PathBuf) {
     let _ = VER_CACHE.set(std::sync::Mutex::new(HashMap::new()));
 }
 
+/// Resolve a resource name to its file on disk, exactly like res_http
+/// serves it: flat (`<dir>/<name>.res`) first, then the nested layout
+/// (`<dir>/<name>/<base>.res`) that the shipped pack stores base
+/// tilesets in (`gfx/tiles/water` -> `gfx/tiles/water/water.res`).
+/// The reader and the HTTP source MUST agree or the client gets a
+/// version announce for a different file than it downloads and dies
+/// with "Wrong res version" (the real client resolves both layouts
+/// too, so this mirrors its forking source).
+pub fn resolve_res_file(dir: &std::path::Path, name: &str) -> PathBuf {
+    let primary = dir.join(format!("{name}.res"));
+    if primary.exists() {
+        return primary;
+    }
+    if let Some(base) = name.rsplit('/').next() {
+        if !base.is_empty() {
+            let nested = dir.join(format!("{name}/{base}.res"));
+            if nested.exists() {
+                return nested;
+            }
+        }
+    }
+    primary
+}
+
 /// True resource version, parsed from the served `<name>.res` header
 /// ("Haven Resource 1\n" + LE u16 version). The client rejects any
 /// announce whose version differs from the file it loads
@@ -25,7 +49,6 @@ pub fn init_res_dir(dir: PathBuf) {
 /// avatar layers render as a black screen with an invisible character.
 /// Falls back to 1 when the file is unreadable.
 pub fn file_version(name: &str) -> u16 {
-    const SIG: &[u8] = b"Haven Resource 1";
     if let Some(cache) = VER_CACHE.get() {
         if let Ok(map) = cache.lock() {
             if let Some(&v) = map.get(name) {
@@ -35,9 +58,7 @@ pub fn file_version(name: &str) -> u16 {
     }
     let ver = RES_DIR
         .get()
-        .and_then(|dir| std::fs::read(dir.join(format!("{name}.res"))).ok())
-        .filter(|bytes| bytes.len() >= SIG.len() + 2 && &bytes[..SIG.len()] == SIG)
-        .map(|bytes| u16::from_le_bytes([bytes[SIG.len()], bytes[SIG.len() + 1]]))
+        .map(|dir| file_version_in(dir, name))
         .unwrap_or(1);
     if let Some(cache) = VER_CACHE.get() {
         if let Ok(mut map) = cache.lock() {
@@ -45,6 +66,17 @@ pub fn file_version(name: &str) -> u16 {
         }
     }
     ver
+}
+
+/// Pure (directory-parameterized) form of [`file_version`]; the global
+/// wrapper exists so every announce site shares one version cache.
+pub fn file_version_in(dir: &std::path::Path, name: &str) -> u16 {
+    const SIG: &[u8] = b"Haven Resource 1";
+    std::fs::read(resolve_res_file(dir, name))
+        .ok()
+        .filter(|bytes| bytes.len() >= SIG.len() + 2 && &bytes[..SIG.len()] == SIG)
+        .map(|bytes| u16::from_le_bytes([bytes[SIG.len()], bytes[SIG.len() + 1]]))
+        .unwrap_or(1)
 }
 
 pub struct ResTable {
@@ -350,5 +382,59 @@ pub mod wdg {
             }
         }
         m.lend();
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_prefers_flat_then_nested() {
+        let dir = std::env::temp_dir().join(format!("hnh-res-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("gfx/tiles/water")).unwrap();
+        // Flat candidate only.
+        std::fs::write(dir.join("gfx/tiles/water.res"), b"flat").unwrap();
+        assert_eq!(
+            resolve_res_file(&dir, "gfx/tiles/water"),
+            dir.join("gfx/tiles/water.res")
+        );
+        // Remove flat, nested candidate must win.
+        std::fs::remove_file(dir.join("gfx/tiles/water.res")).unwrap();
+        std::fs::write(dir.join("gfx/tiles/water/water.res"), b"nested").unwrap();
+        assert_eq!(
+            resolve_res_file(&dir, "gfx/tiles/water"),
+            dir.join("gfx/tiles/water/water.res")
+        );
+        // Neither exists: the (missing) flat path is returned and the
+        // caller's read fails, falling back to version 1.
+        std::fs::remove_file(dir.join("gfx/tiles/water/water.res")).unwrap();
+        assert_eq!(
+            resolve_res_file(&dir, "gfx/tiles/water"),
+            dir.join("gfx/tiles/water.res")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_version_reads_nested_tileset_headers() {
+        let dir = std::env::temp_dir().join(format!("hnh-ver-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("gfx/tiles/water")).unwrap();
+        let mut data = b"Haven Resource 1".to_vec();
+        data.extend_from_slice(&6u16.to_le_bytes());
+        std::fs::write(dir.join("gfx/tiles/water/water.res"), &data).unwrap();
+        // Pure form: no global state involved, safe under parallel tests.
+        assert_eq!(file_version_in(&dir, "gfx/tiles/water"), 6);
+        // Flat layout reads identically.
+        let mut flat = b"Haven Resource 1".to_vec();
+        flat.extend_from_slice(&9u16.to_le_bytes());
+        std::fs::create_dir_all(dir.join("gfx/hud")).unwrap();
+        std::fs::write(dir.join("gfx/hud/vilind.res"), &flat).unwrap();
+        assert_eq!(file_version_in(&dir, "gfx/hud/vilind"), 9);
+        // Missing file falls back to 1 (the protocol floor).
+        assert_eq!(file_version_in(&dir, "gfx/no/such"), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
