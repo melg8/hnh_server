@@ -337,7 +337,11 @@ def main():
     print("chr window open:", bool(c.chr_wid))
 
     # Step 4-5: eat flow - right-click a labeled (food) item widget.
-    food_wids = [w for w, lab in c.item_labels.items() if lab]
+    # Pick a genuinely edible item: the label must be a known fep food.
+    # Taking "the last labeled widget" is wrong - the starter kit also
+    # contains seeds and the crafted axe.
+    FOOD_LABELS = {"Beef", "Raw Deer Meat", "Roasted beef"}
+    food_wids = [w for w, lab in c.item_labels.items() if lab in FOOD_LABELS]
     if not food_wids:
         print("EAT FLOW: FAIL (no food item widget found)")
         return 1
