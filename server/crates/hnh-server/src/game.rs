@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
 use hnh_proto::consts::*;
 use hnh_proto::MessageBuf;
@@ -375,6 +375,9 @@ impl Game {
             item_menu: None,
             item_wids: HashMap::new(),
             crop_menu: None,
+            chat_wid: 0,
+            party_wid: 0,
+            player_menu: None,
             pending_plow: false,
             cursor: None,
             grids_seen: HashSet::new(),
@@ -490,6 +493,11 @@ impl Game {
                 let choice = args.first().and_then(|a| a.as_int()).unwrap_or(-1);
                 self.on_flower_choice(sid, wid, choice);
             }
+            (Some("slenchat"), "msg") => {
+                let line = args.first().and_then(|a| a.as_str()).unwrap_or("");
+                self.on_chat_msg(sid, line);
+            }
+            (Some("pv"), "leave") => self.party_leave(sid),
             _ => {
                 trace!(sid, wid, name, "unhandled wdgmsg");
             }
@@ -720,6 +728,18 @@ impl Game {
             &[ListVal::I(2), ListVal::I(4)],
         ));
         out.send(wdg::new_wdg(w_buffs, "buffs", 0, 0, 0, &[]));
+        // Area Chat window (ChatHW factory): title "Area Chat" hides the
+        // client close button; closable = 0 keeps the window permanent.
+        let w_chat = out.new_wid("slenchat");
+        out.send(wdg::new_wdg(
+            w_chat,
+            "slenchat",
+            0,
+            0,
+            0,
+            &[ListVal::S("Area Chat".to_owned()), ListVal::I(0)],
+        ));
+        out.chat_wid = w_chat;
         out.send(wdg::new_wdg(
             w_mv,
             "mapview",
@@ -1315,8 +1335,360 @@ impl Game {
                 self.open_crop_menu(sid, target);
             }
             Kind::Player { .. } => {
-                warn!(sid, "pvp interactions are not enabled yet");
+                self.open_party_invite_menu(sid, target);
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Chat + party (docs/mechanics/network/communication.md)
+    // ------------------------------------------------------------------
+
+    /// Relay one area-chat line from a player to every session in radius.
+    fn on_chat_msg(&mut self, sid: SessionId, raw: &str) {
+        let Some(text) = crate::chat::sanitize(raw) else {
+            return;
+        };
+        let (sender_pos, sender_name) = {
+            let Some(pidx) = self.world.by_session.get(&sid).copied() else {
+                return;
+            };
+            let p = &self.world.players[pidx];
+            let Some(slot) = self.world.gobs.get(p.gob) else {
+                return;
+            };
+            (self.world.gobs.pos[slot], p.name.clone())
+        };
+        let line = format!("{}: {}", sender_name, text);
+        // Snapshot the recipient list before sending: the send path only
+        // touches each session's outbound queue, but a disjoint snapshot
+        // keeps the borrow checker happy without cloning sessions.
+        let recipients: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, out)| {
+                if out.chat_wid == 0 {
+                    return false;
+                }
+                let Some(gob) = out.player_gob else {
+                    return false;
+                };
+                let Some(slot) = self.world.gobs.get(gob) else {
+                    return false;
+                };
+                // The sender's own distance is 0, so they hear their echo.
+                crate::chat::within_radius(
+                    self.world.gobs.pos[slot],
+                    sender_pos,
+                    crate::chat::AREA_CHAT_RADIUS,
+                )
+            })
+            .map(|(s, _)| *s)
+            .collect();
+        for r in recipients {
+            self.chat_line(r, &line, None);
+        }
+    }
+
+    /// Push one "log" line to a session's Area Chat window. The chat
+    /// uimsg arg list is (text[, color[, urgent]]); `None` renders the
+    /// client default color.
+    fn chat_line(&mut self, sid: SessionId, text: &str, color: Option<(u8, u8, u8)>) {
+        let Some(out) = self.sessions.get(&sid) else {
+            return;
+        };
+        let wid = out.chat_wid;
+        if wid == 0 {
+            return;
+        }
+        let mut args = vec![ListVal::S(text.to_owned())];
+        if let Some((r, g, b)) = color {
+            args.push(ListVal::Col(r, g, b, 255));
+        }
+        out.send(wdg::wdgmsg(wid, "log", &args));
+    }
+
+    /// Server-to-player notification via the Area Chat window (soft red).
+    fn system_line(&mut self, sid: SessionId, text: &str) {
+        let (r, g, b) = crate::chat::SYSTEM_COLOR;
+        self.chat_line(sid, text, Some((r, g, b)));
+    }
+
+    /// Click on another player: open the clicker's invite flower menu.
+    fn open_party_invite_menu(&mut self, sid: SessionId, target: GobId) {
+        let clicker_gob = match self.sessions.get(&sid).and_then(|o| o.player_gob) {
+            Some(g) => g,
+            None => return,
+        };
+        if target == clicker_gob {
+            return;
+        }
+        if self.world.party_idx(target).is_some() {
+            self.system_line(sid, "That player is already in a party.");
+            return;
+        }
+        if let Some(pidx) = self.world.party_idx(clicker_gob) {
+            let party = &self.world.parties[pidx];
+            if party.leader != clicker_gob {
+                self.system_line(sid, "Only the party leader can invite.");
+                return;
+            }
+            if party.members.len() >= crate::party::MAX_MEMBERS {
+                self.system_line(sid, "Your party is full.");
+                return;
+            }
+        }
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        // One flower menu at a time per session.
+        if let Some((old, _)) = out.player_menu {
+            out.send(wdg::dst_wdg(old));
+        }
+        if let Some((old, _)) = out.crop_menu {
+            out.send(wdg::dst_wdg(old));
+        }
+        if let Some((old, _)) = out.item_menu {
+            out.send(wdg::dst_wdg(old));
+        }
+        let w = out.new_wid("sm");
+        out.send(wdg::new_wdg(
+            w,
+            "sm",
+            -1,
+            -1,
+            0,
+            &[
+                ListVal::S("Invite to party".to_owned()),
+                ListVal::S("Cancel".to_owned()),
+            ],
+        ));
+        out.player_menu = Some((w, crate::party::PlayerMenu::InviteTarget(target)));
+    }
+
+    /// Flower menu petal on a party menu: confirm/cancel the clicker's
+    /// invite or the invitee's join.
+    fn on_party_menu_choice(&mut self, sid: SessionId, wid: u16, choice: i32) {
+        let action = self
+            .sessions
+            .get(&sid)
+            .and_then(|o| o.player_menu)
+            .filter(|(w, _)| *w == wid)
+            .map(|(_, a)| a);
+        let Some(action) = action else {
+            return;
+        };
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        out.player_menu = None;
+        out.send(wdg::dst_wdg(wid));
+        if choice != 0 {
+            out.send(wdg::wdgmsg(wid, "cancel", &[]));
+            return;
+        }
+        match action {
+            crate::party::PlayerMenu::InviteTarget(target) => {
+                self.send_party_invitation(sid, target);
+            }
+            crate::party::PlayerMenu::JoinParty { leader } => {
+                self.join_party(leader, sid);
+            }
+        }
+    }
+
+    /// The clicker confirmed: offer membership to the target player.
+    fn send_party_invitation(&mut self, inviter_sid: SessionId, target: GobId) {
+        let tidx = match self.world.players.iter().position(|p| p.gob == target) {
+            Some(i) => i,
+            None => return,
+        };
+        let (target_sid, target_name) = {
+            let t = &self.world.players[tidx];
+            (t.session, t.name.clone())
+        };
+        let inviter_name = self
+            .world
+            .by_session
+            .get(&inviter_sid)
+            .and_then(|i| self.world.players.get(*i))
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "Someone".to_owned());
+        let leader_gob = self
+            .sessions
+            .get(&inviter_sid)
+            .and_then(|o| o.player_gob)
+            .unwrap_or(target);
+        // Re-check the target is still partyless when the menu was open.
+        if self.world.party_idx(target).is_some() {
+            self.system_line(inviter_sid, "That player is already in a party.");
+            return;
+        }
+        let Some(out) = self.sessions.get_mut(&target_sid) else {
+            return;
+        };
+        if let Some((old, _)) = out.player_menu {
+            out.send(wdg::dst_wdg(old));
+        }
+        let w = out.new_wid("sm");
+        out.send(wdg::new_wdg(
+            w,
+            "sm",
+            -1,
+            -1,
+            0,
+            &[
+                ListVal::S(format!("Join {}'s party", inviter_name)),
+                ListVal::S("Decline".to_owned()),
+            ],
+        ));
+        out.player_menu = Some((
+            w,
+            crate::party::PlayerMenu::JoinParty { leader: leader_gob },
+        ));
+        self.system_line(
+            target_sid,
+            &format!("{} invites you to join their party.", inviter_name),
+        );
+        let _ = target_name;
+    }
+
+    /// The invitee accepted: create or extend the leader's party.
+    fn join_party(&mut self, leader_gob: GobId, joiner_sid: SessionId) {
+        let Some(jidx) = self.world.by_session.get(&joiner_sid).copied() else {
+            return;
+        };
+        let joiner_gob = self.world.players[jidx].gob;
+        if self.world.party_idx(joiner_gob).is_some() {
+            self.system_line(joiner_sid, "You are already in a party.");
+            return;
+        }
+        let pidx = match self.world.party_idx(leader_gob) {
+            Some(i) => i,
+            None => {
+                self.world
+                    .parties
+                    .push(crate::party::PartyState::new(leader_gob));
+                self.world.parties.len() - 1
+            }
+        };
+        match self.world.parties[pidx].add(joiner_gob) {
+            Ok(()) => {}
+            Err(crate::party::PartyError::Full) => {
+                self.system_line(joiner_sid, "That party is full.");
+                return;
+            }
+            Err(crate::party::PartyError::AlreadyMember) => return,
+        }
+        let leader_sid = self
+            .world
+            .players
+            .iter()
+            .find(|p| p.gob == leader_gob)
+            .map(|p| p.session);
+        self.sync_party(pidx);
+        self.system_line(joiner_sid, "You joined the party.");
+        if let Some(s) = leader_sid {
+            let joiner_name = self.world.players[jidx].name.clone();
+            self.system_line(s, &format!("{} joined your party.", joiner_name));
+        }
+    }
+
+    /// Broadcast the party state to every member (RMSG_PARTY records) and
+    /// lazily create the `pv` roster widget for members who lack one.
+    fn sync_party(&mut self, pidx: usize) {
+        let party = self.world.parties[pidx].clone();
+        let mut records: Vec<wdg::PartyRec> = vec![wdg::PartyRec::List(&party.members)];
+        records.push(wdg::PartyRec::Leader(party.leader));
+        for (i, m) in party.members.iter().enumerate() {
+            let pos = self.world.gobs.get(*m).map(|s| self.world.gobs.pos[s]);
+            records.push(wdg::PartyRec::Member {
+                gob: *m,
+                pos,
+                color: crate::party::color_for(i),
+            });
+        }
+        let payload = wdg::party(&records);
+        for m in party.members.iter() {
+            let Some(pslot) = self.world.players.iter().position(|p| p.gob == *m) else {
+                continue;
+            };
+            let s = self.world.players[pslot].session;
+            let Some(out) = self.sessions.get_mut(&s) else {
+                continue;
+            };
+            if out.party_wid == 0 {
+                let own = out.player_gob.unwrap_or(*m);
+                let w = out.new_wid("pv");
+                out.send(wdg::new_wdg(w, "pv", 10, 150, 0, &[ListVal::I(own)]));
+                out.party_wid = w;
+            }
+            out.send(payload.clone());
+        }
+    }
+
+    /// Leave-party button on the roster widget.
+    fn party_leave(&mut self, sid: SessionId) {
+        let Some(gob) = self.sessions.get(&sid).and_then(|o| o.player_gob) else {
+            return;
+        };
+        self.party_leave_gob(gob);
+    }
+
+    /// Remove a gob from its party, transfer leadership or disband, and
+    /// clear the client-side roster state of everyone involved.
+    fn party_leave_gob(&mut self, gob: GobId) {
+        let Some(pidx) = self.world.party_idx(gob) else {
+            return;
+        };
+        let party = self.world.parties[pidx].clone();
+        let leaver_sid = self
+            .world
+            .players
+            .iter()
+            .find(|p| p.gob == gob)
+            .map(|p| p.session);
+        let removal = self.world.parties[pidx].remove(gob);
+        match removal {
+            crate::party::Removal::Disbanded => {
+                self.world.parties.remove(pidx);
+                // Close every member's roster and clear client state.
+                for m in &party.members {
+                    let Some(pslot) = self.world.players.iter().position(|p| p.gob == *m) else {
+                        continue;
+                    };
+                    let s = self.world.players[pslot].session;
+                    let Some(out) = self.sessions.get_mut(&s) else {
+                        continue;
+                    };
+                    if out.party_wid != 0 {
+                        out.send(wdg::dst_wdg(out.party_wid));
+                        out.party_wid = 0;
+                    }
+                    out.send(wdg::party(&[wdg::PartyRec::List(&[])]));
+                }
+            }
+            crate::party::Removal::LeaderChanged { new_leader } => {
+                self.sync_party(pidx);
+                if let Some(pslot) = self.world.players.iter().position(|p| p.gob == new_leader) {
+                    let s = self.world.players[pslot].session;
+                    self.system_line(s, "You are now the party leader.");
+                }
+            }
+            crate::party::Removal::Removed => {
+                self.sync_party(pidx);
+            }
+        }
+        if let Some(s) = leaver_sid {
+            let Some(out) = self.sessions.get_mut(&s) else {
+                return;
+            };
+            if out.party_wid != 0 {
+                out.send(wdg::dst_wdg(out.party_wid));
+                out.party_wid = 0;
+            }
+            out.send(wdg::party(&[wdg::PartyRec::List(&[])]));
+            self.system_line(s, "You left the party.");
         }
     }
 
@@ -2293,6 +2665,17 @@ impl Game {
 
     /// Flower menu petal click: `cl <i>`; petal 0 confirms.
     fn on_flower_choice(&mut self, sid: SessionId, wid: u16, choice: i32) {
+        // Player party menus take precedence (opened last, one menu at a
+        // time per session; the openers close any earlier menu).
+        let player_menu = self
+            .sessions
+            .get(&sid)
+            .and_then(|o| o.player_menu)
+            .map(|(w, _)| w);
+        if player_menu == Some(wid) {
+            self.on_party_menu_choice(sid, wid, choice);
+            return;
+        }
         // Crop harvest menus take precedence over the item eat menu.
         let crop_menu = self
             .sessions
@@ -3165,6 +3548,9 @@ impl Game {
                 }
             }
             if let Some(gob) = out.player_gob {
+                // Leaving a party is part of teardown: the roster clears
+                // for the remaining members before the player vanishes.
+                self.party_leave_gob(gob);
                 self.persist_player(gob);
                 self.broadcast_retract(gob);
                 self.world.gobs.kill(gob);

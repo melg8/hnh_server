@@ -6,12 +6,14 @@
 
 mod auth;
 mod bots;
+mod chat;
 mod craft;
 mod farm;
 mod fight;
 mod game;
 mod handoff;
 mod net;
+mod party;
 mod persist;
 mod res_http;
 mod resources;

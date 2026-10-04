@@ -358,6 +358,13 @@ pub struct SessionOut {
     pub item_wids: HashMap<u16, usize>,
     /// Open harvest flower menu: `sm` widget id -> target crop gob.
     pub crop_menu: Option<(u16, GobId)>,
+    /// Widget id of the Area Chat window (`slenchat`), 0 = none.
+    pub chat_wid: u16,
+    /// Widget id of the party roster (`pv`), 0 = none.
+    pub party_wid: u16,
+    /// Open player flower menu and what it arms (party invite
+    /// choreography; see `party::PlayerMenu`).
+    pub player_menu: Option<(u16, crate::party::PlayerMenu)>,
     /// Plow Field pagina armed: next map click plows the tile.
     pub pending_plow: bool,
     /// Item stack currently held on the cursor (take -> itemact flow).
@@ -435,6 +442,9 @@ pub struct World {
     /// (never decays while the crop lives); a non-zero unix-ms deadline
     /// reverts the tile to grass when it passes.
     pub tilth: HashMap<(i32, i32), u64>,
+    /// Formed parties (small vec; parties are capped and rare, linear
+    /// scan by member is fine and keeps the hot paths untouched).
+    pub parties: Vec<crate::party::PartyState>,
     /// Tick counter for deterministic scheduling.
     pub tick: u64,
     /// Deterministic RNG for AI (seeded from world seed).
@@ -473,6 +483,7 @@ impl World {
             crops: HashMap::new(),
             crop_at: HashMap::new(),
             tilth: HashMap::new(),
+            parties: Vec::new(),
             tick: 0,
             rng: hnh_world::JavaRandom::new(seed as i64),
             start_instant: Instant::now(),
@@ -580,6 +591,12 @@ impl World {
                 break;
             }
         }
+    }
+
+    /// Index of the party containing `gob`, if any. Parties are rare and
+    /// capped small; a linear scan beats a secondary index here.
+    pub fn party_idx(&self, gob: GobId) -> Option<usize> {
+        self.parties.iter().position(|p| p.contains(gob))
     }
 
     pub fn player_mut(&mut self, sid: SessionId) -> Option<&mut Player> {

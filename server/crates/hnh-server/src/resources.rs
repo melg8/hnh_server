@@ -229,6 +229,53 @@ pub mod wdg {
         m.finish()
     }
 
+    /// RMSG_PARTY records (src/haven/Party.java tags).
+    pub enum PartyRec<'a> {
+        /// PD_LIST: the full member list, wire-terminated by int32 -1.
+        List(&'a [i32]),
+        /// PD_LEADER: gob id of the party leader.
+        Leader(i32),
+        /// PD_MEMBER: marker color + last known position (`None` streams
+        /// the invisible flag and the client falls back to gob lookup).
+        Member {
+            gob: i32,
+            pos: Option<(i32, i32)>,
+            color: (u8, u8, u8),
+        },
+    }
+
+    /// RMSG_PARTY state stream. An empty record list still emits a valid
+    /// (empty) PD_LIST so a disband clears client state (Party.msg clears
+    /// memb when the list has no ids).
+    pub fn party(records: &[PartyRec]) -> Vec<u8> {
+        let mut m = MessageBuf::new();
+        m.uint8(RMSG_PARTY);
+        for r in records {
+            match r {
+                PartyRec::List(ids) => {
+                    m.uint8(0);
+                    for id in ids.iter() {
+                        m.int32(*id);
+                    }
+                    m.int32(-1);
+                }
+                PartyRec::Leader(gob) => {
+                    m.uint8(1).int32(*gob);
+                }
+                PartyRec::Member { gob, pos, color } => {
+                    m.uint8(2)
+                        .int32(*gob)
+                        .uint8(if pos.is_some() { 1 } else { 0 });
+                    if let Some((x, y)) = pos {
+                        m.coord(*x, *y);
+                    }
+                    m.color(color.0, color.1, color.2, 255);
+                }
+            }
+        }
+        m.finish()
+    }
+
     #[derive(Debug, Clone, PartialEq)]
     pub enum ListVal {
         I(i32),

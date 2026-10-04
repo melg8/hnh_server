@@ -59,6 +59,7 @@ not a snapshot; repo-wide agent conventions live in [AGENTS.md](../../AGENTS.md)
 | --- | --- | --- |
 | Network | [network-protocol.md](network/network-protocol.md) | Wire-level session protocol: UDP framing, little-endian encoding, reliable ordered layer, MSG_*/RMSG_*/OD_* layouts, widget messages, session error codes. |
 | Network | [session-lifecycle.md](network/session-lifecycle.md) | Full session sequence: pre-connect endpoints, TLS auth handshake and cookie, MSG_SESS, widget bootstrap, character selection, in-world init order, teardown, reconnection. |
+| Network | [communication.md](network/communication.md) | Area chat (slenchat widget, radius relay, system lines) and parties (invite/accept flower menus, RMSG_PARTY broadcast, pv roster, leave/disband), with the server-policy decisions the client cannot reveal. |
 | World | [map-and-terrain.md](world/map-and-terrain.md) | Tile/subtile/grid coordinate model, MAPDATA grid streaming, tilesets, claim and plot overlays, flavor-object replication, terraforming. |
 | World | [time-weather-astronomy.md](world/time-weather-astronomy.md) | GLOBLOB world-clock blob (absolute time, day/moon/year fractions, ambient light), 3x time ratio, 365-day year, and the absence of any weather model. |
 | Objects | [objects-and-dynamics.md](objects/objects-and-dynamics.md) | The gob model and per-object state protocol: OD_* sub-message encodings, movement and interpolation semantics, frame ordering, removal tombstones, ack-gated retransmission. |
