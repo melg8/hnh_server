@@ -37,4 +37,4 @@ behavior (walk, fight animals, harvest trees/stones, pick up drops), then prove
       origin/master; git status clean.
       CHECK: bash server/scripts/verify_session24.sh handoff
       EXPECT: HANDOFF ALL PASS
-      EVIDENCE: pending commit + push
+      EVIDENCE: met - HANDOFF ALL PASS; pushed 0f21f7d..5a4ddbd to origin/master
