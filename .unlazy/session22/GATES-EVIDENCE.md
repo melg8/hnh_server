@@ -33,3 +33,30 @@
   res=gfx/kritter/boar/body/walking/walking-2; the frame shows the boar
   mid-walk facing screen-left in pure left profile (sprite 2 = octant
   3), direction matching its travel.
+
+## Supplement: mc-locked click experiment (s22l) and final regression (s22m)
+
+An mc-locked click variant (walkLeg: click the screen point of
+player_pos + exact map delta, read live mv.mc) was tried to capture a
+pure octant-3 LEFT leg. Finding: this fork's OrigCam JUMPS the camera to
+every clicked point (MapView.java OrigCam.click: mv.mc = mc) and the
+click->map chain accumulates drift from camera jumps, integer s2m
+parity, and obstacle slides - the variant was LESS reliable than the
+proven static-offset clicks and was reverted (the agent file is back at
+the ccfe428 state; only the evidence differs).
+
+The s22l run still yielded the STRONGEST invariant evidence: every
+captured frame's pose matched the ACTUAL travel delta quantization
+(SOUTH delta (70,124) -> octant 2 -> down-left 3/4 front;
+UP delta (15,-41) -> octant 6 -> up-right 3/4 back; LEFT delta
+(15,69) -> octant 2 -> down-left 3/4 front). The rendered direction
+always equals move_dir(actual delta) art_dir-mapped - the exact
+contract, independent of the click chain noise.
+
+Final regression (s22m, reverted static-offset agent): MOVEMENT: MOVED;
+PORTRAIT LAYERS legs-0 (front); all five WALKDIR legs ARRIVED with
+screenshots (EAST (150,-6) octant 0, NORTH (-2,-92) octant 6, SOUTH
+(45,175) octant 2, UP (-47,-157) octant 6, LEFT (21,131) octant 2);
+EQUIP DOLL ava-rend=OK; ANIMALS boar in view on layer
+gfx/kritter/boar/body/walking/walking-7 (art 7 = down-right 3/4 front =
+octant 0, facing its travel).
