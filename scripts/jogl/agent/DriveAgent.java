@@ -1003,6 +1003,83 @@ public class DriveAgent {
             } catch (Throwable e) {
                 System.out.println("CLUSTER VERDICT: FAIL " + e);
             }
+
+            // ---------- phase 7: session 28 cross-node fight relay ----------
+            // Click the nearest kritter gob (a left click = interact =
+            // attack). Its authority lives on the OTHER node (the cluster
+            // dump phase proves guests render here), so the server opens a
+            // RELAY fight: the frv widget + one RelayAttack per swing on
+            // the mesh. Verdict: the Fightview widget must appear
+            // client-side; the wire proof lives in the node logs.
+            try {
+                Thread.sleep(1000);
+                Object myg = getPlayerGob(mv);
+                int myid = myg != null
+                        ? ((Number) myg.getClass().getField("id").get(myg)).intValue()
+                        : -1;
+                int[] myp = myg != null ? gobPos(myg) : null;
+                Object sess = get(ui, "sess");
+                Object glob = get(sess, "glob");
+                Object oc = get(glob, "oc");
+                Object target = null;
+                double best = 1e18;
+                if (myp != null) {
+                    Object it = oc.getClass().getMethod("iterator").invoke(oc);
+                    while (it != null && ((java.util.Iterator<?>) it).hasNext()) {
+                        Object g2 = ((java.util.Iterator<?>) it).next();
+                        int gid = ((Number) g2.getClass().getField("id").get(g2)).intValue();
+                        if (gid == myid) continue;
+                        String[] names = (String[]) g2.getClass().getMethod("resnames").invoke(g2);
+                        boolean animal = false;
+                        if (names != null) {
+                            for (String n : names) {
+                                if (n != null && n.contains("/kritter/")) { animal = true; break; }
+                            }
+                        }
+                        if (!animal) continue;
+                        int[] p = gobPos(g2);
+                        if (p == null) continue;
+                        double d = Math.hypot(p[0] - myp[0], p[1] - myp[1]);
+                        if (d < best) { best = d; target = g2; }
+                    }
+                }
+                if (target == null) {
+                    System.out.println("RELAYFIGHT VERDICT: NO-TARGET (no kritter in view)");
+                } else {
+                    int tid = ((Number) target.getClass().getField("id").get(target)).intValue();
+                    Object rc = target.getClass().getField("rc").get(target);
+                    Object scr = Class.forName("haven.MapView")
+                            .getMethod("m2s", Class.forName("haven.Coord")).invoke(null, rc);
+                    int sx = ((Number) getInherited(scr, "x")).intValue();
+                    int sy = ((Number) getInherited(scr, "y")).intValue();
+                    System.out.println("RELAYFIGHT: clicking animal " + tid + " at screen "
+                            + sx + "," + sy + " (world dist " + (int) best + ")");
+                    robot.mouseMove(sx, sy);
+                    Thread.sleep(150);
+                    robot.mousePress(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                    Thread.sleep(70);
+                    robot.mouseRelease(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                    boolean frv = false;
+                    long dl = System.currentTimeMillis() + 20000;
+                    while (System.currentTimeMillis() < dl && !frv) {
+                        Thread.sleep(400);
+                        Object root = ui.getClass().getField("root").get(ui);
+                        frv = !collectChildren(root, Class.forName("haven.Fightview")).isEmpty();
+                    }
+                    // Let a few relayed swings land, then screenshot.
+                    Thread.sleep(6000);
+                    java.awt.image.BufferedImage fi = robot.createScreenCapture(
+                            new java.awt.Rectangle(0, 0, 1024, 768));
+                    javax.imageio.ImageIO.write(fi, "png", new java.io.File("/tmp/client_relayfight.png"));
+                    System.out.println("RELAYFIGHT DUMP: target=" + tid + " dist=" + (int) best
+                            + " frv=" + frv);
+                    System.out.println("RELAYFIGHT VERDICT: "
+                            + (frv ? "OK (fightview opened against a foreign-authority animal)"
+                                  : "NO-FIGHTVIEW"));
+                }
+            } catch (Throwable e) {
+                System.out.println("RELAYFIGHT VERDICT: FAIL " + e);
+            }
         } catch (Throwable e) {
             System.out.println("AGENT ERROR: " + e);
             e.printStackTrace();

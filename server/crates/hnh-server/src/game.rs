@@ -3004,6 +3004,17 @@ impl Game {
         _at: (i32, i32),
     ) {
         let Some(tslot) = self.world.gobs.get(target) else {
+            // Cluster: foreign-authority gobs live in the guest table.
+            // Animals there are attackable through the interaction relay
+            // (the fight UI stays local; the bars/HP stay on the owner).
+            if let Some(g) = self.world.guests.get(&target) {
+                if let crate::nodes::GuestKind::Animal { species } = &g.kind {
+                    if let Some(sp) = crate::state::Species::from_index(*species) {
+                        self.start_fight(sid, target, sp);
+                        return;
+                    }
+                }
+            }
             trace!(sid, target, "interact target gone");
             return;
         };
@@ -6394,7 +6405,7 @@ impl Game {
 
         // --- player side: offence gen, swings, bar streaming ---
         let players: Vec<usize> = (0..self.world.players.len()).collect();
-        for pidx in players {
+        'player: for pidx in players {
             let (target, sid, pgob) = {
                 let p = &self.world.players[pidx];
                 (p.fight_target, p.session, p.gob)
@@ -6431,10 +6442,12 @@ impl Game {
                     }
                     continue;
                 }
-                let mut relay = None;
-                {
+                // Every swing relays one (dmg, chip) pair: the owner
+                // applies the chip to its authoritative bar and decides on
+                // its own opening; landing locally is only UI prediction.
+                let relay: (i32, i32) = {
                     let Some(out) = self.sessions.get_mut(&sid) else {
-                        continue;
+                        continue 'player;
                     };
                     out.fight.own_off =
                         (out.fight.own_off + crate::fight::OFF_REGEN).min(crate::fight::BAR_FULL);
@@ -6442,12 +6455,12 @@ impl Game {
                         out.fight.atkc -= 1;
                     }
                     if out.fight.own_off < crate::fight::SWING_SPEND || out.fight.atkc > 0 {
-                        continue;
+                        continue 'player;
                     }
                     out.fight.own_off -= crate::fight::SWING_SPEND;
                     out.fight.atkc = crate::fight::ATKC_TICKS;
                     let Some(rel) = out.fight.rel_mut(target) else {
-                        continue;
+                        continue 'player;
                     };
                     rel.ip_self += 1;
                     // Attack weight scales 0.5..2.0 with advantage.
@@ -6458,7 +6471,7 @@ impl Game {
                     // so a lost frame self-heals on the next one).
                     let _ = {
                         let Some(mf) = self.world.guest_fights.get_mut(&target) else {
-                            continue;
+                            continue 'player;
                         };
                         let breaking = mf.def <= crate::fight::OPENING_THRESHOLD;
                         mf.def = (mf.def - def_chip).max(0);
@@ -6474,26 +6487,22 @@ impl Game {
                         .get(&target)
                         .map(|f| f.def)
                         .unwrap_or(0);
-                    // EVERY swing relays (the owner applies the chip to its
-                    // authoritative bar and decides on its own opening);
-                    // landing locally is only a UI prediction.
                     let str = *self.world.players[pidx].attrs.get("str").unwrap_or(&10);
-                    relay = Some(((5 * str / 10).max(1), def_chip));
-                }
+                    ((5 * str / 10).max(1), def_chip)
+                };
                 self.world.players[pidx].stamina = (self.world.players[pidx].stamina - 2).max(0);
-                if let Some((dmg, chip)) = relay {
-                    if let Some(c) = self.cluster.as_ref() {
-                        let authority = self.cell_owner(crate::visidx::cell_of(tx, ty));
-                        c.mesh.send(
-                            authority,
-                            crate::nodes::NodeMsg::RelayAttack {
-                                attacker: pgob,
-                                target,
-                                chip,
-                                dmg,
-                            },
-                        );
-                    }
+                if let Some(c) = self.cluster.as_ref() {
+                    let authority = self.cell_owner(crate::visidx::cell_of(tx, ty));
+                    let (dmg, chip) = relay;
+                    c.mesh.send(
+                        authority,
+                        crate::nodes::NodeMsg::RelayAttack {
+                            attacker: pgob,
+                            target,
+                            chip,
+                            dmg,
+                        },
+                    );
                 }
                 continue;
             }
@@ -9121,6 +9130,24 @@ mod tests {
         );
     }
 
+    /// The REAL attack entry point: an interact click on a guest animal
+    /// (not in the local gob table) opens the relay fight instead of the
+    /// old "interact target gone" no-op.
+    #[tokio::test]
+    async fn interact_click_on_guest_animal_opens_relay_fight() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("clicker", 0, 2);
+        let gid = relay_wolf_guest(&mut g, 30, 50);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        g.player_interact(1, pgob, gid, (0, 0));
+        assert_eq!(
+            g.world.players[pidx].fight_target,
+            Some(gid),
+            "a guest-animal click must open the relay fight"
+        );
+        assert!(g.world.guest_fights.contains_key(&gid));
+    }
+
     /// A swing at an in-reach guest spends offence and ships exactly one
     /// RelayAttack to the wolf's owner; a FightBars answer re-syncs the
     /// mirror the fightview reads.
@@ -9151,7 +9178,7 @@ mod tests {
         // plain SWING_DEF_DMG chip.
         assert_eq!(
             attacks,
-            vec![(pgob, gid, crate::fight::SWING_DEF_DMG, (5 * 10 / 10).max(1))],
+            vec![(pgob, gid, crate::fight::SWING_DEF_DMG, 5)], // (5*str/10).max(1) with the default str 10.
             "one swing = exactly one RelayAttack to the owner"
         );
         // The authoritative answer re-syncs the mirror.
