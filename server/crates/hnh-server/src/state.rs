@@ -7,6 +7,7 @@
 //! tables; they exchange encoded `RMSG` payloads through per-session queues.
 
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::time::Instant;
 
 use hnh_world::tile;
@@ -34,6 +35,11 @@ pub const BASE_SPEED: i32 = GAIT_SPEEDS[GAIT_WALK];
 pub type GobId = i32;
 pub type SessionId = u32;
 
+/// Gob ids pack (gen, slot) into 16 bits each (see `gob_id_from_slot`),
+/// so the slot space is 0..=65535. Cluster layouts partition this space
+/// across node processes for globally-unique ids.
+pub const MAX_SLOT: usize = (1 << 16) - 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Species {
     Deer,
@@ -46,6 +52,34 @@ pub enum Species {
 }
 
 impl Species {
+    /// Stable discriminant carried on the node link (GuestKind::Animal);
+    /// the subscriber resolves it back with `from_index`.
+    pub fn index(self) -> u8 {
+        match self {
+            Species::Deer => 0,
+            Species::Fox => 1,
+            Species::Wolf => 2,
+            Species::Boar => 3,
+            Species::Cow => 4,
+            Species::Hare => 5,
+            Species::Aurochs => 6,
+        }
+    }
+
+    /// Inverse of `index` (unknown indices reject at the ingest boundary).
+    pub fn from_index(v: u8) -> Option<Species> {
+        Some(match v {
+            0 => Species::Deer,
+            1 => Species::Fox,
+            2 => Species::Wolf,
+            3 => Species::Boar,
+            4 => Species::Cow,
+            5 => Species::Hare,
+            6 => Species::Aurochs,
+            _ => return None,
+        })
+    }
+
     pub fn resname(self) -> &'static str {
         // The concrete drawable resource per species. Kritter directories
         // carry plalay pose routers ("gfx/korka"-style) the fork client
@@ -281,6 +315,8 @@ pub struct Gobs {
     /// arrivals, re-facings never re-send an identical layer set).
     pub pose_streamed: Vec<u8>,
     free: Vec<usize>,
+    /// Lowest slot of this node's allocation range (cluster layout).
+    node_base: usize,
     /// Dirty-cell spatial index maintained by every mutator (spawn, kill,
     /// set_pos); see visidx.rs for the skip-proof semantics.
     pub vis: crate::visidx::VisIndex,
@@ -288,6 +324,22 @@ pub struct Gobs {
 
 impl Gobs {
     pub fn new() -> Self {
+        Self::with_layout(NonZeroUsize::new(1).expect("one node"), 0)
+    }
+
+    /// Cluster layout: gob slots partition across node processes so gob
+    /// ids are globally unique by construction — node `me` allocates only
+    /// slots in `[me*per, (me+1)*per)` (the last node also owns the
+    /// 16-bit-slot remainder), which keeps encoded wire blocks valid on
+    /// every node without any id remapping.
+    pub fn with_layout(nodes: NonZeroUsize, me: usize) -> Self {
+        let per = (MAX_SLOT + 1) / nodes.get();
+        let lo = me * per;
+        let hi = if me + 1 == nodes.get() {
+            MAX_SLOT + 1
+        } else {
+            lo + per
+        };
         Gobs {
             pos: Vec::new(),
             res_idx: Vec::new(),
@@ -301,7 +353,10 @@ impl Gobs {
             gen: Vec::new(),
             facing: Vec::new(),
             pose_streamed: Vec::new(),
-            free: Vec::new(),
+            // Descending: pops hand out the LOWEST free slot of my range
+            // first, keeping ids dense from the range base.
+            free: (lo..hi).rev().collect(),
+            node_base: lo,
             vis: crate::visidx::VisIndex::default(),
         }
     }
@@ -317,22 +372,14 @@ impl Gobs {
         speed: i32,
     ) -> GobId {
         let slot = match self.free.pop() {
-            Some(s) => s,
+            Some(s) => {
+                // Cluster layout: my range's slots may sit beyond the
+                // current column length (the free list is pre-seeded).
+                self.ensure_capacity(s);
+                s
+            }
             None => {
-                self.pos.push((0, 0));
-                self.res_idx.push(0);
-                self.frame.push(0);
-                self.alive.push(false);
-                self.kind.push(Kind::Stone);
-                self.hp.push(0);
-                self.max_hp.push(0);
-                self.speed.push(0);
-                self.mv.push(None);
-                self.gen.push(0);
-                // Octant 1 = camera-facing front; art_dir(1) = sprite 0,
-                // the full front view, the natural spawn look.
-                self.facing.push(1);
-                self.pose_streamed.push(u8::MAX);
+                self.push_columns();
                 self.pos.len() - 1
             }
         };
@@ -351,6 +398,68 @@ impl Gobs {
         self.frame[slot] = 0;
         self.vis.insert(gob_id_from_slot(slot, self.gen[slot]), pos);
         gob_id_from_slot(slot, self.gen[slot])
+    }
+
+    /// Grow every column by one row (dense-growth fallback once the
+    /// pre-seeded free list is exhausted).
+    fn push_columns(&mut self) {
+        self.pos.push((0, 0));
+        self.res_idx.push(0);
+        self.frame.push(0);
+        self.alive.push(false);
+        self.kind.push(Kind::Stone);
+        self.hp.push(0);
+        self.max_hp.push(0);
+        self.speed.push(0);
+        self.mv.push(None);
+        self.gen.push(0);
+        // Octant 1 = camera-facing front; art_dir(1) = sprite 0, the full
+        // front view, the natural spawn look.
+        self.facing.push(1);
+        self.pose_streamed.push(u8::MAX);
+    }
+
+    /// Extend columns so index `slot` is addressable. Only grows PAST the
+    /// current length; slots below it default-fill. Cluster transfers can
+    /// land on a foreign node's slot range, so capacity is not bounded by
+    /// this node's own allocation range.
+    fn ensure_capacity(&mut self, slot: usize) {
+        while self.pos.len() <= slot {
+            self.push_columns();
+        }
+    }
+
+    /// Ownership transfer insert: materialize a gob under an EXACT id
+    /// (slot = id & 0xFFFF, gen = id >> 16) so every viewer that already
+    /// spawned it keeps rendering it across the authority handoff. The
+    /// slot is claimed out of the free list when it belongs to my range;
+    /// foreign slots just extend the columns.
+    pub fn spawn_with_id(
+        &mut self,
+        id: GobId,
+        kind: Kind,
+        pos: (i32, i32),
+        res_idx: u16,
+        hp: i32,
+        max_hp: i32,
+        speed: i32,
+    ) {
+        let (slot, gen) = split_gob_id(id);
+        self.ensure_capacity(slot);
+        self.free.retain(|&s| s != slot);
+        self.gen[slot] = gen.max(1);
+        self.pos[slot] = pos;
+        self.res_idx[slot] = res_idx;
+        self.alive[slot] = true;
+        self.kind[slot] = kind;
+        self.hp[slot] = hp;
+        self.max_hp[slot] = max_hp;
+        self.speed[slot] = speed;
+        self.mv[slot] = None;
+        self.facing[slot] = 1;
+        self.pose_streamed[slot] = u8::MAX;
+        self.frame[slot] = 0;
+        self.vis.insert(id, pos);
     }
 
     pub fn kill(&mut self, id: GobId) -> bool {
@@ -607,6 +716,11 @@ pub struct World {
     /// Formed parties (small vec; parties are capped and rare, linear
     /// scan by member is fine and keeps the hot paths untouched).
     pub parties: Vec<crate::party::PartyState>,
+    /// Foreign-authority gobs rendered for local sessions (cluster mode).
+    /// The owning node streams their state; this node NEVER simulates a
+    /// guest - it only advances movement interpolation deterministically
+    /// from the linmove params (same arithmetic as local movers).
+    pub guests: HashMap<GobId, GuestGob>,
     /// Tick counter for deterministic scheduling.
     pub tick: u64,
     /// Logical world time in ms, advanced by TICK_MS each game tick (the
@@ -617,6 +731,34 @@ pub struct World {
     start_instant: Instant,
     /// Perf counters.
     pub perf: Perf,
+}
+
+/// One foreign-authority gob (cluster mode). Carries everything the
+/// subscriber needs to render, interpolate and retract it locally; the
+/// owning node pushes GuestAnnounce/GuestUpdate/GuestRetract for cells
+/// with subscribed viewers.
+#[derive(Debug, Clone)]
+pub struct GuestGob {
+    pub pos: (i32, i32),
+    /// Current linear move (same timing model as local movers; progress
+    /// math is deterministic, so no per-tick streaming is needed).
+    pub mv: Option<LinMove>,
+    /// Wire frame counter for OBJDATA blocks (incremented on each
+    /// finalizer/retarget forwarded from the owner).
+    pub frame: u32,
+    /// Pose state (walking vs standing layers).
+    pub moving: bool,
+    /// Movement octant 0..8 (see `game::move_dir`).
+    pub facing: u8,
+    pub kind: crate::nodes::GuestKind,
+    /// Resource index interned locally at ingest.
+    pub res_idx: u16,
+    pub hp: i32,
+    pub max_hp: i32,
+    pub cell: (i32, i32),
+    /// Last tick the guest was announced/updated by its owner (GC input:
+    /// a stale guest with no viewers and no subscription drops).
+    pub last_seen_tick: u64,
 }
 
 #[derive(Default)]
@@ -642,10 +784,17 @@ pub struct Perf {
 
 impl World {
     pub fn new(seed: u64) -> Self {
+        Self::with_layout(seed, NonZeroUsize::new(1).expect("one node"), 0)
+    }
+
+    /// Cluster layout variant: the gob slot partition (see `Gobs::with_layout`)
+    /// and the empty guest table (foreign-authority gobs rendered for local
+    /// sessions) both come from the cluster configuration.
+    pub fn with_layout(seed: u64, nodes: NonZeroUsize, me: usize) -> Self {
         World {
             seed,
             grids: hnh_world::GridStore::new(seed),
-            gobs: Gobs::new(),
+            gobs: Gobs::with_layout(nodes, me),
             res: ResTable::new(),
             players: Vec::new(),
             by_session: HashMap::new(),
@@ -659,6 +808,7 @@ impl World {
             stations: HashMap::new(),
             structure_at: HashMap::new(),
             parties: Vec::new(),
+            guests: HashMap::new(),
             tick: 0,
             now_ms: 0,
             rng: hnh_world::JavaRandom::new(seed as i64),
@@ -829,4 +979,110 @@ pub fn path_clear(world: &mut World, sx: i32, sy: i32, tx: i32, ty: i32) -> bool
         }
     }
     true
+}
+
+#[cfg(test)]
+mod cluster_tests {
+    use super::*;
+
+    fn nz(n: usize) -> NonZeroUsize {
+        NonZeroUsize::new(n).expect("nonzero test constant")
+    }
+
+    /// Cluster layouts partition the slot space: two nodes allocated
+    /// disjoint slot ranges, so their gob ids can never collide on the
+    /// wire (no remapping at the node-link boundary).
+    #[test]
+    fn node_slot_ranges_are_disjoint_and_cover_the_space() {
+        for nodes in [2usize, 3, 4] {
+            let mut seen = std::collections::HashSet::new();
+            for me in 0..nodes {
+                let mut g = Gobs::with_layout(nz(nodes), me);
+                // Allocate 8 gobs per node; ids must be unique cluster-wide.
+                for _ in 0..8 {
+                    let id = g.spawn(Kind::Stone, (0, 0), 0, 1, 0);
+                    let (slot, _gen) = split_gob_id(id);
+                    assert!(
+                        seen.insert(slot),
+                        "slot {slot} double-allocated at {nodes} nodes"
+                    );
+                    let lo = (MAX_SLOT + 1) / nodes * me;
+                    let hi = if me + 1 == nodes {
+                        MAX_SLOT + 1
+                    } else {
+                        lo + (MAX_SLOT + 1) / nodes
+                    };
+                    assert!((lo..hi).contains(&slot), "slot {slot} outside node {me} range");
+                }
+            }
+        }
+    }
+
+    /// Ownership transfer: spawn_with_id materializes the EXACT id (same
+    /// slot and generation) so viewers that already spawned the gob keep
+    /// rendering it across the handoff, and the claimed slot leaves the
+    /// free list (a later spawn cannot land on the transferred gob).
+    #[test]
+    fn spawn_with_id_reuses_exact_id_and_claims_the_slot() {
+        let mut src = Gobs::with_layout(nz(2), 0);
+        let id = src.spawn(Kind::Animal { species: Species::Wolf }, (100, 100), 3, 40, 33);
+        let (slot, gen) = split_gob_id(id);
+
+        let mut dst = Gobs::with_layout(nz(2), 1);
+        dst.spawn_with_id(
+            id,
+            Kind::Animal { species: Species::Wolf },
+            (150, 120),
+            3,
+            25,
+            40,
+            33,
+        );
+        assert_eq!(split_gob_id(dst.get(id).map(|_| id).unwrap()), (slot, gen));
+        let s = dst.get(id).expect("transferred gob alive on the new node");
+        assert!(dst.alive[s]);
+        assert_eq!(dst.pos[s], (150, 120));
+        assert_eq!(dst.hp[s], 25);
+        assert_eq!(dst.max_hp[s], 40);
+
+        // The slot is not free: another forced insert on the same slot
+        // must overwrite in place, and a normal spawn never claims it.
+        let mut fresh = Gobs::with_layout(nz(2), 0);
+        let taken = fresh.spawn(Kind::Stone, (0, 0), 0, 1, 0);
+        let (tslot, tgen) = split_gob_id(taken);
+        fresh.kill(taken);
+        let other = fresh.spawn(Kind::Tree { harvests: 0 }, (1, 1), 0, 1, 0);
+        assert_ne!(split_gob_id(other).0, tslot, "killed slot must be reused via free list");
+        let _ = (tslot, tgen);
+
+        // Re-insert with the same id (idempotent authority claim).
+        dst.spawn_with_id(id, Kind::Animal { species: Species::Wolf }, (150, 120), 3, 25, 40, 33);
+        assert!(dst.alive[dst.get(id).expect("still alive")]);
+    }
+
+    /// A transferred gob keeps its identity: get/kill/split round-trip on
+    /// the receiving node matches the ids the sending node encoded into
+    /// wire blocks.
+    #[test]
+    fn transferred_gob_survives_kill_and_reinsert() {
+        let mut a = Gobs::with_layout(nz(3), 2);
+        let id = a.spawn(Kind::Animal { species: Species::Deer }, (0, 0), 1, 10, 33);
+        a.kill(id);
+        let mut b = Gobs::with_layout(nz(3), 0);
+        b.spawn_with_id(id, Kind::Animal { species: Species::Deer }, (5, 5), 1, 10, 10, 33);
+        assert!(b.get(id).is_some(), "id must resolve after transfer");
+        assert!(b.kill(id), "kill resolves the transferred id");
+        assert!(b.get(id).is_none());
+    }
+
+    /// Species index round-trip (the node-link discriminant contract).
+    #[test]
+    fn species_index_roundtrips() {
+        for i in 0..7u8 {
+            let sp = Species::from_index(i).expect("valid index");
+            assert_eq!(sp.index(), i);
+        }
+        assert!(Species::from_index(7).is_none());
+        assert!(Species::from_index(255).is_none());
+    }
 }
