@@ -12,6 +12,7 @@ mod craft;
 mod farm;
 mod fight;
 mod game;
+mod grid_owner;
 mod net;
 mod party;
 mod persist;

@@ -24,6 +24,19 @@ cargo run --release -- --seed 42            # world seed; same seed = same world
 
 Ports: 1871/tcp TLS auth, 1870/udp game session, 1872/tcp resource HTTP.
 
+## Scaling
+
+- `--workers N` sets the data-parallel tick fan-out (vertical scaling).
+  Work items group by grid-owner partition (see `src/grid_owner.rs`):
+  each rayon task processes one owner's slice of the cell lattice, the
+  same unit a separate node process would own in a multi-node layout.
+  300 moving bots tick in ~4.5-5 ms (100 ms budget) at workers=4.
+- `--shards N` opens N UDP sockets sharing port 1870 via SO_REUSEPORT
+  (session accept fan-out on one host).
+- Ownership uses rendezvous hashing: deterministic, no shared state,
+  and scale-out moves only ~1/(N+1) of the lattice to the joiner while
+  existing nodes keep their cells.
+
 ## Client
 
 ```bash

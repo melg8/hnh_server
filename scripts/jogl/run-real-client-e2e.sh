@@ -68,5 +68,5 @@ for i in $(seq 1 300); do
 done
 sleep 3
 echo "=== agent + client errors ==="
-rg "AGENT|MOVEMENT|Exception|error" /tmp/client_$TAG.log | rg -v "meat|wood" | head -30
+rg "AGENT|MOVEMENT|WALKDIR|EQUIP|PORTRAIT|ANIMALS|Exception|error" /tmp/client_$TAG.log | rg -v "meat|wood" | head -40
 exit 0

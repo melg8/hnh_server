@@ -1639,14 +1639,33 @@ impl Game {
             }
             to_scan.push((sid, (px, py)));
         }
-        // --- Phase A2: cell-bucketed candidate scan (parallel when
-        // multiple sessions are present). The cell query replaces the
-        // O(all gobs) sweep; the exact distance filter is unchanged. ---
+        // --- Phase A2: grid-owner-partitioned candidate scan (parallel
+        // when multiple sessions are present). Scan indices group by the
+        // VisIndex-cell owner (grid_owner.rs) so one rayon task walks one
+        // node's slice of the lattice — the same partitioning a multi-node
+        // deployment hands to its owning node processes. Results reorder
+        // back into to_scan order before phase B; the exact distance
+        // filter is unchanged. ---
         let in_range: Vec<Vec<GobId>> = if self.workers > 1 && to_scan.len() > 8 {
-            to_scan
+            let nodes = std::num::NonZeroUsize::new(self.workers).expect("workers >= 1");
+            let parts = crate::grid_owner::partition_by_owner(
+                |&i| crate::visidx::cell_of(to_scan[i].1 .0, to_scan[i].1 .1),
+                (0..to_scan.len()).collect::<Vec<usize>>(),
+                nodes,
+            );
+            let mut by_index: Vec<(usize, Vec<GobId>)> = parts
                 .par_iter()
-                .map(|(_sid, (px, py))| self.scan_visible(*px, *py))
-                .collect()
+                .map(|part| {
+                    part.iter()
+                        .map(|&i| (i, self.scan_visible(to_scan[i].1 .0, to_scan[i].1 .1)))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<Vec<_>>>()
+                .into_iter()
+                .flatten()
+                .collect();
+            by_index.sort_unstable_by_key(|(i, _)| *i);
+            by_index.into_iter().map(|(_, v)| v).collect()
         } else {
             to_scan
                 .iter()
@@ -4698,24 +4717,43 @@ impl Game {
 
     /// Animal AI: parallel intent pass over the SoA columns (read-only),
     /// then serial application (writes stay on the game task). Intents are
-    /// computed per grid-region bucket so the same pure function maps to
-    /// true cross-process grid owners later.
+    /// computed per grid-owner partition (grid_owner.rs) so the same pure
+    /// function maps to true cross-process grid owners later.
     fn tick_animals(&mut self) {
         let tick = self.world.tick;
         let animal_ids: Vec<GobId> = self.world.animal_gobs.clone();
         // Phase A (parallel): pure intent computation over immutable SoA
         // state. Randomness derives from (tick, slot) hashes so the pass is
-        // deterministic and race-free without a shared RNG.
+        // deterministic and race-free without a shared RNG. Work groups by
+        // VisIndex-cell owner (grid_owner): each partition is the unit a
+        // multi-node deployment would hand to its owning node process.
         let workers = self.workers.max(1);
+        let nodes = std::num::NonZeroUsize::new(workers).expect("workers >= 1");
         let decisions: Vec<(GobId, AnimalAction)> = if workers > 1 && animal_ids.len() > 64 {
-            // Chunk ids into worker-sized buckets; rayon runs the pure
-            // decision function per bucket.
-            let bucket = animal_ids.len().div_ceil(workers);
-            animal_ids
-                .par_chunks(bucket)
-                .map(|chunk| {
-                    chunk
-                        .iter()
+            let cell_of_gob = |id: &GobId| -> (i32, i32) {
+                self.world
+                    .gobs
+                    .get(*id)
+                    .map(|slot| {
+                        crate::visidx::cell_of(
+                            self.world.gobs.pos[slot].0,
+                            self.world.gobs.pos[slot].1,
+                        )
+                    })
+                    .unwrap_or((0, 0))
+            };
+            let partitions = crate::grid_owner::partition_by_owner(
+                cell_of_gob,
+                animal_ids.iter().copied(),
+                nodes,
+            );
+            // Rayon runs the pure decision function per grid-owner
+            // partition; a dead/gone id yields no intent and the serial
+            // apply phase never sees it.
+            partitions
+                .par_iter()
+                .map(|part| {
+                    part.iter()
                         .filter_map(|id| Self::animal_intent(id, &self.world, tick, self.saturated))
                         .collect::<Vec<_>>()
                 })

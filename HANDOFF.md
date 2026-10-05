@@ -1012,3 +1012,43 @@ visibility groups; equipment effects (armor class + avatar layer
 changes on equip); craft pagina wiring; a pure-left (octant 3) walk leg
 screenshot would complete the visual ring (the e2e leg retargeted
 around an obstacle; wire+unit coverage pins it deterministically).
+
+## 2026-10-05 - Session 23: grid-owner partitioning (the multi-node 10k unit)
+Continuation under .unlazy/session23. Backlog item "grid-owner
+partitioning for the 10k target" from sessions 21-22.
+
+WHAT: the tick's parallel phases previously chunked work by COUNT
+(par_chunks over animal ids, par_iter over the session scan list) -
+that fan-out shares nothing with a multi-node layout. Work now groups
+by VisIndex-cell OWNER via the new grid_owner.rs module: rendezvous
+(highest-random-weight) hashing picks one owner per cell out of the
+live node set. Properties (all unit-tested): deterministic with no
+shared state; scale-out moves only the share the NEW node wins - cells
+never migrate between existing nodes; balanced lattice spread; order-
+preserving partitions that cover every item exactly once.
+
+INTEGRATION: tick_animals groups animal ids by their cell's owner and
+rayon runs the pure per-animal decision per partition; update_visibility
+phase A2 groups scan indices by the session's cell owner and reorders
+results back into to_scan order before the serial apply. The serial
+apply phases (writes, wire blocks) are unchanged. Each partition is the
+exact unit a separate node process would own in the multi-node
+deployment, so the in-process fan-out exercises the cluster contract.
+
+VERIFIED: 100 unit tests green (6 new grid_owner tests pin ownership
+determinism, scale-out migration to the joiner only, balance, and
+partition order); fmt+clippy -D warnings clean; load budget holds -
+300 moving bots at workers=4 tick mean ~4.4-4.9 ms (budget 100 ms,
+session 21-22 baseline ~4.5-4.8 ms, no regression); full real-client
+e2e green at BOTH workers=4 (partitioned) and the default serial path:
+portrait layers, movement x2, five directional walk legs, equipment
+doll, animals in view. server/README.md gained a Scaling section;
+AGENTS.md unchanged (harness rules already apply).
+
+NEXT (handoff): true multi-node process split over the grid-owner
+contract (node processes own partitions; cross-partition visibility
+needs a shared registry + border-cell forwarding); equipment effects
+(armor class + avatar layer changes on equip); craft pagina wiring;
+mapview ground-drop flow; an animals-in-view hunt fallback that
+teleports the camera to the nearest predator would make the s23b-style
+animal screenshot deterministic.
