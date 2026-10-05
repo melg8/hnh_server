@@ -16,6 +16,7 @@ mod fight;
 mod game;
 mod grid_owner;
 mod net;
+mod nodes;
 mod party;
 mod persist;
 mod res_http;
