@@ -407,3 +407,26 @@ in" (src/haven/Bootstrap.java lines 272-274).
   and any additional trailing bytes would land inside the opaque cookie
   blob. Do not add fields after the cookie unless you control the
   client build as well.
+
+## Server implementation notes: cluster mode (session 27)
+
+The Rust server can run as a CLUSTER of independent processes:
+`hnh-server --cluster "host:port,host:port" --node N`. Every node owns
+the VisIndex cells the rendezvous hash (grid_owner.rs) assigns from the
+shared membership list and simulates only the gobs standing in its own
+cells. Players are always simulated by their HOME node (the node whose
+UDP port the client connected to); a player standing in another node's
+cell is published to that cell's owner and rendered there as a guest.
+Sessions see foreign-authority gobs as guests through the same
+visibility machinery as local gobs; gob ids are globally unique by
+per-node slot stride, so no id remapping happens anywhere.
+
+This is a DEVIATION from legacy behavior (legacy = one monolithic
+server process). The client cannot tell the difference: the wire it
+speaksis unchanged, ports are per-node configurable
+(`--game-port/--auth-port/--res-port`), and spawn/move/pose/retract
+blocks are byte-identical whether the gob is local or a guest.
+
+Open questions: cross-node interaction relay (attacking/picking up a
+guest gob must route to its authority); persistence is per-node today
+(a character lives on the node that first accepted it).
