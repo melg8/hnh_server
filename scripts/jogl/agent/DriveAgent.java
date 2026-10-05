@@ -1017,44 +1017,134 @@ public class DriveAgent {
                 int myid = myg != null
                         ? ((Number) myg.getClass().getField("id").get(myg)).intValue()
                         : -1;
-                int[] myp = myg != null ? gobPos(myg) : null;
                 Object sess = get(ui, "sess");
                 Object glob = get(sess, "glob");
                 Object oc = get(glob, "oc");
+                // Approach loop: gobs far outside the 1024x768 viewport
+                // cannot be clicked, so walk toward ONE chosen target
+                // (slow species first: deer outrun the player) until it
+                // is ON SCREEN.
                 Object target = null;
                 double best = 1e18;
-                if (myp != null) {
+                int tsx = 0, tsy = 0;
+                int chaseId = -1;
+                int stuckCount = 0;
+                int[] lastPos = null;
+                for (int pass = 0; pass < 18 && target == null; pass++) {
                     Object it = oc.getClass().getMethod("iterator").invoke(oc);
+                    double bestChase = 1e18;
+                    int chaseX = 0, chaseY = 0;
                     while (it != null && ((java.util.Iterator<?>) it).hasNext()) {
                         Object g2 = ((java.util.Iterator<?>) it).next();
                         int gid = ((Number) g2.getClass().getField("id").get(g2)).intValue();
                         if (gid == myid) continue;
+                        // The client homes on node 0 of the 2-node cluster:
+                        // Gobs::with_layout strides slots per node, so node
+                        // 1 owns slots [32768, 65536). Only gobs whose SLOT
+                        // (low 16 bits of the id; the high bits are the
+                        // generation) comes from that range are foreign-
+                        // authority guests here.
+                        if ((gid & 0xFFFF) < 32768) continue;
                         String[] names = (String[]) g2.getClass().getMethod("resnames").invoke(g2);
                         boolean animal = false;
+                        int pri = 9;
                         if (names != null) {
                             for (String n : names) {
-                                if (n != null && n.contains("/kritter/")) { animal = true; break; }
+                                if (n == null || !n.contains("/kritter/")) continue;
+                                animal = true;
+                                // Slow/flightless species are catchable;
+                                // deer/fox/hare outrun or dodge the player.
+                                if (n.contains("/cow/")) pri = Math.min(pri, 0);
+                                else if (n.contains("/boar/")) pri = Math.min(pri, 1);
+                                else if (n.contains("/wolf/")) pri = Math.min(pri, 2);
+                                else if (n.contains("/aurochs/")) pri = Math.min(pri, 1);
+                                else pri = Math.min(pri, 3);
                             }
                         }
                         if (!animal) continue;
-                        int[] p = gobPos(g2);
-                        if (p == null) continue;
-                        double d = Math.hypot(p[0] - myp[0], p[1] - myp[1]);
-                        if (d < best) { best = d; target = g2; }
+                        Object rc = g2.getClass().getField("rc").get(g2);
+                        Object scr = Class.forName("haven.MapView")
+                                .getMethod("m2s", Class.forName("haven.Coord")).invoke(null, rc);
+                        int sx = ((Number) getInherited(scr, "x")).intValue();
+                        int sy = ((Number) getInherited(scr, "y")).intValue();
+                        if (sx >= 60 && sx <= 964 && sy >= 60 && sy <= 700) {
+                            double d = Math.hypot(sx - 512, sy - 384);
+                            if (d < best) { best = d; target = g2; tsx = sx; tsy = sy; }
+                        } else if (chaseId < 0 || gid == chaseId) {
+                            // Lock onto one off-screen animal (species
+                            // priority, then screen distance).
+                            double vx = sx - 512, vy = sy - 384;
+                            double len = Math.max(1e-6, Math.hypot(vx, vy));
+                            int cx = (int) Math.round(512 + vx / len * 260);
+                            int cy = (int) Math.round(384 + vy / len * 200);
+                            cx = Math.max(140, Math.min(760, cx));
+                            cy = Math.max(140, Math.min(560, cy));
+                            double d = pri * 100000 + Math.hypot(cx - 512, cy - 384);
+                            if (d < bestChase) {
+                                bestChase = d; chaseId = gid; chaseX = cx; chaseY = cy;
+                            }
+                        }
                     }
+                    if (target != null) break;
+                    // Jitter the click around the chase direction: a fixed
+                    // screen offset may keep landing on the same tree /
+                    // rock (interact instead of walk) and stall the chase.
+                    // The safe band avoids HUD corners entirely.
+                    int jx = ((pass % 3) - 1) * 40;
+                    int jy = (((pass / 3) % 3) - 1) * 34;
+                    int cx2 = Math.max(200, Math.min(700, chaseX + jx));
+                    int cy2 = Math.max(200, Math.min(520, chaseY + jy));
+                    int[] cur = myg != null ? gobPos(myg) : null;
+                    boolean stuck = cur != null && lastPos != null
+                            && cur[0] == lastPos[0] && cur[1] == lastPos[1];
+                    System.out.println("RELAYFIGHT: chasing animal " + chaseId + " (pass "
+                            + pass + (stuck ? " STUCK" : "") + ") at="
+                            + (cur != null ? cur[0] + "," + cur[1] : "?")
+                            + " click=" + cx2 + "," + cy2);
+                    if (stuck) {
+                        stuckCount++;
+                        if (stuckCount >= 3) {
+                            // This animal is unreachable from here (water,
+                            // rocks): recon leg in a rotating direction,
+                            // then rescan (chaseId dropped picks a target
+                            // from the new spot).
+                            chaseId = -1;
+                            stuckCount = 0;
+                            double ang = pass * 0.9;
+                            int wx = Math.max(200, Math.min(700,
+                                    512 + (int) Math.round(Math.cos(ang) * 250)));
+                            int wy = Math.max(200, Math.min(520,
+                                    384 + (int) Math.round(Math.sin(ang) * 170)));
+                            System.out.println("RELAYFIGHT: stuck; recon click "
+                                    + wx + "," + wy);
+                            robot.mouseMove(wx, wy);
+                            Thread.sleep(120);
+                            robot.mousePress(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                            Thread.sleep(60);
+                            robot.mouseRelease(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                            Thread.sleep(3400);
+                            myg = getPlayerGob(mv);
+                            continue;
+                        }
+                    } else {
+                        stuckCount = 0;
+                    }
+                    lastPos = cur;
+                    robot.mouseMove(cx2, cy2);
+                    Thread.sleep(120);
+                    robot.mousePress(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                    Thread.sleep(60);
+                    robot.mouseRelease(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                    Thread.sleep(3400);
+                    myg = getPlayerGob(mv);
                 }
                 if (target == null) {
-                    System.out.println("RELAYFIGHT VERDICT: NO-TARGET (no kritter in view)");
+                    System.out.println("RELAYFIGHT VERDICT: NO-TARGET (no kritter reachable)");
                 } else {
                     int tid = ((Number) target.getClass().getField("id").get(target)).intValue();
-                    Object rc = target.getClass().getField("rc").get(target);
-                    Object scr = Class.forName("haven.MapView")
-                            .getMethod("m2s", Class.forName("haven.Coord")).invoke(null, rc);
-                    int sx = ((Number) getInherited(scr, "x")).intValue();
-                    int sy = ((Number) getInherited(scr, "y")).intValue();
                     System.out.println("RELAYFIGHT: clicking animal " + tid + " at screen "
-                            + sx + "," + sy + " (world dist " + (int) best + ")");
-                    robot.mouseMove(sx, sy);
+                            + tsx + "," + tsy + " (screen dist " + (int) best + ")");
+                    robot.mouseMove(tsx, tsy);
                     Thread.sleep(150);
                     robot.mousePress(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
                     Thread.sleep(70);

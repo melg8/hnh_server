@@ -1349,3 +1349,54 @@ session-targeted UI); single save/persistence story for clusters
 (characters are per-node today); craft pagina ad->action wiring for
 remaining recipes; vis-scan result caching; carrying-pose state for
 bows; cursor pickup redirection (merge stacks).
+
+## 2026-10-05 - Session 28: cross-node interaction relay (guest fights live)
+Continuation under .unlazy/session28. The top session-27 handoff item:
+fighting a guest target is no longer a no-op.
+
+WHAT: four new NodeMsg kinds close the cross-node combat loop:
+- `RelayAttack { attacker, target, chip, dmg }` (home -> authority): EVERY
+  swing of a fight against a foreign-authority animal ships the (dmg, chip)
+  pair computed on the home node (the attacker's str lives there). The
+  owner applies the chip to its authoritative `animal_fights` bar, decides
+  its own opening, lands HP damage there (`damage_animal_relayed`:
+  OD_HEALTH to ITS viewers + GuestUpdate publish so the attacker's node
+  streams OD_HEALTH from the ingested state), drops loot and retracts on
+  death, and answers `FightBars { id, def }` so the home mirror
+  (`world.guest_fights`) self-heals. The home node ALSO chips its mirror
+  per swing (UI prediction); rel.defence reads the mirror.
+- `PlayerHurt { player_gob, dmg, from }` (authority -> home): animal
+  retaliation against a guest player ships the bite; the victim's home
+  node applies armor absorption, HP, stamina, the knockout path AND the
+  bite FX overlay (the owner's own overlay only covers its viewers).
+  v1 bite = default str (2), documented.
+- `KillCredit { player_gob, lp }`: relay kill credits the attacker's home
+  node LP wallet (+10, push_cattr).
+- `player_interact` guest branch: clicking a guest animal used to die at
+  "interact target gone" - the REAL client could never OPEN a relay
+  fight. Guest animal clicks now route through start_fight (test).
+- Bookkeeping: guest retracts close relay fights BOTH directions (local
+  fighter's frv widget destroyed on animal retract; animal_fights rows
+  dropped on player-guest retract). Guest hp deltas stream OD_HEALTH on
+  ingest (frame bump + unacked record). `node_of_gob` maps a gob id to
+  its home node from the cluster slot stride.
+
+EVIDENCE: 127 unit tests green (6 new: relay open via interact click, one
+swing = one RelayAttack with exact chip/dmg, authority chip+opening+hp
+publish+OD_HEALTH+KillCredit, retaliation ships PlayerHurt + retract
+cleanup, guest retract closes frv, FightBars resync). CLUSTER e2e
+(server/scripts/verify_session28.sh): SESSION28 RELAY WIRE VERDICT: OK -
+node1 bots opened 38 relay fights against node0-authority guests, node0
+applied 2 relay swings (chip+damage), 2 FightBars answers synced the
+mirrors; full home->authority->home loop between two REAL processes.
+Real-client e2e: CLUSTER VERDICT: OK (guests render), MOVEMENT/SPEED OK;
+DriveAgent phase 7 (RELAYFIGHT) clicks the nearest on-screen guest and
+requires the frv widget - the chase is best-effort (wildlife placement
+is random; deer outrun the player), NO-TARGET/NO-FIGHTVIEW is a soft
+verdict, the wire proof lives in the node logs. clippy clean.
+
+NEXT (handoff): single save/persistence story for clusters (characters
+are per-node); craft pagina ad->action wiring for remaining recipes;
+vis-scan result caching; carrying-pose state for bows; cursor pickup
+redirection (merge stacks); relay pickup/build against guest STATIC gobs
+(drops/structures) - the same RelayAttack pattern with an action enum.

@@ -70,7 +70,7 @@ JPID=$!
 
 # --- wait for the cluster verdict (the last agent phase) ---
 for i in $(seq 1 480); do
-  if rg -q "CLUSTER VERDICT|AGENT ERROR|no mapview|no player gob|no UI instance" /tmp/client_$TAG.log 2>/dev/null; then
+  if rg -q "RELAYFIGHT VERDICT|AGENT ERROR|no mapview|no player gob|no UI instance" /tmp/client_$TAG.log 2>/dev/null; then
     break
   fi
   sleep 1

@@ -1993,6 +1993,7 @@ impl Game {
                 // mirror self-heals from it (the fightview reads this).
                 if let Some(af) = self.world.guest_fights.get_mut(&id) {
                     af.def = def.clamp(0, crate::fight::BAR_FULL);
+                    tracing::debug!(id, def, "relay fight bars synced");
                 }
             }
             NodeMsg::PlayerHurt {
@@ -2003,6 +2004,7 @@ impl Game {
                 // Animal retaliation against one of MY session players;
                 // armor absorption and the knockout path live here.
                 if let Some(pidx) = self.world.players.iter().position(|p| p.gob == player_gob) {
+                    tracing::debug!(player_gob, dmg, from, "relay bite applied");
                     self.hurt_player(pidx, dmg, from);
                     // Native bite visual on the victim (the owner node's
                     // own overlay covers only ITS local viewers).
@@ -6860,6 +6862,7 @@ impl Game {
         if !matches!(self.world.gobs.kind[tslot], Kind::Animal { .. }) {
             return;
         }
+        tracing::debug!(attacker, target, chip, dmg, "relay swing applied");
         let landed = {
             let af = self.world.animal_fights.entry(target).or_insert_with(|| {
                 crate::state::AnimalFight {
