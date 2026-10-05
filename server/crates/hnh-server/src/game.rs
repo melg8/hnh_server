@@ -27,12 +27,15 @@ use hnh_world::tile;
 pub const ITEM_DROP_LIFETIME_TICKS: u64 = 20 * 300; // 5 minutes
 
 /// Avatar part resource templates. `{pose}` is `standing` or `walking`;
-/// `{dir}` is the 8-direction sprite index (0..7). Every directional
-/// resource embeds its full animation client-side (standing = 1 frame,
-/// walking = 8 frames @100 ms through the resource's own `anim` layer),
-/// so the server selects ONE direction set per pose and NEVER streams
-/// frames: cycling the direction sets in sequence is what made the
-/// avatar spin around its own axis (session 21 defect).
+/// `{dir}` is the art pack's 8-direction sprite index (0..7), produced
+/// from a movement octant by `art_dir` (NOT the raw octant: the art ring
+/// is rotated one octant against the movement ring - see `art_dir`).
+/// Every directional resource embeds its full animation client-side
+/// (standing = 1 frame, walking = 8 frames @100 ms through the
+/// resource's own `anim` layer), so the server selects ONE direction
+/// set per pose and NEVER streams frames: cycling the direction sets in
+/// sequence is what made the avatar spin around its own axis (session
+/// 21 defect).
 const AVATAR_PART_TEMPLATES: [&str; 6] = [
     "gfx/borka/body/{pose}/legs-{dir}",
     "gfx/borka/body/{pose}/torso/male-{dir}",
@@ -42,18 +45,19 @@ const AVATAR_PART_TEMPLATES: [&str; 6] = [
     "gfx/borka/hair-karin/{pose}/hair-{dir}",
 ];
 
-/// Equipment-window doll pose: standing with banzai arms (spread), facing
-/// the camera (dir 1 = the +x+y screen-down diagonal). Drawn by
-/// `Equipory.cdraw` from the gob's `Avatar` attribute (OD_AVATAR), which
-/// is distinct from the world drawable (OD_LAYERS) - the doll keeps the
-/// spread-arms pose while the world avatar walks.
+/// Equipment-window doll pose: standing with banzai arms (spread),
+/// sprite index 0 = the art pack's full front view (the +x+y octant,
+/// straight at the camera). Drawn by `Equipory.cdraw` from the gob's
+/// `Avatar` attribute (OD_AVATAR), which is distinct from the world
+/// drawable (OD_LAYERS) - the doll keeps the spread-arms pose while the
+/// world avatar walks.
 const AVATAR_DOLL_TEMPLATES: [&str; 6] = [
-    "gfx/borka/body/standing/legs-1",
-    "gfx/borka/body/standing/torso/male-1",
-    "gfx/borka/body/standing/head-1",
-    "gfx/borka/body/standing/arm/banzai/left-1",
-    "gfx/borka/body/standing/arm/banzai/right-1",
-    "gfx/borka/hair-karin/standing/hair-1",
+    "gfx/borka/body/standing/legs-0",
+    "gfx/borka/body/standing/torso/male-0",
+    "gfx/borka/body/standing/head-0",
+    "gfx/borka/body/standing/arm/banzai/left-0",
+    "gfx/borka/body/standing/arm/banzai/right-0",
+    "gfx/borka/hair-karin/standing/hair-0",
 ];
 
 /// The avatar base resource every OD_LAYERS player block references (a
@@ -61,10 +65,14 @@ const AVATAR_DOLL_TEMPLATES: [&str; 6] = [
 /// client drops, and is never sprite-created).
 const AVATAR_BASE: &str = "gfx/borka/body";
 
-/// Quantize a movement vector into the pack's 8-direction pose index.
+/// Quantize a movement vector into the movement octant (0..7).
 /// Pure, deterministic, unit-tested: dir 0 = +x, dir 2 = +y, dir 4 = -x,
-/// dir 6 = -y (counterclockwise atan2 octants). The visual orientation of
-/// each art direction is verified on the real client (session 21).
+/// dir 6 = -y (counterclockwise atan2 octants). These are MOVEMENT
+/// octants, not sprite indices: the directional art resources are
+/// indexed by a ring rotated one octant against this one - convert with
+/// `art_dir` before composing layer names (session 22 defect: feeding
+/// the octant straight into the sprite index shifted every walk
+/// animation one octant clockwise on screen).
 pub fn move_dir((sx, sy): (i32, i32), (tx, ty): (i32, i32)) -> u8 {
     let (dx, dy) = (tx - sx, ty - sy);
     if dx == 0 && dy == 0 {
@@ -75,6 +83,24 @@ pub fn move_dir((sx, sy): (i32, i32), (tx, ty): (i32, i32)) -> u8 {
     // -180..180 range: -180 deg lands on dir 4, +180 deg on dir 4 too.
     let octant = ((deg + 22.5).div_euclid(45.0)) as i32;
     octant.rem_euclid(8) as u8
+}
+
+/// Map a movement octant (`move_dir`) to the art pack's directional
+/// sprite index. The art ring is rotated one octant against the movement
+/// ring: sprite 0 is the full FRONT view (the +x+y camera-facing octant),
+/// sprite 4 the full back, the pure left/right profiles sit at sprites
+/// 2/6, and the walking-into-frame 3/4 views fill the odd slots.
+/// Verified by decoding the fox standing sprites (art 0 = head-on front,
+/// art 1 = down-left 3/4, art 2 = pure left profile, art 3 = up-left
+/// 3/4, art 4 = back, art 5 = up-right 3/4, art 6 = pure right profile,
+/// art 7 = down-right 3/4; scripts/dump_directions.py) and by the user
+/// report this fixes: walking up (octant 5) showed the up-right set
+/// (sprite 5 = octant 6), walking left (octant 3) showed the up-left
+/// set (sprite 3 = octant 4) - i.e. sprite N always depicts octant N+1,
+/// so displaying octant D needs sprite (D - 1) mod 8.
+#[inline]
+pub fn art_dir(octant: u8) -> u8 {
+    (octant.wrapping_add(7)) & 7
 }
 
 /// All concrete pose layer names, materialized ONCE as leaked 'static
@@ -104,7 +130,9 @@ impl PoseTable {
         let mut avatar: [[[&'static str; 6]; 8]; 2] = Default::default();
         for (pi, pose) in ["standing", "walking"].into_iter().enumerate() {
             for d in 0u8..8 {
-                let dir_char = (b'0' + d) as char;
+                // Table stays indexed by movement octant; the emitted
+                // resource name carries the art sprite index.
+                let dir_char = (b'0' + art_dir(d)) as char;
                 for (ti, t) in AVATAR_PART_TEMPLATES.into_iter().enumerate() {
                     avatar[pi][d as usize][ti] = leak(
                         t.replace("{pose}", pose)
@@ -120,7 +148,9 @@ impl PoseTable {
                 .enumerate()
             {
                 for d in 0u8..8 {
-                    kritter[si][pi][d as usize] = leak(format!("gfx/kritter/{sp}/body/{pose}-{d}"));
+                    let art = art_dir(d);
+                    kritter[si][pi][d as usize] =
+                        leak(format!("gfx/kritter/{sp}/body/{pose}-{art}"));
                 }
             }
         }
@@ -6267,38 +6297,59 @@ mod tests {
         assert_eq!(move_dir((5, 5), (5, 5)), 0, "zero vector defaults to dir 0");
     }
 
+    /// The art ring is rotated one octant against the movement ring:
+    /// sprite = (octant - 1) mod 8. Anchors: front octant 1 -> sprite 0,
+    /// back octant 5 -> sprite 4, pure left octant 3 -> sprite 2, pure
+    /// right octant 7 -> sprite 6. The two user-reported defect cases:
+    /// walking up (octant 5) must show the BACK set (sprite 4), not the
+    /// up-right set (sprite 5); walking left (octant 3) must show the
+    /// pure LEFT profile (sprite 2), not the up-left set (sprite 3).
+    #[test]
+    fn art_dir_offsets_the_sprite_ring() {
+        for octant in 0u8..8 {
+            assert_eq!(art_dir(octant), (octant + 7) & 7, "octant {octant}");
+        }
+        assert_eq!(art_dir(1), 0, "camera-facing front is sprite 0");
+        assert_eq!(art_dir(5), 4, "walking up shows the back set");
+        assert_eq!(art_dir(3), 2, "walking left shows the left profile");
+        assert_eq!(art_dir(7), 6, "walking right shows the right profile");
+        assert_eq!(art_dir(0), 7, "east shows the down-right 3/4 set");
+    }
+
     /// Pose layer composition: walking vs standing sets at a direction,
-    /// plus the fixed banzai doll set and the kritter pose part.
+    /// plus the fixed banzai doll set and the kritter pose part. Layer
+    /// names carry the ART sprite index (art_dir(octant)), so octant 3
+    /// composes legs-2 and octant 6 composes legs-5.
     #[test]
     fn pose_layers_compose_direction_and_kind() {
         let walk = avatar_pose_layers(true, 3);
-        assert!(walk[0].ends_with("walking/legs-3"), "{}", walk[0]);
-        assert!(walk[1].ends_with("walking/torso/male-3"), "{}", walk[1]);
+        assert!(walk[0].ends_with("walking/legs-2"), "{}", walk[0]);
+        assert!(walk[1].ends_with("walking/torso/male-2"), "{}", walk[1]);
         assert!(
             walk[5].starts_with("gfx/borka/hair-karin/walking/"),
             "{}",
             walk[5]
         );
         let stand = avatar_pose_layers(false, 6);
-        assert!(stand[0].ends_with("standing/legs-6"), "{}", stand[0]);
-        assert!(stand[3].contains("arm/idle/left-6"), "{}", stand[3]);
+        assert!(stand[0].ends_with("standing/legs-5"), "{}", stand[0]);
+        assert!(stand[3].contains("arm/idle/left-5"), "{}", stand[3]);
         let doll = avatar_doll_layers();
         assert!(
             doll.iter().all(|n| n.contains("/standing/")),
             "doll is a standing pose"
         );
         assert!(
-            doll.iter().any(|n| n.contains("arm/banzai/left-1")),
-            "doll arms are banzai (spread), camera facing"
+            doll.iter().any(|n| n.contains("arm/banzai/left-0")),
+            "doll arms are banzai (spread), front view sprite 0"
         );
         assert!(
             !doll.iter().any(|n| n.contains("arm/idle")),
             "doll never uses idle arms"
         );
         let wolf = kritter_pose_layer(Species::Wolf, true, 5);
-        assert_eq!(wolf, "gfx/kritter/wolf/body/walking/walking-5");
+        assert_eq!(wolf, "gfx/kritter/wolf/body/walking/walking-4");
         let hare = kritter_pose_layer(Species::Hare, false, 0);
-        assert_eq!(hare, "gfx/kritter/hare/body/standing/standing-0");
+        assert_eq!(hare, "gfx/kritter/hare/body/standing/standing-7");
         assert_eq!(kritter_base(Species::Fox), "gfx/kritter/fox/body");
     }
 

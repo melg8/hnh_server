@@ -261,11 +261,15 @@ pub struct Gobs {
     pub mv: Vec<Option<LinMove>>,
     /// Generation counter for id reuse safety.
     pub gen: Vec<u32>,
-    /// Current facing direction 0..7 (the pack's directional pose index:
-    /// dir 0 = +x, quantized atan2, see `game::move_dir`). Server-side pose
-    /// resolution: the fork client has no plalay/plparts router support,
-    /// so the server layers the concrete directional frame resources and
-    /// the client animates each one natively via its embedded `anim` layer.
+    /// Current facing direction 0..7 - a MOVEMENT octant (dir 0 = +x,
+    /// quantized atan2, see `game::move_dir`), NOT the sprite index: the
+    /// directional art resources are indexed by `game::art_dir(octant)`,
+    /// a ring rotated one octant against this one. Spawn default is 1
+    /// (the +x+y camera-facing octant) so freshly spawned gobs render the
+    /// full front view (art sprite 0). Server-side pose resolution: the
+    /// fork client has no plalay/plparts router support, so the server
+    /// layers the concrete directional frame resources and the client
+    /// animates each one natively via its embedded `anim` layer.
     pub facing: Vec<u8>,
     /// Last pose state streamed to viewers, encoded (moving<<3 | dir):
     /// standing dirs 0..7, walking dirs 8..15, u8::MAX = nothing streamed
@@ -321,7 +325,9 @@ impl Gobs {
                 self.speed.push(0);
                 self.mv.push(None);
                 self.gen.push(0);
-                self.facing.push(0);
+                // Octant 1 = camera-facing front; art_dir(1) = sprite 0,
+                // the full front view, the natural spawn look.
+                self.facing.push(1);
                 self.pose_streamed.push(u8::MAX);
                 self.pos.len() - 1
             }
@@ -335,7 +341,8 @@ impl Gobs {
         self.max_hp[slot] = hp;
         self.speed[slot] = speed;
         self.mv[slot] = None;
-        self.facing[slot] = 0;
+        // Octant 1 = camera-facing front (see Gobs::new slot path).
+        self.facing[slot] = 1;
         self.pose_streamed[slot] = u8::MAX;
         self.frame[slot] = 0;
         self.vis.insert(gob_id_from_slot(slot, self.gen[slot]), pos);
