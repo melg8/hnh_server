@@ -214,6 +214,20 @@ to `/tmp/client_charlist.png`, `/tmp/client_walking.png`,
 `-Dhaven.debugclicks=true` traces which branch consumes a map click when
 you need to debug input handling.
 
+Session-21 evidence lines (part of every full e2e run): the agent orders
+three directional legs (`WALKDIR EAST|NORTH|SOUTH: ARRIVED` with
+`WALKDIR SCREENSHOT: saved /tmp/client_walk_{east,north,south}.png` - read
+the frames: the walk pose must FACE the travel direction, one direction
+per leg, no spinning), dumps the equipment doll state
+(`EQUIP DOLL: avagob=<id> ava-rend=OK` plus the `/tmp/client_equip.png`
+frame - the spread-arms banzai doll must be visible), and hunts a predator
+until a kritter lands inside the viewport (`ANIMALS SCREENSHOT: saved
+kritter at <x>,<y> res=gfx/kritter/...` plus `/tmp/client_animals.png` -
+the animal SPRITE must be visible, not a shadow-only gob). The wire probes
+`server/scripts/probe_direction.py` (DIRECTION WIRE: OK) and
+`server/scripts/probe_animals.py` (ANIMALS WIRE: OK, needs `--saturated`)
+cover the same contracts at the protocol level.
+
 Rule of thumb: a fix is done when the wire test passes AND the real
 client demonstrates the behavior. Record both evidences in HANDOFF.md.
 

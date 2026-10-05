@@ -423,6 +423,42 @@ no client-side flicker simulation.
   sprites). `Layered.setlayers` sorts the list and rebuilds sprites when the
   list changes.
 
+### Directional pose layering (server-side pose resolution)
+
+This fork's client has NO plalay/plparts router support (both layer types
+are dropped on load), so the server resolves poses and layers CONCRETE
+image-bearing resources. The pose/direction contract implemented and
+verified in session 21:
+
+- The pack ships directional pose resources per avatar part:
+  `gfx/borka/body/{standing,walking}/legs-0..7`, `head-0..7`,
+  `torso/male-0..7`, `arm/idle|banzai|carrying/{left,right}-0..7`, and
+  `gfx/borka/hair-karin/{standing,walking}/hair-0..7`; kritters mirror the
+  scheme with `gfx/kritter/<sp>/body/{standing/standing,walking/walking}-0..7`.
+- EVERY directional resource embeds its own animation: standing parts carry
+  1 frame, walking parts carry 8 frames at 100 ms (players) / 50 ms
+  (kritters) through the resource's own `anim` layer (`id = -1`, always
+  active). The client's `AnimSprite` cycles the frames natively - the
+  server must NEVER stream per-frame layer updates. Cycling the 8
+  direction sets in sequence spins the avatar around its own axis (the
+  session-21 defect).
+- Direction index: quantized movement octant, dir 0 = +x, dir 2 = +y,
+  dir 4 = -x, dir 6 = -y (counterclockwise atan2; see `move_dir` in
+  hnh-server game.rs). Verified on the real client: dir 0 renders the
+  front view, dir 6 the right-facing profile, dir 2 the left-facing
+  profile.
+- The layer set is (re-)streamed only on pose/direction CHANGES (move
+  start -> walking set of the new direction, arrival -> standing set of
+  the same direction, retarget mid-walk -> new direction's walking set).
+- Kritter gobs spawn through OD_LAYERS of these pose parts, never through
+  a flat OD_RES sprite: `gfx/kritter/<sp>/cdv` under empty `sdt` flags
+  renders only its `id < 0` images (StaticSprite flag semantics), which
+  left shadow-only animals.
+- Animal attack visuals ride a one-shot `OD_OVERLAY` of `gfx/fx/bite` on
+  the victim (8-frame anim; the client removes the overlay after one
+  cycle). Predators must build fight offence (`AnimalFight.off`) or the
+  swing condition never fires and they never attack at all.
+
 The `mapview` widget creation carries the player's own gob id as widget
 argument 2 (src/haven/MapView.java:123-135); the server must emit it once at
 session start so the client can bind `playergob` (used for camera and

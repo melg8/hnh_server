@@ -895,3 +895,69 @@ movement rework) + the follow-up fixes in this session.
   avatar layer changes); craft pagina ad->action wiring; the charlist
   card could use a bigger portrait (74x74 window shows a small figure) -
   cosmetic.
+
+## 2026-10-05 - Session 21: directional animations, visible+animated animals, bite FX, equipment doll (real-client verified)
+Continuation under .unlazy/session21 (tree 99; gates + evidence in
+.unlazy/session21/). Commits de50412 (server pose rework), bite/offence
+fix, cfb9bb6 (real-client evidence harness), this commit (docs).
+
+The four user-reported defects were root-caused against the CLIENT source
+and the .res layer structures (scripts/dump_res.py), then fixed and
+verified on the real GL client:
+
+1) "Animation does not match movement; the character spins around its
+   axis": session 20's walking-pose stream cycled legs-0..7 at 150 ms -
+   those are the 8 DIRECTION sets, not frames. Every directional
+   resource embeds its full walk cycle (8 frames @100 ms players, @50 ms
+   kritters, anim id=-1) and the client's AnimSprite animates natively.
+   The server now computes move_dir (quantized movement octant, dir 0 =
+   +x, counterclockwise; unit-tested wraparound) and streams ONE
+   directional layer set per pose/direction change; the pose state dedupe
+   is one SoA byte (moving<<3|dir). VERIFIED: probe_direction.py legs
+   +x/+y/-x-y -> exactly one walking + one standing stream per leg with
+   the correct direction digit (DIRECTION WIRE: OK); real-client mid-walk
+   frames: east = front view, north (-y) = right profile, south (+y) =
+   left profile (read the screenshots).
+2) "Animals invisible (shadows only), no walk/attack animation": animals
+   spawned via OD_RES gfx/kritter/<sp>/cdv with empty sdt - StaticSprite
+   with empty flags renders only img.id<0 images (fox cdv: ids 0,1,2,-1
+   -> 1 image). Animals now spawn through OD_LAYERS of the concrete
+   kritter pose parts (base gfx/kritter/<sp>/body + standing-N/walking-N
+   of the facing), same pipeline as players. VERIFIED: probe_animals.py
+   (ANIMALS WIRE: OK: 330 kritter-layered spawns, 0 flat cdv, 300+
+   walking-pose streams); real-client screenshot shows a boar sprite in
+   the viewport (agent hunts a predator into view - passive species flee
+   beyond the viewport and the camera pans with the mouse).
+3) "No attack animation" had NO attack behind it: AnimalFight.off never
+   incremented, so the swing condition (off >= SWING_SPEND) could never
+   fire - predators never attacked. Offence now builds every tick in
+   reach (mirrors the player's own_off regen); each bite lands through
+   openings and broadcasts a one-shot OD_OVERLAY gfx/fx/bite on the
+   victim (client removes it after one anim cycle). VERIFIED:
+   predator_bites_and_broadcasts_bite_overlay unit test (hp drop + OD_
+   OVERLAY on the victim's raw stream); 1517 fights + bite overlay in the
+   saturated-wire probe.
+4) "No doll in Equipment": the server NEVER sent OD_AVATAR, so
+   Avatar.rend was null and Equipory.cdraw drew only the bg frame. The
+   own gob now receives OD_AVATAR with the banzai-arms doll set (spread
+   arms, camera facing dir 1); other viewers get the standing set.
+   VERIFIED: EQUIP DOLL: avagob=65536 ava-rend=OK; the screenshot shows
+   the spread-arms doll in the window.
+
+Harness: DriveAgent phase 3 (directional legs with per-direction
+screenshots from the live camera center mv.mc - the fork camera pans with
+the mouse; equipment doll dump + frame; predator hunt into the viewport),
+runner waits for the last verdict. AGENTS.md documents the session-21
+evidence lines; docs/mechanics/objects/objects-and-dynamics.md gains the
+"Directional pose layering" contract section.
+
+Verified: cargo 93 tests green, fmt+clippy -D warnings clean, load smoke
+300 bots tick ~4.8 ms (budget 100 ms), WORLD ENTRY OK, real-client
+MOVEMENT/SPEED/NO TELEPORT/RAPID/PORTRAIT/WALKDIR x3/EQUIP DOLL/ANIMALS
+all OK in one run (s21zoo6/s21i).
+
+NEXT (handoff): grid-owner partitioning for the 10k target; shared
+visibility groups; mapview ground-drop flow; equipment effects (armor
+class + avatar layer changes on equip); craft pagina wiring; the
+equipment doll could sit centered in the window frame (cosmetic); a
+client-side camera-position getter would make animal screenshots exact.
