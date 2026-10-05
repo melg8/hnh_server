@@ -90,6 +90,12 @@ struct Args {
     cluster: Option<String>,
     /// This process's node index into the cluster list.
     node: usize,
+    /// Client-facing UDP port (1870 default; cluster peers offset it).
+    game_port: u16,
+    /// Auth TLS port (1871 default; cluster peers offset it).
+    auth_port: u16,
+    /// Resource HTTP port (1872 default; cluster peers offset it).
+    res_port: u16,
 }
 
 fn usage() -> &'static str {
@@ -111,6 +117,9 @@ fn parse_args() -> Args {
         perf: false,
         cluster: None,
         node: 0,
+        game_port: net::GAME_PORT,
+        auth_port: crate::auth::AUTH_PORT,
+        res_port: res_http::RES_PORT,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -127,6 +136,9 @@ fn parse_args() -> Args {
             "--key" => a.key = it.next(),
             "--cluster" => a.cluster = it.next(),
             "--node" => a.node = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "--game-port" => a.game_port = it.next().and_then(|v| v.parse().ok()).unwrap_or(net::GAME_PORT),
+            "--auth-port" => a.auth_port = it.next().and_then(|v| v.parse().ok()).unwrap_or(crate::auth::AUTH_PORT),
+            "--res-port" => a.res_port = it.next().and_then(|v| v.parse().ok()).unwrap_or(res_http::RES_PORT),
             "--help" | "-h" => {
                 print!("{}", usage());
                 std::process::exit(0);
@@ -217,7 +229,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     // background log line the user only notices when clients misbehave.
     let shard_count = args.shards.max(1);
     info!(shards = shard_count, "network sharding");
-    net::spawn(net_tx, shard_count).await?;
+    net::spawn(net_tx, shard_count, args.game_port).await?;
     let (cert, key) = match (&args.cert, &args.key) {
         (Some(c), Some(k)) => (c.clone(), k.clone()),
         (None, None) => {
@@ -232,7 +244,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     };
     let auth_handle = {
         let auth_inner = Arc::clone(&auth);
-        tokio::spawn(async move { auth_inner.run(&cert, &key).await })
+        tokio::spawn(async move { auth_inner.run(&cert, &key, args.auth_port).await })
     };
 
     // Resource HTTP server: fail fast on a missing resource pack or a taken
@@ -252,26 +264,26 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     }
     // Version announcements read the actual .res headers from this dir.
     resources::init_res_dir(res_dir.clone());
-    let res_listener = res_http::bind().await.map_err(|e| {
+    let res_listener = res_http::bind(args.res_port).await.map_err(|e| {
         anyhow::anyhow!(
             "cannot bind resource http port {}: {e:#}",
-            res_http::RES_PORT
+            args.res_port
         )
     })?;
-    tokio::spawn(res_http::serve(res_listener, res_dir));
+    tokio::spawn(res_http::serve(res_listener, args.res_port, res_dir));
 
     // Optional in-process bots (load testing).
     if args.bots > 0 {
-        tokio::spawn(bots::run(args.bots, args.bot_secs));
+        tokio::spawn(bots::run(args.bots, args.bot_secs, args.game_port));
     }
 
     // Startup self-check: reach every TCP listener once before announcing
     // readiness. Catches silent service death (bad cert, blocked port) at
     // the console instead of as confusing client-side connection refusals.
-    startup_probe().await?;
+    startup_probe(args.auth_port, args.res_port).await?;
 
     // Then keep watching those listeners for the whole process lifetime.
-    tokio::spawn(health_watchdog());
+    tokio::spawn(health_watchdog(args.auth_port, args.res_port));
 
     // Perf reporter.
     if args.perf {
@@ -358,10 +370,10 @@ fn log_dir() -> Option<std::path::PathBuf> {
 /// the server announces readiness. A service that died at bind time (port
 /// taken, bad certificate) otherwise only surfaces as client-side
 /// "connection refused" errors long after startup.
-async fn startup_probe() -> anyhow::Result<()> {
+async fn startup_probe(auth_port: u16, res_port: u16) -> anyhow::Result<()> {
     let targets = [
-        ("auth", auth::AUTH_PORT),
-        ("resource http", res_http::RES_PORT),
+        ("auth", auth_port),
+        ("resource http", res_port),
     ];
     for (name, port) in targets {
         let mut reachable = false;
@@ -390,10 +402,10 @@ async fn startup_probe() -> anyhow::Result<()> {
 /// error instead of only a client-side "connection refused" long after the
 /// actual failure. Probe connections are plain TCP (no TLS handshake),
 /// which auth logs at debug level - expected noise.
-async fn health_watchdog() {
+async fn health_watchdog(auth_port: u16, res_port: u16) {
     let targets = [
-        ("auth", auth::AUTH_PORT),
-        ("resource http", res_http::RES_PORT),
+        ("auth", auth_port),
+        ("resource http", res_port),
     ];
     let mut tick = tokio::time::interval(Duration::from_secs(10));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

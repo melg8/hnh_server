@@ -20,16 +20,16 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bind the resource HTTP listener. Separate from [`serve`] so startup can
 /// fail fast (and loudly) when the port is taken, instead of leaving a
 /// half-alive server that only errors on the client side.
-pub async fn bind() -> anyhow::Result<TcpListener> {
-    Ok(TcpListener::bind(("0.0.0.0", RES_PORT)).await?)
+pub async fn bind(port: u16) -> anyhow::Result<TcpListener> {
+    Ok(TcpListener::bind(("0.0.0.0", port)).await?)
 }
 
 /// Serve resources on a pre-bound listener until the process exits.
 /// Per-accept errors are transient (Windows can surface WSAECONNRESET when
 /// a peer resets before accept), so they log and continue rather than
 /// killing the resource server mid-session.
-pub async fn serve(listener: TcpListener, res_dir: PathBuf) {
-    info!(port = RES_PORT, dir = %res_dir.display(), "resource http server listening");
+pub async fn serve(listener: TcpListener, port: u16, res_dir: PathBuf) {
+    info!(port, dir = %res_dir.display(), "resource http server listening");
     let dir = Arc::new(res_dir);
     loop {
         match listener.accept().await {

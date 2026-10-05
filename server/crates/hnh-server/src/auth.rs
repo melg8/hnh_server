@@ -294,15 +294,20 @@ impl AuthServer {
         acc.cookies.remove(cookie).map(|(user, _)| user)
     }
 
-    pub async fn run(self: Arc<Self>, cert_path: &str, key_path: &str) -> anyhow::Result<()> {
+    pub async fn run(
+        self: Arc<Self>,
+        cert_path: &str,
+        key_path: &str,
+        port: u16,
+    ) -> anyhow::Result<()> {
         let (certs, key) = load_certs(cert_path, key_path)?;
         let config = Arc::new(
             rustls::ServerConfig::builder()
                 .with_no_client_auth()
                 .with_single_cert(certs, key)?,
         );
-        let listener = TcpListener::bind(("0.0.0.0", AUTH_PORT)).await?;
-        info!(port = AUTH_PORT, "auth server (TLS) listening");
+        let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+        info!(port, "auth server (TLS) listening");
         loop {
             // Transient accept errors (e.g. WSAECONNRESET on Windows when a
             // peer resets before accept) must not kill the auth server;

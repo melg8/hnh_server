@@ -113,13 +113,17 @@ fn bind_shard_socket(port: u16) -> anyhow::Result<UdpSocket> {
 /// across shards by kernel 4-tuple hash; `shards = 1` degenerates to the
 /// original single-socket layout. The accept log carries the shard id,
 /// giving operations a direct per-shard occupancy histogram.
-pub async fn spawn(game_tx: mpsc::UnboundedSender<NetCmd>, shards: usize) -> anyhow::Result<()> {
+pub async fn spawn(
+    game_tx: mpsc::UnboundedSender<NetCmd>,
+    shards: usize,
+    port: u16,
+) -> anyhow::Result<()> {
     let shard_count = shards.max(1);
     for id in 0..shard_count {
-        let socket = Arc::new(bind_shard_socket(GAME_PORT)?);
+        let socket = Arc::new(bind_shard_socket(port)?);
         info!(
             shard = id,
-            port = GAME_PORT,
+            port,
             "game server (UDP) shard listening"
         );
         let game_tx = game_tx.clone();

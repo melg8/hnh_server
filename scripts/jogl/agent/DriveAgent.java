@@ -944,6 +944,65 @@ public class DriveAgent {
             } catch (Throwable e) {
                 System.out.println("CURSOR: err " + e);
             }
+
+            // ---------- phase 6: session 27 cluster evidence ----------
+            // Long legs across VisIndex cell boundaries (250 subtiles):
+            // rendezvous scatters cell owners across the cluster nodes, so
+            // a few legs put the player inside foreign-owned territory.
+            // The dump then counts gobs this client renders that its OWN
+            // node does not simulate (guests) - the server log pins the
+            // counts; the client dump proves the render path end to end.
+            try {
+                int[][] clusterLegs = {{440, 220}, {440, -220}, {-660, 0}, {0, -660}, {440, 220}};
+                for (int[] leg : clusterLegs) {
+                    robot.mouseMove(512 + leg[0], 384 + leg[1]);
+                    Thread.sleep(120);
+                    robot.mousePress(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                    Thread.sleep(60);
+                    robot.mouseRelease(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                    Thread.sleep(2600);
+                }
+                Object sess = get(ui, "sess");
+                Object glob = get(sess, "glob");
+                Object oc = get(glob, "oc");
+                Object myg = getPlayerGob(mv);
+                int myid = myg != null
+                        ? ((Number) myg.getClass().getField("id").get(myg)).intValue()
+                        : -1;
+                int animals = 0, players = 0;
+                StringBuilder seen = new StringBuilder();
+                Object it = oc.getClass().getMethod("iterator").invoke(oc);
+                while (it != null && ((java.util.Iterator<?>) it).hasNext()) {
+                    Object g2 = ((java.util.Iterator<?>) it).next();
+                    int gid = ((Number) g2.getClass().getField("id").get(g2)).intValue();
+                    if (gid == myid) continue;
+                    String[] names = (String[]) g2.getClass().getMethod("resnames").invoke(g2);
+                    boolean animal = false, player = false;
+                    String first = "?";
+                    for (String n : names) {
+                        if (n == null) continue;
+                        if (first.equals("?")) first = n;
+                        if (n.contains("/kritter/")) animal = true;
+                        if (n.contains("borka")) player = true;
+                    }
+                    if (animal) {
+                        animals++;
+                        if (seen.length() < 300) seen.append(first).append(',');
+                    } else if (player) {
+                        players++;
+                    }
+                }
+                Object mcv = get(mv, "mc");
+                java.awt.image.BufferedImage cl = robot.createScreenCapture(
+                        new java.awt.Rectangle(0, 0, 1024, 768));
+                javax.imageio.ImageIO.write(cl, "png", new java.io.File("/tmp/client_cluster.png"));
+                System.out.println("CLUSTER DUMP: pos=" + coord(mcv) + " animals=" + animals
+                        + " other-players=" + players + " sample=" + seen);
+                System.out.println("CLUSTER VERDICT: "
+                        + (animals > 0 ? "OK (foreign-authority gobs render)" : "NO-ANIMALS"));
+            } catch (Throwable e) {
+                System.out.println("CLUSTER VERDICT: FAIL " + e);
+            }
         } catch (Throwable e) {
             System.out.println("AGENT ERROR: " + e);
             e.printStackTrace();

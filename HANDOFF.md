@@ -1276,3 +1276,76 @@ vis-scan result caching (per-cell in-view result reuse - the scan
 itself, not the skip decision, dominates at 1000 moving sessions);
 carrying-pose state for bows/carried tools; cursor item pickup
 redirection (right-click-with-held-item onto a stack merges).
+
+## 2026-10-05 - Session 27: true multi-node process split (grid-owner cluster)
+Continuation under .unlazy/session27. The top handoff backlog item: the
+grid-owner partition became a REAL process split.
+
+WHAT: `--cluster "host:port,host:port" --node N` starts N independent
+server processes that share one static membership list and own the
+VisIndex cells the rendezvous hash (grid_owner.rs) assigns them:
+
+1) NODE-LINK MESH (`nodes.rs`): TCP mesh, length-prefixed bincode frames
+   (1 MiB cap checked before any read-into buffer), symmetric Hello
+   handshake (proto version + node index validation), 500 ms dial retry,
+   per-peer outbound queues that buffer across reconnects (a short
+   partition loses nothing). Messages: Sub/Unsub (viewer -> owner, cells),
+   Chat, GuestAnnounce/Update/Retract/Transfer.
+2) GLOBALLY-UNIQUE GOB IDS BY CONSTRUCTION (`state.rs`): gob slots
+   partition across nodes (node i allocates only [i*per, (i+1)*per) of
+   the 16-bit slot space), so encoded wire blocks (LINSTEP et al) are
+   valid on every node without any id remapping. `Gobs::spawn_with_id`
+   materializes a transferred gob under its EXACT (slot, gen) id so
+   viewers keep rendering it across authority handoffs.
+3) AUTHORITY: animals/world gobs simulate ONLY on their cell's owner
+   (tick_movement/tick_animals filter by is_authority_slot); players are
+   ALWAYS authored by their home node (the node the UDP session landed
+   on). Animal crossing a cell boundary -> GuestTransfer to the new
+   owner, local copy demotes to a guest (same id, viewers never flicker),
+   animal_fights cleared. Player entering a foreign cell -> GuestAnnounce
+   to that cell's owner; returning home -> GuestRetract.
+4) GUESTS: a node subscribes its peers to the view cells its sessions
+   actually look at (10-tick diffed Sub/Unsub). The owner streams
+   Announce/Update/Retract for subscribed cells; the subscriber ingests
+   into World.guests and feeds them through the SAME dirty-cell
+   visibility machinery as local gobs (vis index, scan merge, spawn
+   blocks with server-side pose resolution + OD_AVATAR/OD_BUDDY for
+   players, LINSTEP progress derived locally from the linmove params -
+   identical arithmetic, no per-tick streaming, retract sweep + GC when
+   unviewed and unsubscribed).
+5) CHAT crosses nodes through the mesh; each node re-filters by the
+   sender's position (same area-chat radius).
+6) PORTS parameterized (`--game-port/--auth-port/--res-port`): cluster
+   peers on one machine offset them (client-facing defaults stay
+   1870/1871/1872).
+7) INTERACTION GUARD: fighting a guest target is a no-op (its HP lives
+   on the authority node) - cross-node interaction relay is NEXT.
+
+Single-node default (`--cluster` absent) is unchanged: cluster=None,
+all cells owned by node 0, zero added tick cost.
+
+EVIDENCE: 121 unit tests green (5 new: authority-follows-cells +
+players-stay-home, guest ingest/update/retract with wire OD_LAYERS
+proof, transfer identity across nodes both directions, player territory
+publish/retract, chat relay radius). 2-node cluster probe (3 bots per
+node): guest counters BOTH ways (n0 ingest=6 pub=50; n1 ingest=2
+pub=91), mean tick 80-99 us, 1549 authority transfers in a 75 s run,
+bot cohorts see the other node's players (cls_players=7 vs 3 own).
+REAL CLIENT e2e (scripts/jogl/run-cluster-e2e.sh): node0 + node1, 2
+bots on node1, DriveAgent on node0 walks five long legs across cell
+boundaries: CLUSTER DUMP animals=13 (hare/deer/fox/boar/wolf sample),
+CLUSTER VERDICT: OK, /tmp/client_cluster.png READ (world rendered on
+node0 includes node1's fauna), MOVEMENT: MOVED through the cluster.
+Server checklist: server/scripts/verify_session27.sh (guest ingest
+counts + subscriptions + client verdicts). Toolchain note: the client
+env was re-provisioned from scratch this session (Temurin 8 + JOGL 1.1.1
+jni + libXtst into /home/z/tools, client rebuilt with javac - the
+deploy script's JDK path is /home/z/tools/jogl-extract/jdk8u504-b01,
+and etc/icon.png must be copied to classes/haven/ before jarring).
+
+NEXT (handoff): cross-node interaction relay (attack/pickup/build
+against guest gobs - InteractReq to the authority, SessionRelay for
+session-targeted UI); single save/persistence story for clusters
+(characters are per-node today); craft pagina ad->action wiring for
+remaining recipes; vis-scan result caching; carrying-pose state for
+bows; cursor pickup redirection (merge stacks).

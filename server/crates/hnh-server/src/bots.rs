@@ -40,7 +40,7 @@ static STAT_CLS_DROP: AtomicU64 = AtomicU64::new(0);
 static STAT_CLS_PLAYER: AtomicU64 = AtomicU64::new(0);
 static STAT_CLS_OTHER: AtomicU64 = AtomicU64::new(0);
 
-pub async fn run(count: usize, secs: u64) {
+pub async fn run(count: usize, secs: u64, port: u16) {
     info!(count, secs, "spawning load-test bots");
     let start = Instant::now();
     let mut handles = Vec::with_capacity(count);
@@ -48,7 +48,7 @@ pub async fn run(count: usize, secs: u64) {
         // Stagger logins to mimic a realistic ramp without starving the
         // server's bootstrap path at the 1000-session scale.
         tokio::time::sleep(Duration::from_millis(30)).await;
-        handles.push(tokio::spawn(bot_session(i, secs)));
+        handles.push(tokio::spawn(bot_session(i, secs, port)));
     }
     let mut ok = 0usize;
     for h in handles {
@@ -434,11 +434,11 @@ struct Boot {
 }
 
 /// One bot session: async socket, fixed behavior loop.
-async fn bot_session(idx: usize, secs: u64) -> bool {
+async fn bot_session(idx: usize, secs: u64, port: u16) -> bool {
     let Ok(sock) = UdpSocket::bind("127.0.0.1:0").await else {
         return false;
     };
-    let server: SocketAddr = "127.0.0.1:1870".parse().expect("BUG: literal");
+    let server: SocketAddr = format!("127.0.0.1:{port}").parse().expect("BUG: literal");
     let mut rel_tx = RelSender::new();
     let mut rel_rx = RelReceiver::new();
     let mut rng = hnh_world::JavaRandom::new(idx as i64 ^ 0xB075);
