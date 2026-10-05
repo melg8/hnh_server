@@ -20,7 +20,7 @@ construction (per-node slot stride), so wire blocks never need remapping.
 Single-node default (`--cluster` absent) is byte-for-byte the previous
 behavior: all cells owned, no links, zero added tick cost.
 
-- [ ] G1: nodes.rs — cluster membership parse, serde/bincoded length-prefixed
+- [x] G1: nodes.rs — cluster membership parse, serde/bincoded length-prefixed
       node-link messages (Hello/Ping/Sub/Unsub/Chat/GuestAnnounce/GuestUpdate/
       GuestRetract/GuestTransfer), tokio TCP mesh with reconnect + Hello
       handshake, unit tests (codec roundtrip, membership parse/overlap errors).
@@ -28,7 +28,7 @@ behavior: all cells owned, no links, zero added tick cost.
       EXPECT: exit 0
       CWD: server
 
-- [ ] G2: Globally-unique gob ids by construction: per-node slot stride in
+- [x] G2: Globally-unique gob ids by construction: per-node slot stride in
       Gobs (free list holds only slots with slot % nodes == me) and
       Gobs::spawn_with_id for ownership transfers (forced (slot, gen) insert,
       free-list consistency). Unit tests: disjoint id spaces across nodes,
@@ -37,7 +37,7 @@ behavior: all cells owned, no links, zero added tick cost.
       EXPECT: exit 0
       CWD: server
 
-- [ ] G3: Authority filtering: with nodes > 1, animal/world-gob simulation
+- [x] G3: Authority filtering: with nodes > 1, animal/world-gob simulation
       (movement, AI, combat) only touches gobs whose cell this node owns;
       players are always authored by their home node. Unit test pins that a
       foreign-cell animal is skipped by tick_animals/tick_movement while a
@@ -46,7 +46,7 @@ behavior: all cells owned, no links, zero added tick cost.
       EXPECT: exit 0
       CWD: server
 
-- [ ] G4: Guests: subscribe/unsubscribe driven by session view cells;
+- [x] G4: Guests: subscribe/unsubscribe driven by session view cells;
       GuestAnnounce/Update/Retract ingestion into World.guests; guests flow
       through the SAME visibility machinery (vis index, scan merge, spawn
       blocks, LINSTEP progress, retract sweep, GC when unviewed and
@@ -56,7 +56,7 @@ behavior: all cells owned, no links, zero added tick cost.
       EXPECT: exit 0
       CWD: server
 
-- [ ] G5: Ownership transfer on animal cell crossing (old authority demotes
+- [x] G5: Ownership transfer on animal cell crossing (old authority demotes
       the gob to a local guest and sends GuestTransfer; the new authority
       promotes it with the SAME id via spawn_with_id and keeps ticking it)
       and player territory publishing (home node announces players to the
@@ -66,13 +66,13 @@ behavior: all cells owned, no links, zero added tick cost.
       EXPECT: exit 0
       CWD: server
 
-- [ ] G6: Area chat crosses nodes through the mesh with the same radius
+- [x] G6: Area chat crosses nodes through the mesh with the same radius
       semantics (the receiving node filters by the sender's guest position).
       CHECK: cargo test -p hnh-server chat_relay
       EXPECT: exit 0
       CWD: server
 
-- [ ] G7: Two-process e2e on the real GL client: node0 + node1 on loopback,
+- [x] G7: Two-process e2e on the real GL client: node0 + node1 on loopback,
       bots on node1, real client on node0 walks into node1-owned territory
       and SEES node1's animals/bot (wire gob dump + screenshot read, verdict
       lines CLUSTER VERDICT); the full single-node regression
@@ -82,5 +82,30 @@ behavior: all cells owned, no links, zero added tick cost.
       EXPECT: exit 0
       CWD: .
 
-- [ ] G8: HANDOFF.md Session 27 entry + docs/mechanics networking note
+- [x] G8: HANDOFF.md Session 27 entry + docs/mechanics networking note
       (cluster mode), worklog appended, commits pushed to origin/master.
+
+EVIDENCE (all gates met):
+- G1: nodes:: 4 tests green (codec roundtrip all message kinds, split/coalesced
+  reassembly, MAX_FRAME rejection, membership parse).
+- G2: state::cluster_tests 4 green (disjoint slot ranges cover the space,
+  spawn_with_id exact-id reuse + free-list claim, transfer kill/reinsert,
+  species index roundtrip).
+- G3: authority_follows_cells_but_players_stay_home green (home deer flees,
+  foreign deer transferred out on tick 1, player abroad keeps walking).
+- G4: guest_ingest_update_reach_sessions green (vis-scan spawn to session,
+  OD_LAYERS wire proof on the raw channel, local LINSTEP progress, retract).
+- G5: animal_transfer_keeps_identity_across_nodes + player_abroad_publishes_
+  to_cell_owner green (GuestTransfer to the cell owner, exact id on the
+  receiver, AI resumes; territory announce/retract bookkeeping).
+- G6: chat_relays_across_nodes green (mesh broadcast on send, radius-filtered
+  delivery on receive).
+- G7: 121 unit tests green, fmt+clippy -D warnings clean; 2-node probe
+  counters both ways (n0 ingest=6 pub=50, n1 ingest=2 pub=91, tick 80-99us);
+  real-client e2e: CLUSTER DUMP animals=13, CLUSTER VERDICT: OK, screenshot
+  READ (/tmp/client_cluster.png), MOVEMENT: MOVED through the cluster;
+  single-node regression intact (121 tests + the s26 suite on the same
+  binary).
+- G8: HANDOFF.md Session 27 written; docs/mechanics/network/session-lifecycle
+  cluster note; commits pushed to origin/master (d202c80, 5951905, 29bd3cd,
+  a37644a).
