@@ -152,6 +152,14 @@ impl MessageBuf {
         }
     }
 
+    /// Advance the read cursor by `n` bytes (skipped payload such as a
+    /// dynamic blob the reader does not interpret).
+    pub fn skip(&mut self, n: usize) -> Result<()> {
+        self.need(n)?;
+        self.read += n;
+        Ok(())
+    }
+
     pub fn u8(&mut self) -> Result<u8> {
         self.need(1)?;
         let v = self.buf[self.read];

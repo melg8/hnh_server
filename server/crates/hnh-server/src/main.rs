@@ -76,6 +76,7 @@ fn default_repo_dir(name: &str) -> std::path::PathBuf {
 struct Args {
     seed: u64,
     bots: usize,
+    bot_secs: u64,
     saturated: bool,
     shards: usize,
     workers: usize,
@@ -86,13 +87,14 @@ struct Args {
 }
 
 fn usage() -> &'static str {
-    "hnh-server [--seed N] [--bots N] [--saturated] [--shards N] [--workers N] [--perf] [--res-dir DIR] [--cert P] [--key P]\n"
+    "hnh-server [--seed N] [--bots N] [--bot-secs S] [--saturated] [--shards N] [--workers N] [--perf] [--res-dir DIR] [--cert P] [--key P]\n"
 }
 
 fn parse_args() -> Args {
     let mut a = Args {
         seed: 42,
         bots: 0,
+        bot_secs: 600,
         saturated: false,
         shards: 1,
         workers: 1,
@@ -106,6 +108,7 @@ fn parse_args() -> Args {
         match arg.as_str() {
             "--seed" => a.seed = it.next().and_then(|v| v.parse().ok()).unwrap_or(42),
             "--bots" => a.bots = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "--bot-secs" => a.bot_secs = it.next().and_then(|v| v.parse().ok()).unwrap_or(600),
             "--saturated" => a.saturated = true,
             "--shards" => a.shards = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
             "--workers" => a.workers = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
@@ -217,7 +220,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
 
     // Optional in-process bots (load testing).
     if args.bots > 0 {
-        tokio::spawn(bots::run(args.bots));
+        tokio::spawn(bots::run(args.bots, args.bot_secs));
     }
 
     // Startup self-check: reach every TCP listener once before announcing

@@ -1,13 +1,22 @@
 //! In-process load-test bots.
 //!
 //! Bots drive the real UDP session path (loopback): handshake, widget
-//! bootstrap, character select, then a behavior loop of walking around.
-//! Sessions run as tokio tasks on a single thread per runtime worker, so
-//! thousands of bots fit far below the process/thread ulimit. This gives an
-//! end-to-end load and correctness signal identical to real clients (same
-//! socket, same reliability layer, same widget protocol).
+//! bootstrap, character select, then a behavior loop that exercises the
+//! master-prompt gameplay triangle — walking around, fighting the wildlife,
+//! harvesting trees/stones, and picking up the drops. Sessions run as tokio
+//! tasks on a single runtime worker each, so thousands of bots fit far below
+//! the process/thread ulimit. This gives an end-to-end load and correctness
+//! signal identical to real clients (same socket, same reliability layer,
+//! same widget protocol).
+//!
+//! Interaction targeting works at the wire level: each session receives
+//! RMSG_RESID resource-name announcements and MSG_OBJDATA gob blocks, builds
+//! a small view of the surrounding gobs, classifies them by resource name,
+//! and clicks concrete gob ids exactly like a real client's MapView does.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
@@ -16,14 +25,21 @@ use tracing::info;
 use hnh_proto::consts::*;
 use hnh_proto::{RelReceiver, RelSender};
 
-pub async fn run(count: usize) {
-    info!(count, "spawning load-test bots");
+// Cohort-wide counters; run() logs the final totals as the load verdict.
+static STAT_FIGHTS: AtomicU64 = AtomicU64::new(0);
+static STAT_HARVESTS: AtomicU64 = AtomicU64::new(0);
+static STAT_PICKUPS: AtomicU64 = AtomicU64::new(0);
+static STAT_WALKS: AtomicU64 = AtomicU64::new(0);
+static STAT_BITES: AtomicU64 = AtomicU64::new(0);
+
+pub async fn run(count: usize, secs: u64) {
+    info!(count, secs, "spawning load-test bots");
     let start = Instant::now();
     let mut handles = Vec::with_capacity(count);
     for i in 0..count {
         // Stagger logins 10 ms apart to mimic a realistic ramp.
         tokio::time::sleep(Duration::from_millis(10)).await;
-        handles.push(tokio::spawn(bot_session(i)));
+        handles.push(tokio::spawn(bot_session(i, secs)));
     }
     let mut ok = 0usize;
     for h in handles {
@@ -34,9 +50,329 @@ pub async fn run(count: usize) {
     info!(
         connected = ok,
         total = count,
+        fights = STAT_FIGHTS.load(Ordering::Relaxed),
+        harvests = STAT_HARVESTS.load(Ordering::Relaxed),
+        pickups = STAT_PICKUPS.load(Ordering::Relaxed),
+        bites_taken = STAT_BITES.load(Ordering::Relaxed),
         elapsed_secs = start.elapsed().as_secs(),
         "bot cohort finished"
     );
+}
+
+/// Gameplay class of a gob, resolved from its wire resource name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GobClass {
+    Animal,
+    Tree,
+    Stone,
+    Drop,
+    Player,
+    Other,
+}
+
+/// Classify a gob by its announced resource name. The kritter check must
+/// precede the body check: kritter pose bases are named `.../<sp>/body`.
+pub fn classify(res_name: &str) -> GobClass {
+    if res_name.contains("/kritter/") {
+        GobClass::Animal
+    } else if res_name.contains("/borka") {
+        GobClass::Player
+    } else if res_name.contains("/trees/") {
+        GobClass::Tree
+    } else if res_name.contains("/bumlings/") {
+        GobClass::Stone
+    } else if res_name.contains("/invobjs/") {
+        GobClass::Drop
+    } else {
+        GobClass::Other
+    }
+}
+
+/// One decoded MSG_OBJDATA operation (the subset bots act on).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ObjOp {
+    /// Gob removed (id).
+    Remove(i32),
+    /// Gob position (id, x, y).
+    Move(i32, i32, i32),
+    /// Movement target (id, sx, sy, tx, ty) — recorded as the target pos.
+    Lin(i32, i32, i32, i32, i32),
+    /// Flat resource spawn (id, wire res id).
+    Res(i32, u16),
+    /// Layered spawn base (id, wire base res id).
+    Layers(i32, u16),
+    /// Bite overlay landed on the gob (id, overlay wire res).
+    Overlay(i32, u16),
+    /// Player name plate (id) — content unused by bots.
+    Buddy(i32),
+}
+
+/// Parse one MSG_OBJDATA datagram payload into ops. Unknown ops abort the
+/// remaining block the way the client's reader would fail: the datagram is
+/// dropped whole rather than misparsed (the server only emits ops bots know,
+/// so this never happens against this server).
+pub fn parse_objdata(payload: &[u8]) -> Vec<ObjOp> {
+    let mut out = Vec::new();
+    let mut m = hnh_proto::MessageBuf::from_slice(payload);
+    'blocks: while !m.eom() {
+        // One block: uint8 flags, int32 id, int32 frame, then ops.
+        let (Ok(fl), Ok(id), Ok(_frame)) = (m.u8(), m.i32(), m.i32()) else {
+            break;
+        };
+        if fl & 1 != 0 {
+            out.push(ObjOp::Remove(id));
+            continue;
+        }
+        loop {
+            let Ok(op) = m.u8() else { break 'blocks };
+            match op {
+                OD_REM => out.push(ObjOp::Remove(id)),
+                OD_MOVE => {
+                    let (Ok(x), Ok(y)) = (m.i32(), m.i32()) else {
+                        break 'blocks;
+                    };
+                    out.push(ObjOp::Move(id, x, y));
+                }
+                OD_RES => {
+                    let Ok(mut resid) = m.u16() else {
+                        break 'blocks;
+                    };
+                    if resid & 0x8000 != 0 {
+                        resid &= !0x8000;
+                        let Ok(sdt_len) = m.u8() else { break 'blocks };
+                        if m.skip(sdt_len as usize).is_err() {
+                            break 'blocks;
+                        }
+                    }
+                    out.push(ObjOp::Res(id, resid));
+                }
+                OD_LINBEG => {
+                    let (Ok(sx), Ok(sy), Ok(tx), Ok(ty), Ok(_st)) =
+                        (m.i32(), m.i32(), m.i32(), m.i32(), m.i32())
+                    else {
+                        break 'blocks;
+                    };
+                    out.push(ObjOp::Lin(id, sx, sy, tx, ty));
+                }
+                OD_LINSTEP => {
+                    if m.i32().is_err() {
+                        break 'blocks;
+                    }
+                }
+                OD_SPEECH => {
+                    if m.i32().and_then(|_| m.i32()).and_then(|_| m.str()).is_err() {
+                        break 'blocks;
+                    }
+                }
+                OD_LAYERS => {
+                    let Ok(base) = m.u16() else { break 'blocks };
+                    loop {
+                        let Ok(layer) = m.u16() else { break 'blocks };
+                        if layer == 65535 {
+                            break;
+                        }
+                    }
+                    out.push(ObjOp::Layers(id, base));
+                }
+                OD_DRAWOFF => {
+                    if m.i32().and_then(|_| m.i32()).is_err() {
+                        break 'blocks;
+                    }
+                }
+                OD_LUMIN => {
+                    if m.i32()
+                        .and_then(|_| m.i32())
+                        .and_then(|_| m.u16())
+                        .and_then(|_| m.u8())
+                        .is_err()
+                    {
+                        break 'blocks;
+                    }
+                }
+                OD_FOLLOW | OD_HOMING => {
+                    // Server does not emit these; skip the gob block whole.
+                    break 'blocks;
+                }
+                OD_OVERLAY => {
+                    let (Ok(_olid), Ok(raw)) = (m.i32(), m.u16()) else {
+                        break 'blocks;
+                    };
+                    if raw == 65535 {
+                        // Overlay removal carries no sdt (client Session.java
+                        // checks resid == 65535 before the flag branch).
+                        continue;
+                    }
+                    let mut resid = raw;
+                    if resid & 0x8000 != 0 {
+                        resid &= !0x8000;
+                        let Ok(sdt_len) = m.u8() else { break 'blocks };
+                        if m.skip(sdt_len as usize).is_err() {
+                            break 'blocks;
+                        }
+                    }
+                    out.push(ObjOp::Overlay(id, resid));
+                }
+                OD_HEALTH => {
+                    if m.u8().is_err() {
+                        break 'blocks;
+                    }
+                }
+                OD_BUDDY => {
+                    if m.str().and_then(|_| m.u8()).and_then(|_| m.u8()).is_err() {
+                        break 'blocks;
+                    }
+                    out.push(ObjOp::Buddy(id));
+                }
+                OD_END => break,
+                _ => {
+                    // Unknown op: stop parsing this datagram like the client
+                    // reader would fail, rather than desync the byte stream.
+                    break 'blocks;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Per-session view of the world: resource names and nearby gobs.
+#[derive(Default)]
+struct BotView {
+    /// Session wire id -> announced resource name.
+    res_names: HashMap<u16, String>,
+    /// Gob id -> (wire res id, pos x, pos y).
+    gobs: HashMap<i32, (u16, i32, i32)>,
+    /// Gobs whose wire id was not announced yet (reclassify on RESID).
+    unnamed: Vec<i32>,
+}
+
+impl BotView {
+    fn apply(&mut self, op: ObjOp, bites: bool) {
+        match op {
+            ObjOp::Remove(id) => {
+                self.gobs.remove(&id);
+            }
+            ObjOp::Move(id, x, y) => {
+                if let Some(g) = self.gobs.get_mut(&id) {
+                    g.1 = x;
+                    g.2 = y;
+                }
+            }
+            ObjOp::Lin(id, _sx, _sy, tx, ty) => {
+                if let Some(g) = self.gobs.get_mut(&id) {
+                    // Track the movement target: close enough for targeting.
+                    g.1 = tx;
+                    g.2 = ty;
+                }
+            }
+            ObjOp::Res(id, wire) | ObjOp::Layers(id, wire) => {
+                // Keep a position already received in this block (the server
+                // sends MOVE before RES/LAYERS); a (0,0) default marks the
+                // gob position-unknown until the first MOVE/LIN lands.
+                let e = self.gobs.entry(id).or_insert((wire, 0, 0));
+                e.0 = wire;
+                if !self.res_names.contains_key(&wire) {
+                    self.unnamed.push(id);
+                }
+            }
+            ObjOp::Overlay(_id, _wire) => {
+                if bites {
+                    STAT_BITES.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            ObjOp::Buddy(_) => {}
+        }
+    }
+
+    /// A RESID announcement arrived: remember the name and reclassify any
+    /// gobs that were waiting for this wire id.
+    fn on_resid(&mut self, wire: u16, name: String) {
+        self.res_names.insert(wire, name);
+        if !self.unnamed.is_empty() {
+            self.unnamed.retain(|id| {
+                if let Some(g) = self.gobs.get(id) {
+                    if g.0 == wire {
+                        // Position may still be unknown (op order); leave the
+                        // entry — targets without a position are skipped.
+                        return false;
+                    }
+                }
+                true
+            });
+        }
+    }
+
+    fn class_of(&self, wire: u16) -> GobClass {
+        match self.res_names.get(&wire) {
+            Some(n) => classify(n),
+            None => GobClass::Other,
+        }
+    }
+
+    /// Nearest gob of a class within `radius` subtiles of (x, y).
+    fn nearest(&self, cls: GobClass, x: i32, y: i32, radius: i64) -> Option<(i32, i32, i32)> {
+        let mut best: Option<(i32, i32, i32)> = None;
+        let mut best_d2 = radius * radius;
+        for (&id, &(wire, gx, gy)) in &self.gobs {
+            if self.class_of(wire) != cls || (gx == 0 && gy == 0) {
+                continue;
+            }
+            let dx = (gx - x) as i64;
+            let dy = (gy - y) as i64;
+            let d2 = dx * dx + dy * dy;
+            if d2 <= best_d2 {
+                best_d2 = d2;
+                best = Some((id, gx, gy));
+            }
+        }
+        best
+    }
+}
+
+/// A chosen interaction target.
+struct Target {
+    gob: i32,
+    at: (i32, i32),
+    stat: fn(),
+}
+
+/// Pick the next action for a bot at (x, y): loot > fight > harvest, with a
+/// harvesting bias so wood/stone economy keeps moving alongside the fights.
+fn pick_target(view: &BotView, x: i32, y: i32) -> Option<Target> {
+    let drop = view.nearest(GobClass::Drop, x, y, 6 * 11);
+    if let Some((gob, gx, gy)) = drop {
+        return Some(Target {
+            gob,
+            at: (gx, gy),
+            stat: || {
+                STAT_PICKUPS.fetch_add(1, Ordering::Relaxed);
+            },
+        });
+    }
+    let animal = view.nearest(GobClass::Animal, x, y, 10 * 11);
+    if let Some((gob, gx, gy)) = animal {
+        return Some(Target {
+            gob,
+            at: (gx, gy),
+            stat: || {
+                STAT_FIGHTS.fetch_add(1, Ordering::Relaxed);
+            },
+        });
+    }
+    // Harvest the nearest tree; fall back to the nearest stone.
+    let harvest = view
+        .nearest(GobClass::Tree, x, y, 8 * 11)
+        .or_else(|| view.nearest(GobClass::Stone, x, y, 8 * 11));
+    if let Some((gob, gx, gy)) = harvest {
+        return Some(Target {
+            gob,
+            at: (gx, gy),
+            stat: || {
+                STAT_HARVESTS.fetch_add(1, Ordering::Relaxed);
+            },
+        });
+    }
+    None
 }
 
 /// Outcome of the bootstrap phase.
@@ -45,7 +381,7 @@ struct Boot {
 }
 
 /// One bot session: async socket, fixed behavior loop.
-async fn bot_session(idx: usize) -> bool {
+async fn bot_session(idx: usize, secs: u64) -> bool {
     let Ok(sock) = UdpSocket::bind("127.0.0.1:0").await else {
         return false;
     };
@@ -55,6 +391,7 @@ async fn bot_session(idx: usize) -> bool {
     let mut rng = hnh_world::JavaRandom::new(idx as i64 ^ 0xB075);
     let name = format!("bot{idx:05}");
     let cookie = crate::auth().issue_cookie(&name);
+    let mut view = BotView::default();
 
     // --- handshake ---
     let mut sess = hnh_proto::MessageBuf::new();
@@ -111,12 +448,13 @@ async fn bot_session(idx: usize) -> bool {
         }
     }
 
-    // --- behavior loop: random walks for up to 10 minutes ---
-    let behavior_end = Instant::now() + Duration::from_secs(600);
+    // --- behavior loop: walk / fight / harvest / loot for `secs` ---
+    let behavior_end = Instant::now() + Duration::from_secs(secs);
     let mut next_action = Instant::now() + Duration::from_millis(500);
     let mut next_beat = Instant::now() + Duration::from_secs(5);
     let mut next_flush = Instant::now() + Duration::from_millis(20);
     let mut alive = true;
+    let mut last_pos = (home_tx * 11, home_ty * 11);
     while alive && Instant::now() < behavior_end {
         let mut buf = [0u8; 65536];
         let wait = next_flush
@@ -127,7 +465,17 @@ async fn bot_session(idx: usize) -> bool {
             match buf[0] {
                 MSG_REL => {
                     for (ty, payload) in rel_rx.on_rel(&buf[1..n]) {
-                        let _ = (ty, payload);
+                        if ty == RMSG_RESID {
+                            parse_resid(&payload, &mut view);
+                        }
+                    }
+                }
+                MSG_OBJDATA => {
+                    // Track bites only on the bot's own neighborhood overlays
+                    // (all critter bites carry the same fx resource; counting
+                    // every one across the cohort measures combat activity).
+                    for op in parse_objdata(&buf[1..n]) {
+                        view.apply(op, true);
                     }
                 }
                 MSG_CLOSE => alive = false,
@@ -137,20 +485,16 @@ async fn bot_session(idx: usize) -> bool {
         let now = Instant::now();
         if now >= next_action {
             next_action = now + Duration::from_millis(400 + rng.next_bounded(800) as u64);
-            let jx = home_tx * 11 + rng.next_bounded(600) - 300;
-            let jy = home_ty * 11 + rng.next_bounded(600) - 300;
-            let mut click = hnh_proto::MessageBuf::new();
-            click
-                .uint8(RMSG_WDGMSG)
-                .uint16(mapview)
-                .string("click")
-                .lint(0)
-                .lint(jx)
-                .lint(jy)
-                .lint(1)
-                .lint(0)
-                .lend();
-            rel_tx.queue(&click.finish());
+            if let Some(t) = pick_target(&view, last_pos.0, last_pos.1) {
+                queue_click(&mut rel_tx, mapview, t.at, Some(t.gob));
+                (t.stat)();
+            } else {
+                let jx = home_tx * 11 + rng.next_bounded(600) - 300;
+                let jy = home_ty * 11 + rng.next_bounded(600) - 300;
+                queue_click(&mut rel_tx, mapview, (jx, jy), None);
+                STAT_WALKS.fetch_add(1, Ordering::Relaxed);
+                last_pos = (jx, jy);
+            }
         }
         if now >= next_beat {
             next_beat = now + Duration::from_secs(5);
@@ -163,6 +507,33 @@ async fn bot_session(idx: usize) -> bool {
     }
     let _ = sock.send_to(&[MSG_CLOSE], server).await;
     alive
+}
+
+/// Decode one RMSG_RESID payload (uint16 wire, string name, uint16 ver).
+fn parse_resid(payload: &[u8], view: &mut BotView) {
+    let mut m = hnh_proto::MessageBuf::from_slice(payload);
+    if let (Ok(wire), Ok(name)) = (m.u16(), m.str()) {
+        view.on_resid(wire, name);
+    }
+}
+
+/// Queue a mapview click. `gob = Some(id)` is an interaction click (the
+/// server resolves fight/harvest/pickup by the target's kind), `None` walks.
+fn queue_click(rel_tx: &mut RelSender, mapview: u16, at: (i32, i32), gob: Option<i32>) {
+    let mut click = hnh_proto::MessageBuf::new();
+    click
+        .uint8(RMSG_WDGMSG)
+        .uint16(mapview)
+        .string("click")
+        .lint(0)
+        .lcoord(at.0, at.1)
+        .lint(1)
+        .lint(0);
+    if let Some(g) = gob {
+        click.lint(g);
+    }
+    click.lend();
+    rel_tx.queue(&click.finish());
 }
 
 async fn bootstrap(
@@ -228,5 +599,133 @@ async fn bootstrap(
 async fn send_rel(sock: &UdpSocket, rel: &mut RelSender, server: SocketAddr) {
     for d in rel.poll_transmit(Instant::now(), 1200) {
         let _ = sock.send_to(&d, server).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The server's own OD_RES encoding of a stone (no sdt): header + RES.
+    fn stone_datagram() -> Vec<u8> {
+        let mut m = hnh_proto::MessageBuf::new();
+        m.uint8(MSG_OBJDATA)
+            .uint8(0)
+            .int32(777)
+            .int32(0)
+            .uint8(OD_RES)
+            .uint16(3) // wire id 3, announced as a bumling
+            .uint8(OD_MOVE)
+            .coord(1010, 2020)
+            .uint8(OD_END);
+        m.finish()
+    }
+
+    #[test]
+    fn class_resolves_by_res_name() {
+        assert_eq!(classify("gfx/kritter/fox/body"), GobClass::Animal);
+        assert_eq!(classify("gfx/borka/body"), GobClass::Player);
+        assert_eq!(classify("gfx/terobjs/trees/fir"), GobClass::Tree);
+        assert_eq!(classify("gfx/terobjs/bumlings/01"), GobClass::Stone);
+        assert_eq!(classify("gfx/invobjs/wood"), GobClass::Drop);
+        assert_eq!(classify("gfx/terobjs/stove"), GobClass::Other);
+    }
+
+    #[test]
+    fn objdata_parses_res_move_and_end() {
+        let ops = parse_objdata(&stone_datagram()[1..]);
+        assert!(ops.contains(&ObjOp::Res(777, 3)));
+        assert!(ops.contains(&ObjOp::Move(777, 1010, 2020)));
+    }
+
+    #[test]
+    fn objdata_tracks_layers_and_removal() {
+        let mut m = hnh_proto::MessageBuf::new();
+        m.uint8(0)
+            .int32(9)
+            .int32(0)
+            .uint8(OD_LAYERS)
+            .uint16(11)
+            .uint16(12)
+            .uint16(13)
+            .uint16(65535)
+            .uint8(OD_HEALTH)
+            .uint8(4)
+            .uint8(OD_END)
+            .uint8(1) // remove flag block
+            .int32(9)
+            .int32(1)
+            .uint8(OD_END);
+        let ops = parse_objdata(m.finish().as_slice());
+        assert!(ops.contains(&ObjOp::Layers(9, 11)));
+        assert!(ops.contains(&ObjOp::Remove(9)));
+    }
+
+    #[test]
+    fn objdata_skips_overlay_removals_and_counts_adds() {
+        let mut m = hnh_proto::MessageBuf::new();
+        m.uint8(0)
+            .int32(5)
+            .int32(0)
+            .uint8(OD_OVERLAY)
+            .int32(-1)
+            .uint16(65535) // overlay removal: not a bite
+            .uint8(OD_OVERLAY)
+            .int32(-3)
+            .uint16(42) // bite fx add
+            .uint8(OD_END);
+        let ops = parse_objdata(m.finish().as_slice());
+        assert!(ops.contains(&ObjOp::Overlay(5, 42)));
+        assert!(!ops.iter().any(|o| matches!(o, ObjOp::Overlay(_, 65535))));
+    }
+
+    #[test]
+    fn view_targets_the_nearest_drop_first() {
+        let mut v = BotView::default();
+        v.on_resid(1, "gfx/invobjs/wood".into());
+        v.on_resid(2, "gfx/kritter/boar/body".into());
+        v.on_resid(3, "gfx/terobjs/trees/fir".into());
+        // Server wire order: RES/LAYERS first, then MOVE.
+        v.apply(ObjOp::Res(100, 1), false);
+        v.apply(ObjOp::Move(100, 1000, 1000), false);
+        v.apply(ObjOp::Layers(101, 2), false);
+        v.apply(ObjOp::Move(101, 1100, 1000), false);
+        v.apply(ObjOp::Res(102, 3), false);
+        v.apply(ObjOp::Move(102, 1400, 1000), false);
+        let t = pick_target(&v, 1000, 1000).expect("a target exists");
+        assert_eq!(t.gob, 100, "drop outranks animal and tree");
+        assert_eq!(t.at, (1000, 1000));
+    }
+
+    #[test]
+    fn view_fights_animal_when_no_drop() {
+        let mut v = BotView::default();
+        v.on_resid(2, "gfx/kritter/boar/body".into());
+        v.on_resid(3, "gfx/terobjs/trees/fir".into());
+        v.apply(ObjOp::Layers(101, 2), false);
+        v.apply(ObjOp::Move(101, 1100, 1000), false);
+        v.apply(ObjOp::Res(102, 3), false);
+        v.apply(ObjOp::Move(102, 1400, 1000), false);
+        let t = pick_target(&v, 1000, 1000).expect("a target exists");
+        assert_eq!(t.gob, 101, "animal outranks tree");
+    }
+
+    #[test]
+    fn resid_late_arrival_reclassifies() {
+        let mut v = BotView::default();
+        // Spawn arrives before the RESID announcement (wire id 7 unknown).
+        v.apply(ObjOp::Res(33, 7), false);
+        assert_eq!(v.class_of(7), GobClass::Other);
+        v.on_resid(7, "gfx/terobjs/bumlings/02".into());
+        assert_eq!(v.class_of(7), GobClass::Stone);
+    }
+
+    #[test]
+    fn parse_resid_reads_wire_and_name() {
+        let mut m = hnh_proto::MessageBuf::new();
+        m.uint16(7).string("gfx/invobjs/stone").uint16(1);
+        let mut v = BotView::default();
+        parse_resid(m.finish().as_slice(), &mut v);
+        assert_eq!(v.class_of(7), GobClass::Drop);
     }
 }
