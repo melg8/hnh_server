@@ -434,11 +434,16 @@ public class DriveAgent {
             int[] center = {512, 384};
             // Screen deltas per 110 map subtiles: m2s(d) = (2dx-2dy, dx+dy).
             // EAST (+x) = (220, 110); NORTH (-y) = (220, -110);
-            // SOUTH (+y) = (-220, 110). Any two legs give the
-            // direction-faces-travel visual evidence (m2s at MapView:626).
+            // SOUTH (+y) = (-220, 110). UP (away, (-1,-1)) = (0, -220);
+            // LEFT ((-1,1)) = (-220, 0). UP and LEFT are the exact user-
+            // reported defect directions (session 22): the walk pose must
+            // face the travel direction (back view for UP, left profile
+            // for LEFT).
             walkAndShoot(robot, mv, center, 220, 110, "EAST", "/tmp/client_walk_east.png");
             walkAndShoot(robot, mv, center, 220, -110, "NORTH", "/tmp/client_walk_north.png");
             walkAndShoot(robot, mv, center, -220, 110, "SOUTH", "/tmp/client_walk_south.png");
+            walkAndShoot(robot, mv, center, 0, -220, "UP", "/tmp/client_walk_up.png");
+            walkAndShoot(robot, mv, center, -220, 0, "LEFT", "/tmp/client_walk_left.png");
 
             // Equipment paperdoll: Equipory.cdraw draws ui.equip's bg +
             // the Avatar.rend of the avagob. Dump the binding state and

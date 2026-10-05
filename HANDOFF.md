@@ -961,3 +961,54 @@ visibility groups; mapview ground-drop flow; equipment effects (armor
 class + avatar layer changes on equip); craft pagina wiring; the
 equipment doll could sit centered in the window frame (cosmetic); a
 client-side camera-position getter would make animal screenshots exact.
+
+## 2026-10-05 - Session 22: one-octant walk direction offset (art ring vs movement ring)
+Continuation under .unlazy/session22. User report: the walk animation is
+SHIFTED BY ONE octant from the travel direction - walking UP showed the
+up-right set, walking LEFT the up-left set. Session 21 had removed the
+frame-cycling spin but fed the raw MOVEMENT octant into the directional
+resource name; the art pack's ring is rotated one octant against the
+movement ring.
+
+ROOT CAUSE PROVEN three independent ways:
+1. Decoded the fox standing sprites into a labeled sheet
+   (scripts/dump_directions.py, read visually): art 0 = head-on FRONT
+   (the +x+y camera-facing octant), art 1 = down-left 3/4, art 2 = pure
+   left profile, art 3 = up-left 3/4, art 4 = back, art 5 = up-right
+   3/4, art 6 = pure right profile, art 7 = down-right 3/4 - sprite N
+   depicts movement octant N+1 (m2s = (2x-2y, x+y), MapView:626, makes
+   +x+y the camera-facing front).
+2. Both user data points fit exactly: walking up (octant 5) rendered
+   sprite 5 = octant 6 (up-right); walking left (octant 3) rendered
+   sprite 3 = octant 4 (up-left).
+3. Session 21's own real-client note "east = front view" was itself the
+   defect showing through: east (octant 0) rendered sprite 0 = front
+   instead of the down-right 3/4 walk view.
+
+FIX (commit ee94dd4): art_dir(octant) = (octant - 1) mod 8 applied at
+the layer-name composition boundary only (PoseTable::build for avatar
+and kritter tables); `facing` keeps the true movement octant for game
+logic and the one-byte pose dedupe. Spawn facing default 0 -> 1 so
+fresh gobs render the front view; the login portrait path switched to
+octant 1 (was hard-coded octant 0, which after the fix rendered the
+3/4 view - caught by reading PORTRAIT LAYERS in the e2e log); the
+equipment doll switched to sprite 0 = true head-on front (was sprite 1
+= down-left 3/4). DriveAgent phase 3 gained the exact user defect
+directions: screen UP (0,-220) and screen LEFT (-220,0) legs.
+
+VERIFIED: 94 unit tests green (new art_dir_offsets_the_sprite_ring pins
+the full ring + user cases; layer composition tests pin emitted
+digits), fmt+clippy -D warnings clean. Real GL client (s22p run):
+EAST = down-right 3/4 front, up-right leg = 3/4 back, down-left leg =
+3/4 front, screen-UP = back view (user case fixed), LEFT leg (retarget
+around obstacle, actual octant 2) matches travel; charlist portrait =
+head-on front; EQUIP DOLL ava-rend=OK with front-view banzai doll;
+ANIMALS boar mid-walk visible at pure left profile matching its
+walking-2 layer. Full regression: MOVEMENT/SPEED/NO TELEPORT/PORTRAIT/
+EQUIP/ANIMALS all OK.
+
+NEXT (handoff): grid-owner partitioning for the 10k target; shared
+visibility groups; equipment effects (armor class + avatar layer
+changes on equip); craft pagina wiring; a pure-left (octant 3) walk leg
+screenshot would complete the visual ring (the e2e leg retargeted
+around an obstacle; wire+unit coverage pins it deterministically).

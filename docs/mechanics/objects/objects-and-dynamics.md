@@ -442,11 +442,24 @@ verified in session 21:
   server must NEVER stream per-frame layer updates. Cycling the 8
   direction sets in sequence spins the avatar around its own axis (the
   session-21 defect).
-- Direction index: quantized movement octant, dir 0 = +x, dir 2 = +y,
-  dir 4 = -x, dir 6 = -y (counterclockwise atan2; see `move_dir` in
-  hnh-server game.rs). Verified on the real client: dir 0 renders the
-  front view, dir 6 the right-facing profile, dir 2 the left-facing
-  profile.
+- Direction index: TWO rings are involved. The server tracks the MOVEMENT
+  octant (`move_dir` in hnh-server game.rs: dir 0 = +x, dir 2 = +y,
+  dir 4 = -x, dir 6 = -y, counterclockwise atan2 quantization), but the
+  art resources are indexed by a ring rotated ONE OCTANT against it
+  (`art_dir(octant) = (octant - 1) mod 8`): sprite 0 is the head-on FRONT
+  view (the +x+y camera-facing octant), sprite 4 the back, sprites 2/6 the
+  pure left/right profiles, odd sprites the 3/4 views. Feeding the raw
+  movement octant into the resource name shifted every walk animation one
+  octant clockwise on screen (the session-22 defect: walking up showed the
+  up-right set, walking left the up-left set; east rendered the front
+  view). Verified by decoding the fox standing sprites (art 0 = front,
+  art 1 = down-left 3/4, art 2 = pure left profile, art 3 = up-left 3/4,
+  art 4 = back, art 5 = up-right 3/4, art 6 = pure right profile, art 7 =
+  down-right 3/4; `scripts/dump_directions.py`) and on the real client
+  (session 22: east -> down-right 3/4, up-right -> up-right 3/4 back,
+  down-left -> down-left 3/4 front, screen-up -> back view). Spawn facing
+  defaults to octant 1 so fresh gobs render the front view; the login
+  portrait and the equipment doll use sprite 0 (front).
 - The layer set is (re-)streamed only on pose/direction CHANGES (move
   start -> walking set of the new direction, arrival -> standing set of
   the same direction, retarget mid-walk -> new direction's walking set).

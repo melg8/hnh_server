@@ -798,8 +798,10 @@ impl Game {
         // resources ("gfx/borka/body" et al) carry no imgc layers and
         // would leave the portrait blank ("no face" bug report). The
         // same frame set layers the in-world avatar, so the login card
-        // and the world character match.
-        let portrait_layers = avatar_pose_layers(false, 0);
+        // and the world character match. Octant 1 is the camera-facing
+        // front octant: art_dir(1) = sprite 0, the head-on front view the
+        // login card expects.
+        let portrait_layers = avatar_pose_layers(false, 1);
         let mut layer_ids = Vec::with_capacity(portrait_layers.len());
         for name in portrait_layers {
             let global = self.world.res.intern(name);
