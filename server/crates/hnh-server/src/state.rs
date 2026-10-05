@@ -720,6 +720,17 @@ pub struct World {
     /// guest - it only advances movement interpolation deterministically
     /// from the linmove params (same arithmetic as local movers).
     pub guests: HashMap<GobId, GuestGob>,
+    /// Cross-node interaction relay (session 28). On the ATTACKER's home
+    /// node: local mirrors of the defence bars of guest animals being
+    /// fought through the relay (the authoritative bars live on the
+    /// owning node; FightBars messages re-sync this mirror, the fightview
+    /// reads it). Keyed by the animal gob id.
+    pub guest_fights: HashMap<GobId, AnimalFight>,
+    /// On the TARGET's authority node: the guest player currently engaged
+    /// with each relay-fought animal (same one-attacker cardinality as
+    /// `animal_fights`). Keyed by the animal gob id, value = player gob
+    /// id; PlayerHurt/KillCredit route back through `node_of_gob`.
+    pub guest_attackers: HashMap<GobId, GobId>,
     /// Tick counter for deterministic scheduling.
     pub tick: u64,
     /// Logical world time in ms, advanced by TICK_MS each game tick (the
@@ -818,6 +829,8 @@ impl World {
             structure_at: HashMap::new(),
             parties: Vec::new(),
             guests: HashMap::new(),
+            guest_fights: HashMap::new(),
+            guest_attackers: HashMap::new(),
             tick: 0,
             now_ms: 0,
             rng: hnh_world::JavaRandom::new(seed as i64),

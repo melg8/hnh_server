@@ -136,9 +136,24 @@ fn parse_args() -> Args {
             "--key" => a.key = it.next(),
             "--cluster" => a.cluster = it.next(),
             "--node" => a.node = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
-            "--game-port" => a.game_port = it.next().and_then(|v| v.parse().ok()).unwrap_or(net::GAME_PORT),
-            "--auth-port" => a.auth_port = it.next().and_then(|v| v.parse().ok()).unwrap_or(crate::auth::AUTH_PORT),
-            "--res-port" => a.res_port = it.next().and_then(|v| v.parse().ok()).unwrap_or(res_http::RES_PORT),
+            "--game-port" => {
+                a.game_port = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(net::GAME_PORT)
+            }
+            "--auth-port" => {
+                a.auth_port = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(crate::auth::AUTH_PORT)
+            }
+            "--res-port" => {
+                a.res_port = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(res_http::RES_PORT)
+            }
             "--help" | "-h" => {
                 print!("{}", usage());
                 std::process::exit(0);
@@ -264,12 +279,9 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     }
     // Version announcements read the actual .res headers from this dir.
     resources::init_res_dir(res_dir.clone());
-    let res_listener = res_http::bind(args.res_port).await.map_err(|e| {
-        anyhow::anyhow!(
-            "cannot bind resource http port {}: {e:#}",
-            args.res_port
-        )
-    })?;
+    let res_listener = res_http::bind(args.res_port)
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot bind resource http port {}: {e:#}", args.res_port))?;
     tokio::spawn(res_http::serve(res_listener, args.res_port, res_dir));
 
     // Optional in-process bots (load testing).
@@ -371,10 +383,7 @@ fn log_dir() -> Option<std::path::PathBuf> {
 /// taken, bad certificate) otherwise only surfaces as client-side
 /// "connection refused" errors long after startup.
 async fn startup_probe(auth_port: u16, res_port: u16) -> anyhow::Result<()> {
-    let targets = [
-        ("auth", auth_port),
-        ("resource http", res_port),
-    ];
+    let targets = [("auth", auth_port), ("resource http", res_port)];
     for (name, port) in targets {
         let mut reachable = false;
         for _ in 0..20 {
@@ -403,10 +412,7 @@ async fn startup_probe(auth_port: u16, res_port: u16) -> anyhow::Result<()> {
 /// actual failure. Probe connections are plain TCP (no TLS handshake),
 /// which auth logs at debug level - expected noise.
 async fn health_watchdog(auth_port: u16, res_port: u16) {
-    let targets = [
-        ("auth", auth_port),
-        ("resource http", res_port),
-    ];
+    let targets = [("auth", auth_port), ("resource http", res_port)];
     let mut tick = tokio::time::interval(Duration::from_secs(10));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await; // interval fires once immediately; skip that one

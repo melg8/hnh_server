@@ -133,6 +133,34 @@ pub enum NodeMsg {
     /// Authority handoff: the receiver inserts the gob with the SAME id
     /// and becomes its simulation authority.
     GuestTransfer(GuestState),
+    /// Cross-node interaction relay (session 28): home node -> authority
+    /// node. The player gob `attacker` swung at the guest animal `target`.
+    /// `chip` (defence-bar damage) and `dmg` (HP damage on an opening) are
+    /// computed on the home node with the exact formulas the local path
+    /// uses — the attacker's str/armor live there. The authority applies
+    /// them to its authoritative bars/HP and answers with FightBars.
+    RelayAttack {
+        attacker: i32,
+        target: i32,
+        chip: i32,
+        dmg: i32,
+    },
+    /// Authority -> home: the authoritative defence bar of a relay-fought
+    /// animal after one applied swing; the home mirror re-syncs from it
+    /// (the fightview reads the mirror, so a missed message self-heals on
+    /// the next swing).
+    FightBars { id: i32, def: i32 },
+    /// Authority -> home: an animal bit the guest player `player_gob` (a
+    /// session player homed on the receiver). Armor absorption, HP,
+    /// stamina and the knockout path all live on the home node.
+    PlayerHurt {
+        player_gob: i32,
+        dmg: i32,
+        from: i32,
+    },
+    /// Authority -> home: the guest attacker dealt the killing blow; the
+    /// receiver grants the learning points (the LP wallet lives there).
+    KillCredit { player_gob: i32, lp: i32 },
 }
 
 /// Length-prefix + bincode encode of one node message.
@@ -476,6 +504,10 @@ fn msg_name(msg: &NodeMsg) -> &'static str {
         NodeMsg::GuestUpdate(_) => "guest_update",
         NodeMsg::GuestRetract { .. } => "guest_retract",
         NodeMsg::GuestTransfer(_) => "guest_transfer",
+        NodeMsg::RelayAttack { .. } => "relay_attack",
+        NodeMsg::FightBars { .. } => "fight_bars",
+        NodeMsg::PlayerHurt { .. } => "player_hurt",
+        NodeMsg::KillCredit { .. } => "kill_credit",
     }
 }
 
@@ -569,6 +601,25 @@ mod tests {
             max_hp: 1,
             speed: 0,
         }));
+        msg_roundtrip(NodeMsg::RelayAttack {
+            attacker: 0x0001_0007,
+            target: 0x0002_0003,
+            chip: 42,
+            dmg: 5,
+        });
+        msg_roundtrip(NodeMsg::FightBars {
+            id: 0x0002_0003,
+            def: 5000,
+        });
+        msg_roundtrip(NodeMsg::PlayerHurt {
+            player_gob: 0x0001_0007,
+            dmg: 2,
+            from: 0x0002_0003,
+        });
+        msg_roundtrip(NodeMsg::KillCredit {
+            player_gob: 0x0001_0007,
+            lp: 10,
+        });
     }
 
     #[test]

@@ -121,11 +121,7 @@ pub async fn spawn(
     let shard_count = shards.max(1);
     for id in 0..shard_count {
         let socket = Arc::new(bind_shard_socket(port)?);
-        info!(
-            shard = id,
-            port,
-            "game server (UDP) shard listening"
-        );
+        info!(shard = id, port, "game server (UDP) shard listening");
         let game_tx = game_tx.clone();
         tokio::spawn(async move {
             if let Err(e) = recv_loop(socket, game_tx, id).await {

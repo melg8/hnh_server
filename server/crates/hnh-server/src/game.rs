@@ -1932,6 +1932,21 @@ impl Game {
         }
     }
 
+    /// Home node of a gob id: cluster slot ranges partition [0, MAX_SLOT]
+    /// in equal strides (Gobs::with_layout), so the slot index maps
+    /// directly onto its allocating node (the last node owns the
+    /// remainder). Single-node mode is always node 0.
+    fn node_of_gob(&self, id: GobId) -> usize {
+        match &self.cluster {
+            None => 0,
+            Some(c) => {
+                let slot = (id & 0xFFFF) as usize;
+                let per = (crate::state::MAX_SLOT + 1) / c.nodes.get();
+                (slot / per).min(c.nodes.get() - 1)
+            }
+        }
+    }
+
     /// Node-link message dispatch (cluster mode only).
     fn on_node_msg(&mut self, msg: crate::nodes::NodeMsg) {
         use crate::nodes::NodeMsg;
@@ -1967,6 +1982,40 @@ impl Game {
             NodeMsg::GuestUpdate(st) => self.ingest_guest(st),
             NodeMsg::GuestRetract { id } => self.remove_guest(id),
             NodeMsg::GuestTransfer(st) => self.promote_transfer(st),
+            NodeMsg::RelayAttack {
+                attacker,
+                target,
+                chip,
+                dmg,
+            } => self.relay_swing(attacker, target, chip, dmg),
+            NodeMsg::FightBars { id, def } => {
+                // Authoritative defence bar from the animal's owner; the
+                // mirror self-heals from it (the fightview reads this).
+                if let Some(af) = self.world.guest_fights.get_mut(&id) {
+                    af.def = def.clamp(0, crate::fight::BAR_FULL);
+                }
+            }
+            NodeMsg::PlayerHurt {
+                player_gob,
+                dmg,
+                from,
+            } => {
+                // Animal retaliation against one of MY session players;
+                // armor absorption and the knockout path live here.
+                if let Some(pidx) = self.world.players.iter().position(|p| p.gob == player_gob) {
+                    self.hurt_player(pidx, dmg, from);
+                    // Native bite visual on the victim (the owner node's
+                    // own overlay covers only ITS local viewers).
+                    self.fx_overlay_broadcast(player_gob, "gfx/fx/bite");
+                }
+            }
+            NodeMsg::KillCredit { player_gob, lp } => {
+                if let Some(p) = self.world.players.iter_mut().find(|p| p.gob == player_gob) {
+                    p.lp += lp;
+                    let sid = p.session;
+                    self.push_cattr(sid);
+                }
+            }
         }
     }
 
@@ -2354,6 +2403,16 @@ impl Game {
             ),
             None => (false, false),
         };
+        // HP change on an EXISTING guest (relay fight damage landed on the
+        // owner): stream OD_HEALTH so local viewers see the health bar
+        // move without waiting for the owner's own broadcast (which only
+        // covers ITS local sessions).
+        let hp_changed = self
+            .world
+            .guests
+            .get(&id)
+            .map(|g| g.hp != st.hp)
+            .unwrap_or(false);
         self.world.guests.insert(
             id,
             crate::state::GuestGob {
@@ -2410,8 +2469,29 @@ impl Game {
             // Pose flip streams the new layer set (same server-side pose
             // resolution as local movers).
             if pose_flipped {
-                for sid in viewers {
-                    self.stream_guest_pose(sid, id);
+                for sid in &viewers {
+                    self.stream_guest_pose(*sid, id);
+                }
+            }
+        }
+        if hp_changed {
+            let g = self.world.guests.get_mut(&id).expect("existing guest");
+            g.frame += 1;
+            let frame = g.frame;
+            let quarters = ((g.hp * 4) / g.max_hp.max(1)).clamp(0, 4) as u8;
+            let mut m = MessageBuf::new();
+            m.uint8(MSG_OBJDATA)
+                .uint8(0)
+                .int32(id)
+                .int32(frame as i32)
+                .uint8(OD_HEALTH)
+                .uint8(quarters)
+                .uint8(OD_END);
+            let block = m.finish();
+            for sid in &viewers {
+                if let Some(out) = self.sessions.get_mut(sid) {
+                    out.send_raw(block.clone());
+                    Self::record_unacked(out, id, frame, block.clone());
                 }
             }
         }
@@ -2432,6 +2512,34 @@ impl Game {
             .collect();
         for sid in sids {
             self.stream_retract(sid, id);
+        }
+        // Relay bookkeeping (session 28): a retracted ANIMAL closes the
+        // fight of any local player engaged with it (its authoritative HP
+        // is gone — death retract or out-of-cell GC); a retracted PLAYER
+        // guest drops its relay rows so the animal stops retaliating.
+        if self.world.guest_fights.remove(&id).is_some() {
+            for pidx in 0..self.world.players.len() {
+                if self.world.players[pidx].fight_target == Some(id) {
+                    let sid = self.world.players[pidx].session;
+                    self.world.players[pidx].fight_target = None;
+                    self.fight_del(sid, id);
+                }
+            }
+        }
+        if self.world.guest_attackers.remove(&id).is_some() {
+            // `id` was an animal with a relay fight row here.
+            self.world.animal_fights.remove(&id);
+        }
+        let attacking_mine: Vec<GobId> = self
+            .world
+            .guest_attackers
+            .iter()
+            .filter(|(_, &p)| p == id)
+            .map(|(&a, _)| a)
+            .collect();
+        for a in attacking_mine {
+            self.world.guest_attackers.remove(&a);
+            self.world.animal_fights.remove(&a);
         }
     }
 
@@ -3514,15 +3622,25 @@ impl Game {
     }
 
     fn start_fight(&mut self, sid: SessionId, target: GobId, species: Species) {
-        // Cluster: the target's authority lives on another node — opening
-        // a LOCAL fight against a guest would desync its HP (cross-node
-        // interaction relay is the next backlog item). Ignore for now.
+        // Cluster: the target's authority lives on another node. The fight
+        // UI and the attacker's offence bar stay LOCAL (they are session
+        // state); the animal's defence bar and HP stay on its owner. Each
+        // swing relays a RelayAttack there and the authoritative FightBars
+        // answer re-syncs the local mirror (`world.guest_fights`).
         if self.world.guests.contains_key(&target) {
-            tracing::debug!(
-                sid,
+            if let Some(p) = self.world.player_mut(sid) {
+                p.fight_target = Some(target);
+                p.atk_cd = 0;
+            }
+            self.fight_open(sid, target);
+            self.world.guest_fights.insert(
                 target,
-                "fight against a guest target ignored (no relay yet)"
+                crate::state::AnimalFight {
+                    off: 0,
+                    def: crate::fight::BAR_FULL,
+                },
             );
+            info!(sid, target, ?species, "relay fight started");
             return;
         }
         if let Some(p) = self.world.player_mut(sid) {
@@ -6285,6 +6403,100 @@ impl Game {
             let Some(pslot) = self.world.gobs.get(pgob) else {
                 continue;
             };
+            // --- cluster relay: target is a foreign-authority guest ---
+            // Same reach/chase/swing pacing as the local path below; the
+            // defence bar lives in the local mirror (`guest_fights`) and
+            // every swing ships a RelayAttack to the animal's owner, whose
+            // authoritative FightBars answer re-syncs the mirror. HP and
+            // death stay on the owner (GuestUpdate/Retract flow back).
+            if self.world.guests.contains_key(&target) {
+                let Some(guest) = self.world.guests.get(&target) else {
+                    self.world.players[pidx].fight_target = None;
+                    self.world.guest_fights.remove(&target);
+                    self.fight_del(sid, target);
+                    continue;
+                };
+                let (tx, ty) = guest.pos;
+                let (px, py) = self.world.gobs.pos[pslot];
+                if (px - tx).abs() > DISENGAGE || (py - ty).abs() > DISENGAGE {
+                    self.world.players[pidx].fight_target = None;
+                    self.world.guest_fights.remove(&target);
+                    self.fight_del(sid, target);
+                    continue;
+                }
+                if (px - tx).abs() > REACH || (py - ty).abs() > REACH {
+                    // In engagement range but not swinging: chase instead.
+                    if self.world.gobs.mv[pslot].is_none() {
+                        self.start_move(pslot, (tx, ty));
+                    }
+                    continue;
+                }
+                let mut relay = None;
+                {
+                    let Some(out) = self.sessions.get_mut(&sid) else {
+                        continue;
+                    };
+                    out.fight.own_off =
+                        (out.fight.own_off + crate::fight::OFF_REGEN).min(crate::fight::BAR_FULL);
+                    if out.fight.atkc > 0 {
+                        out.fight.atkc -= 1;
+                    }
+                    if out.fight.own_off < crate::fight::SWING_SPEND || out.fight.atkc > 0 {
+                        continue;
+                    }
+                    out.fight.own_off -= crate::fight::SWING_SPEND;
+                    out.fight.atkc = crate::fight::ATKC_TICKS;
+                    let Some(rel) = out.fight.rel_mut(target) else {
+                        continue;
+                    };
+                    rel.ip_self += 1;
+                    // Attack weight scales 0.5..2.0 with advantage.
+                    let weight = (rel.balance.clamp(-5, 5) as f32) * 0.1 + 1.0;
+                    let def_chip = (crate::fight::SWING_DEF_DMG as f32 * weight) as i32;
+                    // Chip the mirror with the same arithmetic the owner
+                    // applies (one RelayAttack per swing re-syncs anyway,
+                    // so a lost frame self-heals on the next one).
+                    let _ = {
+                        let Some(mf) = self.world.guest_fights.get_mut(&target) else {
+                            continue;
+                        };
+                        let breaking = mf.def <= crate::fight::OPENING_THRESHOLD;
+                        mf.def = (mf.def - def_chip).max(0);
+                        let landed = breaking || mf.def <= crate::fight::OPENING_THRESHOLD;
+                        if landed {
+                            mf.def = crate::fight::BAR_FULL;
+                        }
+                        (breaking, landed)
+                    };
+                    rel.defence = self
+                        .world
+                        .guest_fights
+                        .get(&target)
+                        .map(|f| f.def)
+                        .unwrap_or(0);
+                    // EVERY swing relays (the owner applies the chip to its
+                    // authoritative bar and decides on its own opening);
+                    // landing locally is only a UI prediction.
+                    let str = *self.world.players[pidx].attrs.get("str").unwrap_or(&10);
+                    relay = Some(((5 * str / 10).max(1), def_chip));
+                }
+                self.world.players[pidx].stamina = (self.world.players[pidx].stamina - 2).max(0);
+                if let Some((dmg, chip)) = relay {
+                    if let Some(c) = self.cluster.as_ref() {
+                        let authority = self.cell_owner(crate::visidx::cell_of(tx, ty));
+                        c.mesh.send(
+                            authority,
+                            crate::nodes::NodeMsg::RelayAttack {
+                                attacker: pgob,
+                                target,
+                                chip,
+                                dmg,
+                            },
+                        );
+                    }
+                }
+                continue;
+            }
             let Some(tslot) = self.world.gobs.get(target) else {
                 self.world.players[pidx].fight_target = None;
                 self.fight_del(sid, target);
@@ -6461,6 +6673,71 @@ impl Game {
             }
         }
 
+        // --- relay retaliation: animals strike back at guest players ---
+        // The attacker is a session player homed on ANOTHER node (it
+        // renders here as a published guest): no session, no defence bar,
+        // no armor table locally. The bite therefore just SHIPS to the
+        // attacker's home node, where hurt_player applies absorption,
+        // HP, stamina and the knockout path. v1 bite uses the default
+        // str (same value the local path computes for str 10).
+        let relay_rows: Vec<(GobId, GobId)> = self
+            .world
+            .guest_attackers
+            .iter()
+            .map(|(&a, &p)| (a, p))
+            .collect();
+        for (id, attacker) in relay_rows {
+            let Some(slot) = self.world.gobs.get(id) else {
+                self.world.guest_attackers.remove(&id);
+                continue;
+            };
+            // A cell-boundary transfer takes the fight along: the new
+            // owner rebuilds the row from the next RelayAttack.
+            if !self.is_authority_slot(slot) {
+                self.world.guest_attackers.remove(&id);
+                self.world.animal_fights.remove(&id);
+                continue;
+            }
+            // The attacker must still be published here (a home node
+            // retracts its guest when the player leaves the cell).
+            let Some(g) = self.world.guests.get(&attacker) else {
+                self.world.guest_attackers.remove(&id);
+                self.world.animal_fights.remove(&id);
+                continue;
+            };
+            let (ax, ay) = self.world.gobs.pos[slot];
+            let (px, py) = g.pos;
+            if (px - ax).abs() > 33 || (py - ay).abs() > 33 {
+                // Out of reach: offence keeps building, no bite.
+                if let Some(af) = self.world.animal_fights.get_mut(&id) {
+                    af.off = (af.off + crate::fight::OFF_REGEN).min(crate::fight::BAR_FULL);
+                }
+                continue;
+            }
+            let mut bite = None;
+            if let Some(af) = self.world.animal_fights.get_mut(&id) {
+                af.off = (af.off + crate::fight::OFF_REGEN).min(crate::fight::BAR_FULL);
+                if af.off >= crate::fight::SWING_SPEND {
+                    af.off -= crate::fight::SWING_SPEND;
+                    // Default-str bite: (5 * 10 / 10).max(1) / 2.
+                    bite = Some(2);
+                }
+            }
+            if let Some(dmg) = bite {
+                if let Some(c) = self.cluster.as_ref() {
+                    let home = self.node_of_gob(attacker);
+                    c.mesh.send(
+                        home,
+                        crate::nodes::NodeMsg::PlayerHurt {
+                            player_gob: attacker,
+                            dmg,
+                            from: id,
+                        },
+                    );
+                }
+            }
+        }
+
         // --- fast bar streaming: updod per relation + offdef, every 2 ticks ---
         if tick.is_multiple_of(2) {
             let sids: Vec<SessionId> = self.sessions.keys().copied().collect();
@@ -6558,6 +6835,128 @@ impl Game {
         }
     }
 
+    /// Authority-side application of one relayed swing (cluster mode):
+    /// the attacking player is a guest homed on another node; `chip` /
+    /// `dmg` were computed THERE with the same formulas as the local
+    /// path (the attacker's str lives on its home node). Applies the
+    /// defence chip to the authoritative bar, registers the guest
+    /// attacker for retaliation, and answers FightBars so the home
+    /// mirror self-heals.
+    fn relay_swing(&mut self, attacker: GobId, target: GobId, chip: i32, dmg: i32) {
+        let Some(tslot) = self.world.gobs.get(target) else {
+            // Died / transferred between the swing and the relay hop; the
+            // attacker's node learns the truth from GuestRetract.
+            return;
+        };
+        if !matches!(self.world.gobs.kind[tslot], Kind::Animal { .. }) {
+            return;
+        }
+        let landed = {
+            let af = self.world.animal_fights.entry(target).or_insert_with(|| {
+                crate::state::AnimalFight {
+                    off: 0,
+                    def: crate::fight::BAR_FULL,
+                }
+            });
+            let breaking = af.def <= crate::fight::OPENING_THRESHOLD;
+            af.def = (af.def - chip).max(0);
+            let landed = breaking || af.def <= crate::fight::OPENING_THRESHOLD;
+            if landed {
+                af.def = crate::fight::BAR_FULL;
+            }
+            landed
+        };
+        self.world.guest_attackers.insert(target, attacker);
+        let def_now = self
+            .world
+            .animal_fights
+            .get(&target)
+            .map(|f| f.def)
+            .unwrap_or(crate::fight::BAR_FULL);
+        if landed {
+            self.damage_animal_relayed(target, tslot, dmg);
+        }
+        // Authoritative bar answer re-syncs the attacker's home mirror.
+        if let Some(c) = self.cluster.as_ref() {
+            let home = self.node_of_gob(attacker);
+            c.mesh.send(
+                home,
+                crate::nodes::NodeMsg::FightBars {
+                    id: target,
+                    def: def_now,
+                },
+            );
+        }
+    }
+
+    /// HP damage to a relay-fought animal (authority side): streams
+    /// OD_HEALTH to local viewers, publishes the guest update (hp rides
+    /// the GuestState to the attacker's node), and on death drops loot,
+    /// retracts, and credits the attacker's home node with the LP. The
+    /// tail of `damage_animal` minus the session-facing fight UI, which
+    /// lives on the attacker's node.
+    fn damage_animal_relayed(&mut self, target: GobId, tslot: usize, dmg: i32) {
+        self.world.gobs.hp[tslot] -= dmg;
+        self.world.gobs.frame[tslot] += 1;
+        let frame = self.world.gobs.frame[tslot];
+        let quarters = ((self.world.gobs.hp[tslot] * 4) / self.world.gobs.max_hp[tslot].max(1))
+            .clamp(0, 4) as u8;
+        let viewers: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, o)| o.visible.contains(&target))
+            .map(|(s, _)| *s)
+            .collect();
+        for v in viewers {
+            if let Some(out) = self.sessions.get_mut(&v) {
+                let mut m = MessageBuf::new();
+                m.uint8(MSG_OBJDATA)
+                    .uint8(0)
+                    .int32(target)
+                    .int32(frame as i32)
+                    .uint8(OD_HEALTH)
+                    .uint8(quarters)
+                    .uint8(OD_END);
+                let b = m.finish();
+                out.send_raw(b.clone());
+                out.unacked.entry(target).or_default().insert(frame, b);
+            }
+        }
+        // Publish the hp delta to subscribed peers (the attacker's home
+        // node streams OD_HEALTH to ITS viewers from this state).
+        self.publish(target, GuestEv::Update);
+        if self.world.gobs.hp[tslot] <= 0 {
+            let Kind::Animal { species } = self.world.gobs.kind[tslot] else {
+                return;
+            };
+            let pos = self.world.gobs.pos[tslot];
+            // Credit the guest attacker's home node (the LP wallet lives
+            // there) before the fight rows drop.
+            let attacker = self.world.guest_attackers.get(&target).copied();
+            if let (Some(c), Some(atk)) = (self.cluster.as_ref(), attacker) {
+                let home = self.node_of_gob(atk);
+                c.mesh.send(
+                    home,
+                    crate::nodes::NodeMsg::KillCredit {
+                        player_gob: atk,
+                        lp: 10,
+                    },
+                );
+            }
+            self.world.gobs.kill(target);
+            self.broadcast_retract(target);
+            self.world.animal_gobs.retain(|&g| g != target);
+            self.world.animal_fights.remove(&target);
+            self.world.guest_attackers.remove(&target);
+            for (res, count, label) in species.loot() {
+                for _ in 0..count {
+                    self.spawn_drop_near(pos, res, 10, label);
+                }
+            }
+            info!(target, ?species, "relay-killed animal");
+        }
+    }
+
     /// Summed equipment armor class (defense, absorption), quality-scaled
     /// per piece. The client computes the same sum from the tooltips
     /// (Equipory.calcAC); the server applies it in combat (armor.rs).
@@ -6598,6 +6997,9 @@ impl Game {
                 out.fight.own_def = crate::fight::BAR_FULL;
             }
             self.world.animal_fights.remove(&from);
+            // Relay fights: the biter may be a foreign animal (its bars
+            // live in the guest mirror); close that mirror too.
+            self.world.guest_fights.remove(&from);
             info!(sid, from, "player knocked out by animal");
             return;
         }
@@ -8661,5 +9063,268 @@ mod tests {
             }
         }
         assert!(!far, "out-of-radius remote line must be filtered");
+    }
+
+    // ==================================================================
+    // Cross-node interaction relay (session 28)
+    // ==================================================================
+
+    /// Ingest a wolf guest standing `dx` subtiles right of the local
+    /// player (in view, same cell so node 0 is its authority stand-in for
+    /// wire tests) and return its id.
+    fn relay_wolf_guest(g: &mut Game, dx: i32, hp: i32) -> GobId {
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let gid = foreign_node_gob_id(0, 2, 7);
+        g.on_node_msg(crate::nodes::NodeMsg::GuestAnnounce(
+            crate::nodes::GuestState {
+                id: gid,
+                pos: (px + dx, py),
+                mv: None,
+                moving: false,
+                facing: 0,
+                kind: crate::nodes::GuestKind::Animal {
+                    species: Species::Wolf.index(),
+                },
+                hp,
+                max_hp: hp,
+                speed: 33,
+            },
+        ));
+        g.tick();
+        assert!(
+            g.sessions[&1].visible.contains(&gid),
+            "relay test precondition: the guest wolf must spawn in view"
+        );
+        gid
+    }
+
+    /// Relay fight opening: the fightview opens against the guest and the
+    /// mirror row appears (the authoritative bars stay on the owner).
+    #[tokio::test]
+    async fn relay_fight_opens_against_a_guest_target() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("relayer", 0, 2);
+        let gid = relay_wolf_guest(&mut g, 30, 50);
+        g.start_fight(1, gid, Species::Wolf);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        assert_eq!(g.world.players[pidx].fight_target, Some(gid));
+        assert!(
+            g.world.guest_fights.contains_key(&gid),
+            "opening a relay fight must seed the local defence-bar mirror"
+        );
+        let out = g.sessions.get(&1).unwrap();
+        assert!(
+            out.fight.widget.is_some() && out.fight.rel(gid).is_some(),
+            "the fightview widget + relation must exist for a guest target"
+        );
+    }
+
+    /// A swing at an in-reach guest spends offence and ships exactly one
+    /// RelayAttack to the wolf's owner; a FightBars answer re-syncs the
+    /// mirror the fightview reads.
+    #[tokio::test]
+    async fn relay_swing_ships_relayattack_and_fightbars_resync() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("swinger", 0, 2);
+        let gid = relay_wolf_guest(&mut g, 30, 50);
+        g.start_fight(1, gid, Species::Wolf);
+        // Full offence bar + no cooldown: the next tick must swing.
+        g.sessions.get_mut(&1).unwrap().fight.own_off = crate::fight::BAR_FULL;
+        g.sessions.get_mut(&1).unwrap().fight.atkc = 0;
+        g.tick();
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let mut attacks = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::RelayAttack {
+                attacker,
+                target,
+                chip,
+                dmg,
+            } = msg
+            {
+                attacks.push((attacker, target, chip, dmg));
+            }
+        }
+        // Default str 10: dmg = (5*10/10).max(1) = 5; weight 1.0 -> the
+        // plain SWING_DEF_DMG chip.
+        assert_eq!(
+            attacks,
+            vec![(pgob, gid, crate::fight::SWING_DEF_DMG, (5 * 10 / 10).max(1))],
+            "one swing = exactly one RelayAttack to the owner"
+        );
+        // The authoritative answer re-syncs the mirror.
+        g.on_node_msg(crate::nodes::NodeMsg::FightBars { id: gid, def: 1234 });
+        assert_eq!(g.world.guest_fights[&gid].def, 1234);
+    }
+
+    /// Authority side: one relayed swing chips the authoritative bar; an
+    /// opening lands the HP damage (OD_HEALTH to local viewers + the hp
+    /// rides GuestUpdate to the attacker's node); the death drops loot,
+    /// retracts, and credits the attacker's home node.
+    #[tokio::test]
+    async fn relay_authority_applies_damage_and_death_credit() {
+        let (mut g, _rx, mut raw, mut mesh_rx) = clustered_game("authwlf", 0, 2);
+        // The AUTHORITY side fixture: the wolf lives in MY gob table (a
+        // local spawn in my cell); the attacker is a foreign player gob.
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let res = g.world.res.intern(Species::Wolf.resname());
+        let gid = g.world.gobs.spawn(
+            Kind::Animal {
+                species: Species::Wolf,
+            },
+            (px + 30, py),
+            res,
+            50,
+            33,
+        );
+        g.world.animal_gobs.push(gid);
+        g.tick();
+        let attacker = foreign_node_gob_id(0, 2, 21);
+        // Node 1 subscribes to the wolf's cell: the hp publish must reach
+        // it as a GuestUpdate.
+        let cell = crate::visidx::cell_of(px + 30, py);
+        g.on_node_msg(crate::nodes::NodeMsg::Sub {
+            from: 1,
+            cells: vec![cell],
+        });
+        // First swing: a full-bar chip opens the defence; dmg 10 lands.
+        g.on_node_msg(crate::nodes::NodeMsg::RelayAttack {
+            attacker,
+            target: gid,
+            chip: crate::fight::BAR_FULL,
+            dmg: 10,
+        });
+        let tslot = g.world.gobs.get(gid).expect("wolf survives the opening");
+        assert_eq!(g.world.gobs.hp[tslot], 40);
+        let mut updated_hp = None;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::GuestUpdate(st) = msg {
+                if st.id == gid {
+                    updated_hp = Some(st.hp);
+                }
+            }
+        }
+        assert_eq!(updated_hp, Some(40), "hp must publish to the subscriber");
+        // Wire proof for LOCAL viewers: OD_HEALTH quarters stream.
+        let mut saw_health = false;
+        while let Ok(block) = raw.try_recv() {
+            if block.first() == Some(&MSG_OBJDATA)
+                && i32::from_le_bytes([block[2], block[3], block[4], block[5]]) == gid
+                && block.get(10) == Some(&OD_HEALTH)
+            {
+                saw_health = true;
+            }
+        }
+        assert!(saw_health, "local viewers must get the OD_HEALTH update");
+        // Lethal swing: the animal dies, loot drops, the attacker's home
+        // node receives the LP credit.
+        g.on_node_msg(crate::nodes::NodeMsg::RelayAttack {
+            attacker,
+            target: gid,
+            chip: crate::fight::BAR_FULL,
+            dmg: 40,
+        });
+        assert!(g.world.gobs.get(gid).is_none(), "the wolf must die");
+        let mut credited = None;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::KillCredit { player_gob, lp } = msg {
+                credited = Some((player_gob, lp));
+            }
+        }
+        assert_eq!(
+            credited,
+            Some((attacker, 10)),
+            "the killer's home node must be credited with the LP"
+        );
+    }
+
+    /// Retaliation: an animal with a relay row bites the guest player and
+    /// the bite SHIPS to the attacker's home node (no local session to
+    /// apply it through).
+    #[tokio::test]
+    async fn relay_retaliation_ships_playerhurt_home() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("biter", 0, 2);
+        // The AUTHORITY side fixture: a local wolf + a published guest
+        // player standing in reach.
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let res = g.world.res.intern(Species::Wolf.resname());
+        let gid = g.world.gobs.spawn(
+            Kind::Animal {
+                species: Species::Wolf,
+            },
+            (px + 30, py),
+            res,
+            50,
+            33,
+        );
+        g.world.animal_gobs.push(gid);
+        g.tick();
+        let attacker = foreign_node_gob_id(0, 2, 21);
+        g.on_node_msg(crate::nodes::NodeMsg::GuestAnnounce(
+            crate::nodes::GuestState {
+                id: attacker,
+                pos: (px + 50, py),
+                mv: None,
+                moving: false,
+                facing: 0,
+                kind: crate::nodes::GuestKind::Player {
+                    name: "foreigner".into(),
+                    equip: vec![],
+                },
+                hp: 100,
+                max_hp: 100,
+                speed: 33,
+            },
+        ));
+        // A relayed swing registers the guest attacker.
+        g.on_node_msg(crate::nodes::NodeMsg::RelayAttack {
+            attacker,
+            target: gid,
+            chip: 0,
+            dmg: 1,
+        });
+        assert_eq!(g.world.guest_attackers[&gid], attacker);
+        // Full offence + no cooldown: the next tick bites in reach.
+        g.world.animal_fights.get_mut(&gid).expect("relay row").off = crate::fight::BAR_FULL;
+        g.tick();
+        let mut hurt = None;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::PlayerHurt { player_gob, .. } = msg {
+                hurt = Some(player_gob);
+            }
+        }
+        assert_eq!(hurt, Some(attacker), "the bite must ship to the home node");
+        // The attacker leaving the cell (retract) drops the relay row so
+        // the animal stops retaliating at a ghost.
+        g.on_node_msg(crate::nodes::NodeMsg::GuestRetract { id: attacker });
+        assert!(!g.world.guest_attackers.contains_key(&gid));
+        assert!(!g.world.animal_fights.contains_key(&gid));
+    }
+
+    /// The owner retracting the fought guest (death seen elsewhere, GC)
+    /// closes the local fight: target cleared, mirror dropped, relation
+    /// deleted and the frv widget destroyed when it was the last one.
+    #[tokio::test]
+    async fn guest_retract_closes_the_relay_fight() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("closer", 0, 2);
+        let gid = relay_wolf_guest(&mut g, 30, 50);
+        g.start_fight(1, gid, Species::Wolf);
+        g.on_node_msg(crate::nodes::NodeMsg::GuestRetract { id: gid });
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        assert_eq!(g.world.players[pidx].fight_target, None);
+        assert!(!g.world.guest_fights.contains_key(&gid));
+        let out = g.sessions.get(&1).unwrap();
+        assert!(
+            out.fight.widget.is_none() && out.fight.rel(gid).is_none(),
+            "the last relation must close the frv widget"
+        );
     }
 }
