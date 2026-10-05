@@ -31,14 +31,23 @@ static STAT_HARVESTS: AtomicU64 = AtomicU64::new(0);
 static STAT_PICKUPS: AtomicU64 = AtomicU64::new(0);
 static STAT_WALKS: AtomicU64 = AtomicU64::new(0);
 static STAT_BITES: AtomicU64 = AtomicU64::new(0);
+static STAT_GOB_OBS: AtomicU64 = AtomicU64::new(0);
+static STAT_RES_NAMES: AtomicU64 = AtomicU64::new(0);
+static STAT_CLS_ANIMAL: AtomicU64 = AtomicU64::new(0);
+static STAT_CLS_TREE: AtomicU64 = AtomicU64::new(0);
+static STAT_CLS_STONE: AtomicU64 = AtomicU64::new(0);
+static STAT_CLS_DROP: AtomicU64 = AtomicU64::new(0);
+static STAT_CLS_PLAYER: AtomicU64 = AtomicU64::new(0);
+static STAT_CLS_OTHER: AtomicU64 = AtomicU64::new(0);
 
 pub async fn run(count: usize, secs: u64) {
     info!(count, secs, "spawning load-test bots");
     let start = Instant::now();
     let mut handles = Vec::with_capacity(count);
     for i in 0..count {
-        // Stagger logins 10 ms apart to mimic a realistic ramp.
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        // Stagger logins to mimic a realistic ramp without starving the
+        // server's bootstrap path at the 1000-session scale.
+        tokio::time::sleep(Duration::from_millis(30)).await;
         handles.push(tokio::spawn(bot_session(i, secs)));
     }
     let mut ok = 0usize;
@@ -54,6 +63,15 @@ pub async fn run(count: usize, secs: u64) {
         harvests = STAT_HARVESTS.load(Ordering::Relaxed),
         pickups = STAT_PICKUPS.load(Ordering::Relaxed),
         bites_taken = STAT_BITES.load(Ordering::Relaxed),
+        walks = STAT_WALKS.load(Ordering::Relaxed),
+        gobs_seen = STAT_GOB_OBS.load(Ordering::Relaxed),
+        res_names = STAT_RES_NAMES.load(Ordering::Relaxed),
+        cls_animals = STAT_CLS_ANIMAL.load(Ordering::Relaxed),
+        cls_trees = STAT_CLS_TREE.load(Ordering::Relaxed),
+        cls_stones = STAT_CLS_STONE.load(Ordering::Relaxed),
+        cls_drops = STAT_CLS_DROP.load(Ordering::Relaxed),
+        cls_players = STAT_CLS_PLAYER.load(Ordering::Relaxed),
+        cls_other = STAT_CLS_OTHER.load(Ordering::Relaxed),
         elapsed_secs = start.elapsed().as_secs(),
         "bot cohort finished"
     );
@@ -103,8 +121,8 @@ pub enum ObjOp {
     Layers(i32, u16),
     /// Bite overlay landed on the gob (id, overlay wire res).
     Overlay(i32, u16),
-    /// Player name plate (id) — content unused by bots.
-    Buddy(i32),
+    /// Player name plate (id, name) — carries the bot's own gob identity.
+    Buddy(i32, String),
 }
 
 /// Parse one MSG_OBJDATA datagram payload into ops. Unknown ops abort the
@@ -218,10 +236,14 @@ pub fn parse_objdata(payload: &[u8]) -> Vec<ObjOp> {
                     }
                 }
                 OD_BUDDY => {
-                    if m.str().and_then(|_| m.u8()).and_then(|_| m.u8()).is_err() {
+                    let name = match m.str() {
+                        Ok(n) => n,
+                        Err(_) => break 'blocks,
+                    };
+                    if m.u8().and_then(|_| m.u8()).is_err() {
                         break 'blocks;
                     }
-                    out.push(ObjOp::Buddy(id));
+                    out.push(ObjOp::Buddy(id, name));
                 }
                 OD_END => break,
                 _ => {
@@ -238,6 +260,12 @@ pub fn parse_objdata(payload: &[u8]) -> Vec<ObjOp> {
 /// Per-session view of the world: resource names and nearby gobs.
 #[derive(Default)]
 struct BotView {
+    /// This bot's player name (resolves the own gob via OD_BUDDY).
+    name: String,
+    /// Own gob id once the BUDDY plate lands on the spawn block.
+    self_gob: Option<i32>,
+    /// Last known own position (subtiles) from MOVE/LINBEG of the own gob.
+    self_pos: Option<(i32, i32)>,
     /// Session wire id -> announced resource name.
     res_names: HashMap<u16, String>,
     /// Gob id -> (wire res id, pos x, pos y).
@@ -253,16 +281,22 @@ impl BotView {
                 self.gobs.remove(&id);
             }
             ObjOp::Move(id, x, y) => {
-                if let Some(g) = self.gobs.get_mut(&id) {
-                    g.1 = x;
-                    g.2 = y;
+                // Movement ops precede RES/LAYERS in a spawn block; insert a
+                // placeholder so the position survives until the wire lands.
+                let g = self.gobs.entry(id).or_insert((0, x, y));
+                g.1 = x;
+                g.2 = y;
+                if Some(id) == self.self_gob {
+                    self.self_pos = Some((x, y));
                 }
             }
             ObjOp::Lin(id, _sx, _sy, tx, ty) => {
-                if let Some(g) = self.gobs.get_mut(&id) {
-                    // Track the movement target: close enough for targeting.
-                    g.1 = tx;
-                    g.2 = ty;
+                // Track the movement target: close enough for targeting.
+                let g = self.gobs.entry(id).or_insert((0, tx, ty));
+                g.1 = tx;
+                g.2 = ty;
+                if Some(id) == self.self_gob {
+                    self.self_pos = Some((tx, ty));
                 }
             }
             ObjOp::Res(id, wire) | ObjOp::Layers(id, wire) => {
@@ -280,7 +314,11 @@ impl BotView {
                     STAT_BITES.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            ObjOp::Buddy(_) => {}
+            ObjOp::Buddy(id, name) => {
+                if name == self.name {
+                    self.self_gob = Some(id);
+                }
+            }
         }
     }
 
@@ -336,43 +374,58 @@ struct Target {
     stat: fn(),
 }
 
-/// Pick the next action for a bot at (x, y): loot > fight > harvest, with a
-/// harvesting bias so wood/stone economy keeps moving alongside the fights.
-fn pick_target(view: &BotView, x: i32, y: i32) -> Option<Target> {
-    let drop = view.nearest(GobClass::Drop, x, y, 6 * 11);
-    if let Some((gob, gx, gy)) = drop {
-        return Some(Target {
-            gob,
-            at: (gx, gy),
-            stat: || {
-                STAT_PICKUPS.fetch_add(1, Ordering::Relaxed);
-            },
-        });
-    }
+/// Pick the next action for a bot at (x, y). A weighted roll spreads the
+/// cohort across the master-prompt triangle: ~50% fights, ~30% harvest,
+/// ~20% loot, each branch falling through to the next class so a bot never
+/// idles while any target exists in range.
+fn pick_target(view: &BotView, x: i32, y: i32, roll: u32) -> Option<Target> {
+    // Drops land near the harvested target, which the bot may have clicked
+    // from up to ~8 tiles away; the pickup click has no server-side reach
+    // check, so use a radius that covers the whole harvest zone.
+    let drop = view.nearest(GobClass::Drop, x, y, 15 * 11);
     let animal = view.nearest(GobClass::Animal, x, y, 10 * 11);
-    if let Some((gob, gx, gy)) = animal {
-        return Some(Target {
-            gob,
-            at: (gx, gy),
-            stat: || {
-                STAT_FIGHTS.fetch_add(1, Ordering::Relaxed);
-            },
-        });
-    }
-    // Harvest the nearest tree; fall back to the nearest stone.
     let harvest = view
         .nearest(GobClass::Tree, x, y, 8 * 11)
         .or_else(|| view.nearest(GobClass::Stone, x, y, 8 * 11));
-    if let Some((gob, gx, gy)) = harvest {
-        return Some(Target {
-            gob,
-            at: (gx, gy),
-            stat: || {
+    let stat_of = |cls: GobClass| -> fn() {
+        match cls {
+            GobClass::Animal => || {
+                STAT_FIGHTS.fetch_add(1, Ordering::Relaxed);
+            },
+            GobClass::Tree | GobClass::Stone => || {
                 STAT_HARVESTS.fetch_add(1, Ordering::Relaxed);
             },
-        });
-    }
-    None
+            _ => || {
+                STAT_PICKUPS.fetch_add(1, Ordering::Relaxed);
+            },
+        }
+    };
+    let pick = |t: Option<(i32, i32, i32)>, cls: GobClass| {
+        t.map(|(gob, gx, gy)| Target {
+            gob,
+            at: (gx, gy),
+            stat: stat_of(cls),
+        })
+    };
+    // Ordered candidate chains per roll bucket.
+    type Candidate = (GobClass, Option<(i32, i32, i32)>);
+    let chain: &[Candidate] = &[
+        (GobClass::Drop, drop),
+        (GobClass::Animal, animal),
+        (GobClass::Tree, harvest),
+    ];
+    let order: &[GobClass] = if roll < 5 {
+        &[GobClass::Animal, GobClass::Tree, GobClass::Drop]
+    } else if roll < 8 {
+        &[GobClass::Tree, GobClass::Animal, GobClass::Drop]
+    } else {
+        &[GobClass::Drop, GobClass::Animal, GobClass::Tree]
+    };
+    let by_cls = |cls: GobClass| chain.iter().find(|(c, _)| *c == cls);
+    order
+        .iter()
+        .filter_map(|cls| by_cls(*cls))
+        .find_map(|&(cls, t)| pick(t, cls))
 }
 
 /// Outcome of the bootstrap phase.
@@ -391,7 +444,10 @@ async fn bot_session(idx: usize, secs: u64) -> bool {
     let mut rng = hnh_world::JavaRandom::new(idx as i64 ^ 0xB075);
     let name = format!("bot{idx:05}");
     let cookie = crate::auth().issue_cookie(&name);
-    let mut view = BotView::default();
+    let mut view = BotView {
+        name: name.clone(),
+        ..BotView::default()
+    };
 
     // --- handshake ---
     let mut sess = hnh_proto::MessageBuf::new();
@@ -404,7 +460,7 @@ async fn bot_session(idx: usize, secs: u64) -> bool {
     let sess = sess.finish();
     let start = Instant::now();
     let mut accepted = false;
-    while start.elapsed() < Duration::from_secs(10) {
+    while start.elapsed() < Duration::from_secs(30) {
         let _ = sock.send_to(&sess, server).await;
         let mut buf = [0u8; 1500];
         if tokio::time::timeout(Duration::from_millis(500), sock.recv_from(&mut buf))
@@ -454,7 +510,6 @@ async fn bot_session(idx: usize, secs: u64) -> bool {
     let mut next_beat = Instant::now() + Duration::from_secs(5);
     let mut next_flush = Instant::now() + Duration::from_millis(20);
     let mut alive = true;
-    let mut last_pos = (home_tx * 11, home_ty * 11);
     while alive && Instant::now() < behavior_end {
         let mut buf = [0u8; 65536];
         let wait = next_flush
@@ -465,8 +520,9 @@ async fn bot_session(idx: usize, secs: u64) -> bool {
             match buf[0] {
                 MSG_REL => {
                     for (ty, payload) in rel_rx.on_rel(&buf[1..n]) {
+                        // on_rel payloads carry the rmsg type byte first.
                         if ty == RMSG_RESID {
-                            parse_resid(&payload, &mut view);
+                            parse_resid(&payload[1..], &mut view);
                         }
                     }
                 }
@@ -485,7 +541,10 @@ async fn bot_session(idx: usize, secs: u64) -> bool {
         let now = Instant::now();
         if now >= next_action {
             next_action = now + Duration::from_millis(400 + rng.next_bounded(800) as u64);
-            if let Some(t) = pick_target(&view, last_pos.0, last_pos.1) {
+            // Act from the own gob's streamed position; fall back to the
+            // home tile center before the first own spawn block lands.
+            let (px, py) = view.self_pos.unwrap_or((home_tx * 11, home_ty * 11));
+            if let Some(t) = pick_target(&view, px, py, rng.next_bounded(10) as u32) {
                 queue_click(&mut rel_tx, mapview, t.at, Some(t.gob));
                 (t.stat)();
             } else {
@@ -493,7 +552,6 @@ async fn bot_session(idx: usize, secs: u64) -> bool {
                 let jy = home_ty * 11 + rng.next_bounded(600) - 300;
                 queue_click(&mut rel_tx, mapview, (jx, jy), None);
                 STAT_WALKS.fetch_add(1, Ordering::Relaxed);
-                last_pos = (jx, jy);
             }
         }
         if now >= next_beat {
@@ -506,6 +564,20 @@ async fn bot_session(idx: usize, secs: u64) -> bool {
         }
     }
     let _ = sock.send_to(&[MSG_CLOSE], server).await;
+    STAT_GOB_OBS.fetch_add(view.gobs.len() as u64, Ordering::Relaxed);
+    STAT_RES_NAMES.fetch_add(view.res_names.len() as u64, Ordering::Relaxed);
+    for &(wire, x, y) in view.gobs.values() {
+        let stat = match view.class_of(wire) {
+            GobClass::Animal => &STAT_CLS_ANIMAL,
+            GobClass::Tree => &STAT_CLS_TREE,
+            GobClass::Stone => &STAT_CLS_STONE,
+            GobClass::Drop => &STAT_CLS_DROP,
+            GobClass::Player => &STAT_CLS_PLAYER,
+            GobClass::Other => &STAT_CLS_OTHER,
+        };
+        let _ = (x, y);
+        stat.fetch_add(1, Ordering::Relaxed);
+    }
     alive
 }
 
@@ -520,12 +592,15 @@ fn parse_resid(payload: &[u8], view: &mut BotView) {
 /// Queue a mapview click. `gob = Some(id)` is an interaction click (the
 /// server resolves fight/harvest/pickup by the target's kind), `None` walks.
 fn queue_click(rel_tx: &mut RelSender, mapview: u16, at: (i32, i32), gob: Option<i32>) {
+    // Wire shape of a real MapView click (MapView.java:738/747):
+    // click(c0, mc, button, modflags[, gobid]); the server reads mc as the
+    // SECOND coordinate in the argument list.
     let mut click = hnh_proto::MessageBuf::new();
     click
         .uint8(RMSG_WDGMSG)
         .uint16(mapview)
         .string("click")
-        .lint(0)
+        .lcoord(0, 0)
         .lcoord(at.0, at.1)
         .lint(1)
         .lint(0);
@@ -543,7 +618,7 @@ async fn bootstrap(
     server: SocketAddr,
     name: &str,
 ) -> Boot {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(45);
     let mut charlist: Option<u16> = None;
     let mut mapview: Option<u16> = None;
     let mut played = false;
@@ -692,8 +767,9 @@ mod tests {
         v.apply(ObjOp::Move(101, 1100, 1000), false);
         v.apply(ObjOp::Res(102, 3), false);
         v.apply(ObjOp::Move(102, 1400, 1000), false);
-        let t = pick_target(&v, 1000, 1000).expect("a target exists");
-        assert_eq!(t.gob, 100, "drop outranks animal and tree");
+        // Roll 9 = loot bucket: the drop is picked first.
+        let t = pick_target(&v, 1000, 1000, 9).expect("a target exists");
+        assert_eq!(t.gob, 100, "loot bucket prefers the drop");
         assert_eq!(t.at, (1000, 1000));
     }
 
@@ -706,8 +782,9 @@ mod tests {
         v.apply(ObjOp::Move(101, 1100, 1000), false);
         v.apply(ObjOp::Res(102, 3), false);
         v.apply(ObjOp::Move(102, 1400, 1000), false);
-        let t = pick_target(&v, 1000, 1000).expect("a target exists");
-        assert_eq!(t.gob, 101, "animal outranks tree");
+        // Roll 0 = fight bucket: the animal is picked over the tree.
+        let t = pick_target(&v, 1000, 1000, 0).expect("a target exists");
+        assert_eq!(t.gob, 101, "fight bucket prefers the animal");
     }
 
     #[test]

@@ -17,7 +17,7 @@ pub const TICK_HZ: u64 = 10;
 pub const TICK_MS: u64 = 1000 / TICK_HZ;
 
 /// View radius in map subtiles around a player (~45 tiles, legacy ~500px).
-pub const VIEW_RADIUS: i32 = 500;
+pub const VIEW_RADIUS: i32 = 300;
 
 /// Gait speeds in subtiles/second (11 subtiles = 1 tile), indexed by the
 /// speedget widget: 0 crawl, 1 walk, 2 run, 3 sprint.
@@ -459,7 +459,9 @@ pub struct SessionOut {
     #[allow(dead_code)] // echoed in session teardown bookkeeping
     pub sid: SessionId,
     pub queue: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-    pub raw: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    /// Bounded unreliable datagram fan-out (MAPDATA / OBJDATA); send_raw
+    /// drops on a full queue exactly like a lost UDP datagram.
+    pub raw: tokio::sync::mpsc::Sender<Vec<u8>>,
     pub player_gob: Option<GobId>,
     /// Gobs currently streamed to this client.
     pub visible: HashSet<GobId>,
@@ -532,9 +534,12 @@ impl SessionOut {
         let _ = self.queue.send(payload);
     }
 
-    /// Send a raw datagram (MSG_MAPDATA / MSG_OBJDATA), unreliable.
+    /// Send a raw datagram (MSG_MAPDATA / MSG_OBJDATA), unreliable. A full
+    /// bounded queue means the per-session sender task is starved; dropping
+    /// the newest datagram matches the protocol's UDP semantics (the client
+    /// re-requests lost grids; LINSTEP progress self-heals next tick).
     pub fn send_raw(&self, datagram: Vec<u8>) {
-        let _ = self.raw.send(datagram);
+        let _ = self.raw.try_send(datagram);
     }
 }
 

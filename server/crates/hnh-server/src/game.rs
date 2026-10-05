@@ -758,7 +758,7 @@ impl Game {
         &mut self,
         sid: SessionId,
         tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-        raw_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+        raw_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     ) {
         let mut out = SessionOut {
             sid,
@@ -856,6 +856,14 @@ impl Game {
             return;
         };
         let wtag = out.widgets.get(&wid).cloned();
+        debug!(
+            sid,
+            wid,
+            name,
+            wtag = wtag.as_deref().unwrap_or("?"),
+            nargs = args.len(),
+            "wdgmsg in"
+        );
         match (wtag.as_deref(), name) {
             (Some("charlist"), "play") => {
                 let chosen = args
@@ -1571,7 +1579,7 @@ impl Game {
             let frame = self.world.gobs.frame[slot];
             if let Some(out) = self.sessions.get_mut(&sid) {
                 out.send_raw(block.clone());
-                out.unacked.entry(id).or_default().insert(frame, block);
+                Self::record_unacked(out, id, frame, block);
             }
         }
     }
@@ -1605,7 +1613,6 @@ impl Game {
     /// over the SoA columns), then serial spawn/move/retract application
     /// (phase B, mutates session state and streams wire blocks).
     fn update_visibility(&mut self) {
-        let mut updates: Vec<(SessionId, Vec<GobId>)> = Vec::new();
         let session_ids: Vec<SessionId> = self.sessions.keys().copied().collect();
         // --- Phase A: skip decision + candidate positions. A session
         // whose own cell did not change and whose retract square (the
@@ -1620,7 +1627,7 @@ impl Game {
                 Some((*sid, self.world.gobs.pos[pslot]))
             })
             .collect();
-        let mut to_scan: Vec<(SessionId, (i32, i32))> = Vec::new();
+        let mut to_scan: Vec<(SessionId, (i32, i32), bool)> = Vec::new();
         for (sid, (px, py)) in candidates {
             let cell = crate::visidx::cell_of(px, py);
             let moved = self.sessions[&sid].vis_cell != Some(cell);
@@ -1637,7 +1644,7 @@ impl Game {
             if let Some(out) = self.sessions.get_mut(&sid) {
                 out.vis_cell = Some(cell);
             }
-            to_scan.push((sid, (px, py)));
+            to_scan.push((sid, (px, py), moved));
         }
         // --- Phase A2: grid-owner-partitioned candidate scan (parallel
         // when multiple sessions are present). Scan indices group by the
@@ -1669,97 +1676,57 @@ impl Game {
         } else {
             to_scan
                 .iter()
-                .map(|(_sid, (px, py))| self.scan_visible(*px, *py))
+                .map(|(_sid, (px, py), _moved)| self.scan_visible(*px, *py))
                 .collect()
         };
         self.world.perf.vis_gob_scans += in_range.iter().map(|v| v.len() as u64).sum::<u64>();
         self.world.perf.vis_cells = self.world.gobs.vis.cell_count();
         // --- Phase B: serial application per session. ---
-        for ((sid, (px, py)), cand) in to_scan.into_iter().zip(in_range) {
-            let mut moving: Vec<GobId> = Vec::new();
+        // Movement deltas are NOT re-sent here: LINSTEP progress streams
+        // from tick_movement's batch_move_broadcast every tick (10 Hz), so
+        // a per-session needs_move rescan duplicated every progress frame
+        // AND re-cloned it into unacked - at 800 sessions x ~200 movers
+        // that was the dominant vis-phase cost.
+        for ((sid, (px, py), cell_moved), cand) in to_scan.into_iter().zip(in_range) {
             for id in cand {
-                let Some(slot) = self.world.gobs.get(id) else {
-                    continue;
-                };
-                let mv = self.world.gobs.mv[slot];
-                let frame = self.world.gobs.frame[slot];
-                let is_new;
-                let needs_move;
-                {
-                    let out = self.sessions.get_mut(&sid).expect("BUG: sid from cand");
-                    // Check-only here: stream_spawn performs the insert and
-                    // skips already-present ids; inserting before calling it
-                    // would suppress the spawn block entirely (the avatar
-                    // bug: the client never received its own gob).
-                    is_new = !out.visible.contains(&id);
-                    needs_move = !is_new
-                        && mv.is_some()
-                        && out
-                            .unacked
-                            .get(&id)
-                            .map(|m| !m.contains_key(&frame))
-                            .unwrap_or(true);
-                }
+                // Check-only here: stream_spawn performs the insert and
+                // skips already-present ids; inserting before calling it
+                // would suppress the spawn block entirely (the avatar
+                // bug: the client never received its own gob).
+                let is_new = !self.sessions[&sid].visible.contains(&id);
                 if is_new {
                     self.stream_spawn(sid, id);
-                } else if needs_move {
-                    moving.push(id);
                 }
             }
-            if !moving.is_empty() {
-                updates.push((sid, moving));
-            }
-            // Retractions: visible set minus in-range is too expensive to
-            // scan fully every tick; do a cheap sweep only over the visible
-            // set (bounded by ~few hundred gobs per session).
-            let to_retract: Vec<GobId> = {
-                let out = self.sessions.get_mut(&sid).expect("BUG: sid from keys");
-                out.visible
-                    .iter()
-                    .filter(|&&id| {
-                        self.world
-                            .gobs
-                            .get(id)
-                            .map(|slot| {
-                                let (gx, gy) = self.world.gobs.pos[slot];
-                                (gx - px).abs() > VIEW_RADIUS * 2
-                                    || (gy - py).abs() > VIEW_RADIUS * 2
-                            })
-                            .unwrap_or(true) // dead gobs get retracted too
-                    })
-                    .copied()
-                    .collect()
-            };
-            for id in to_retract {
-                self.stream_retract(sid, id);
+            // Retractions use a 2x VIEW_RADIUS hysteresis (a gob between
+            // R and 2R stays spawned but off-screen), so a per-tick sweep
+            // is wasted work: run it every 8th tick and whenever the
+            // session crossed a vis cell. Deaths retract immediately via
+            // broadcast_retract.
+            if cell_moved || self.world.tick.is_multiple_of(8) {
+                let to_retract: Vec<GobId> = {
+                    let out = self.sessions.get_mut(&sid).expect("BUG: sid from keys");
+                    out.visible
+                        .iter()
+                        .filter(|&&id| {
+                            self.world
+                                .gobs
+                                .get(id)
+                                .map(|slot| {
+                                    let (gx, gy) = self.world.gobs.pos[slot];
+                                    (gx - px).abs() > VIEW_RADIUS * 2
+                                        || (gy - py).abs() > VIEW_RADIUS * 2
+                                })
+                                .unwrap_or(true) // dead gobs get retracted too
+                        })
+                        .copied()
+                        .collect()
+                };
+                for id in to_retract {
+                    self.stream_retract(sid, id);
+                }
             }
             self.world.perf.visible_total += self.sessions[&sid].visible.len();
-        }
-        // Movement deltas: LINSTEP progress frames.
-        for (sid, gobs) in updates {
-            for id in gobs {
-                let Some(slot) = self.world.gobs.get(id) else {
-                    continue;
-                };
-                let Some(lm) = self.world.gobs.mv[slot] else {
-                    continue;
-                };
-                let frame = self.world.gobs.frame[slot];
-                let Some(out) = self.sessions.get_mut(&sid) else {
-                    continue;
-                };
-                let mut m = MessageBuf::new();
-                m.uint8(MSG_OBJDATA)
-                    .uint8(0)
-                    .int32(id)
-                    .int32(frame as i32)
-                    .uint8(OD_LINSTEP)
-                    .int32(lm.step)
-                    .uint8(OD_END);
-                let block = m.finish();
-                out.send_raw(block.clone());
-                out.unacked.entry(id).or_default().insert(frame, block);
-            }
         }
     }
 
@@ -1860,8 +1827,10 @@ impl Game {
         _at: (i32, i32),
     ) {
         let Some(tslot) = self.world.gobs.get(target) else {
+            trace!(sid, target, "interact target gone");
             return;
         };
+        trace!(sid, target, kind = ?self.world.gobs.kind[tslot], "player_interact");
         match self.world.gobs.kind[tslot] {
             Kind::Tree { harvests } => {
                 if harvests > 0 {
@@ -3268,7 +3237,7 @@ impl Game {
                 let block = self.encode_gob_block(v, gob, true);
                 if let (Some(out), Some(block)) = (self.sessions.get_mut(&v), block) {
                     out.send_raw(block.clone());
-                    out.unacked.entry(gob).or_default().insert(frame, block);
+                    Self::record_unacked(out, gob, frame, block);
                 }
             }
             trace!(gob, stage, "crop stage advance");
@@ -3596,7 +3565,7 @@ impl Game {
             let block = self.encode_gob_block(v, gob, true);
             if let (Some(out), Some(block)) = (self.sessions.get_mut(&v), block) {
                 out.send_raw(block.clone());
-                out.unacked.entry(gob).or_default().insert(frame, block);
+                Self::record_unacked(out, gob, frame, block);
             }
         }
     }
@@ -4385,7 +4354,13 @@ impl Game {
 
     fn tick_movement(&mut self) {
         let now = self.world.now_ms;
-        let mut linsteps: Vec<(GobId, i32)> = Vec::new();
+        // Encoded OD blocks for this tick's progress and finalization, sent
+        // as ONE OBJDATA datagram per viewing session (see
+        // batch_move_broadcast) - the per-block per-session fan-out that
+        // used to live here dominated the tick budget at the 400+ mover
+        // scale (68 ms of movement phase measured at 426 players).
+        let mut linsteps: Vec<(GobId, u32, Vec<u8>)> = Vec::new();
+        let mut fin_blocks: Vec<(GobId, u32, Vec<u8>)> = Vec::new();
         let mut finished: Vec<(usize, i32, i32)> = Vec::new();
         for slot in 0..self.world.gobs.alive.len() {
             if !self.world.gobs.alive[slot] {
@@ -4414,8 +4389,18 @@ impl Game {
                 self.world.gobs.set_pos(slot, (cx, cy));
                 let l = lm.step_at(now);
                 if l > lm.step {
+                    let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
+                    let frame = self.world.gobs.frame[slot];
                     self.world.gobs.mv[slot] = Some(LinMove { step: l, ..lm });
-                    linsteps.push((gob_id_from_slot(slot, self.world.gobs.gen[slot]), l));
+                    let mut m = MessageBuf::new();
+                    m.uint8(MSG_OBJDATA)
+                        .uint8(0)
+                        .int32(id)
+                        .int32(frame as i32)
+                        .uint8(OD_LINSTEP)
+                        .int32(l)
+                        .uint8(OD_END);
+                    linsteps.push((id, frame, m.finish()));
                 }
             }
         }
@@ -4430,7 +4415,18 @@ impl Game {
             // position() would fall back to the STALE pre-move rc - the
             // avatar visibly snapped back to its start point (the measured
             // "walks then rubber-bands home" defect).
-            self.finish_move_broadcast(id, (tx, ty), steps);
+            let frame = self.world.gobs.frame[slot];
+            let mut m = MessageBuf::new();
+            m.uint8(MSG_OBJDATA)
+                .uint8(0)
+                .int32(id)
+                .int32(frame as i32)
+                .uint8(OD_MOVE)
+                .coord(tx, ty)
+                .uint8(OD_LINSTEP)
+                .int32(steps)
+                .uint8(OD_END);
+            fin_blocks.push((id, frame, m.finish()));
             // Rest pose: the standing set of the current facing (players
             // and animals both composite directional pose parts).
             let dir = self.world.gobs.facing[slot];
@@ -4439,10 +4435,67 @@ impl Game {
                 self.stream_pose(slot);
             }
         }
-        // LINSTEP progress frames: only when the client-visible index
-        // actually advanced (setl only moves progress forward).
-        for (id, l) in linsteps {
-            self.linstep_broadcast(id, l);
+        self.batch_move_broadcast(linsteps, fin_blocks);
+    }
+
+    /// Movement fan-out: send every LINSTEP progress block and every move
+    /// finalizer to each viewing session as ONE combined OBJDATA datagram
+    /// (the wire format allows consecutive gob blocks per datagram; the
+    /// client's recv_objdata loops them). Blocks land in `unacked` per gob
+    /// exactly like the old per-block path so OBJACK retransmission keeps
+    /// working. O(sessions x movers) hash probes, one datagram and one
+    /// channel send per session per tick.
+    fn batch_move_broadcast(
+        &mut self,
+        linsteps: Vec<(GobId, u32, Vec<u8>)>,
+        fin_blocks: Vec<(GobId, u32, Vec<u8>)>,
+    ) {
+        let sids: Vec<SessionId> = self.sessions.keys().copied().collect();
+        for sid in sids {
+            let Some(out) = self.sessions.get_mut(&sid) else {
+                continue;
+            };
+            let mut m = MessageBuf::with_capacity(256);
+            for (id, frame, block) in &fin_blocks {
+                if !out.visible.contains(id) {
+                    continue;
+                }
+                m.bytes(block);
+                Self::record_unacked(out, *id, *frame, block.clone());
+            }
+            for (id, _frame, block) in &linsteps {
+                if !out.visible.contains(id) {
+                    continue;
+                }
+                m.bytes(block);
+                // Progress frames are deliberately NOT recorded in
+                // `unacked`: each LINSTEP is superseded by the next tick's
+                // frame, so a lost datagram self-heals within 100 ms and
+                // per-session block clones would dominate the tick at the
+                // 600+ mover scale (measured: 400+ ms of clone traffic per
+                // second before this change).
+            }
+            if !m.is_empty() {
+                out.send_raw(m.finish());
+            }
+        }
+    }
+
+    /// Record an OBJDATA block for per-gob retransmission. The per-gob
+    /// map is CAPPED at the last 4 frames: sessions that never OBJACK
+    /// (load bots, slow clients mid-lag) would otherwise grow it without
+    /// bound - measured OOM driver at the 1000-session scale (~40 MB/s of
+    /// finalizer blocks before the cap).
+    fn record_unacked(out: &mut SessionOut, id: GobId, frame: u32, block: Vec<u8>) {
+        const UNACKED_CAP: usize = 4;
+        let per = out.unacked.entry(id).or_default();
+        per.insert(frame, block);
+        while per.len() > UNACKED_CAP {
+            let min = match per.keys().copied().min() {
+                Some(f) => f,
+                None => break,
+            };
+            per.remove(&min);
         }
     }
 
@@ -4489,70 +4542,7 @@ impl Game {
                 .uint8(OD_END);
             let block = m.finish();
             out.send_raw(block.clone());
-            out.unacked.entry(id).or_default().insert(frame, block);
-        }
-    }
-
-    /// Broadcast one LINSTEP for `id` to every session that sees it.
-    fn linstep_broadcast(&mut self, id: GobId, l: i32) {
-        let Some(slot) = self.world.gobs.get(id) else {
-            return;
-        };
-        let frame = self.world.gobs.frame[slot];
-        let viewers: Vec<SessionId> = self
-            .sessions
-            .iter()
-            .filter(|(_, o)| o.visible.contains(&id))
-            .map(|(s, _)| *s)
-            .collect();
-        for v in viewers {
-            if let Some(out) = self.sessions.get_mut(&v) {
-                let mut m = MessageBuf::new();
-                m.uint8(MSG_OBJDATA)
-                    .uint8(0)
-                    .int32(id)
-                    .int32(frame as i32)
-                    .uint8(OD_LINSTEP)
-                    .int32(l)
-                    .uint8(OD_END);
-                let block = m.finish();
-                out.send_raw(block.clone());
-                out.unacked.entry(id).or_default().insert(frame, block);
-            }
-        }
-    }
-
-    /// Move finalizer: OD_MOVE to the destination followed by the final
-    /// LINSTEP (l >= c). One OBJDATA block, applied in order client-side:
-    /// Gob.move pins rc = destination, then linstep drops the Moving
-    /// attribute, so position() rests exactly on the goal.
-    fn finish_move_broadcast(&mut self, id: GobId, target: (i32, i32), c: i32) {
-        let Some(slot) = self.world.gobs.get(id) else {
-            return;
-        };
-        let frame = self.world.gobs.frame[slot];
-        let viewers: Vec<SessionId> = self
-            .sessions
-            .iter()
-            .filter(|(_, o)| o.visible.contains(&id))
-            .map(|(s, _)| *s)
-            .collect();
-        for v in viewers {
-            if let Some(out) = self.sessions.get_mut(&v) {
-                let mut m = MessageBuf::new();
-                m.uint8(MSG_OBJDATA)
-                    .uint8(0)
-                    .int32(id)
-                    .int32(frame as i32)
-                    .uint8(OD_MOVE)
-                    .coord(target.0, target.1)
-                    .uint8(OD_LINSTEP)
-                    .int32(c)
-                    .uint8(OD_END);
-                let block = m.finish();
-                out.send_raw(block.clone());
-                out.unacked.entry(id).or_default().insert(frame, block);
-            }
+            Self::record_unacked(out, id, frame, block);
         }
     }
 
@@ -4705,7 +4695,7 @@ impl Game {
                     .uint8(OD_END);
                 let block = m.finish();
                 out.send_raw(block.clone());
-                out.unacked.entry(id).or_default().insert(frame, block);
+                Self::record_unacked(out, id, frame, block);
             }
         }
         trace!(id, sx, sy, tx, ty, steps, total_ms, "move started");
@@ -5465,7 +5455,7 @@ mod tests {
     ) -> (
         Game,
         tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-        tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
     ) {
         let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -5477,7 +5467,7 @@ mod tests {
             std::env::temp_dir().join(format!("hnh-equip-test-{}.json", name)),
         );
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (raw_tx, raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(512);
         g.session_connected(1, tx, raw_tx);
         let wid = g
             .sessions
@@ -5611,7 +5601,7 @@ mod tests {
             std::env::temp_dir().join("hnh-game-test-save.json"),
         );
         let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
-        let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, mut raw_rx) = tokio::sync::mpsc::channel(512);
         g.session_connected(1, tx, raw_tx);
         let wid = g
             .sessions
@@ -5707,7 +5697,7 @@ mod tests {
             std::env::temp_dir().join("hnh-game-test-save.json"),
         );
         let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
-        let (raw_tx, _raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, _raw_rx) = tokio::sync::mpsc::channel(512);
         g.session_connected(1, tx, raw_tx);
         let charlist = g
             .sessions
@@ -5885,7 +5875,7 @@ mod tests {
             std::env::temp_dir().join("hnh-game-test-save.json"),
         );
         let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
-        let (raw_tx, _raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, _raw_rx) = tokio::sync::mpsc::channel(512);
         g.session_connected(1, tx, raw_tx);
         // Select the character through the normal widget path.
         let wid = g
@@ -5945,7 +5935,7 @@ mod tests {
             std::env::temp_dir().join("hnh-game-test-save.json"),
         );
         let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
-        let (raw_tx, _raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, _raw_rx) = tokio::sync::mpsc::channel(512);
         g.session_connected(1, tx, raw_tx);
         let wid = g
             .sessions
@@ -6048,7 +6038,7 @@ mod tests {
             std::env::temp_dir().join("hnh-game-test-save.json"),
         );
         let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
-        let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, mut raw_rx) = tokio::sync::mpsc::channel(512);
         g.session_connected(1, tx, raw_tx);
         let wid = g
             .sessions
@@ -6200,7 +6190,7 @@ mod tests {
             std::env::temp_dir().join("hnh-game-test-save.json"),
         );
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let (raw_tx, _raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, _raw_rx) = tokio::sync::mpsc::channel(512);
         g.session_connected(1, tx, raw_tx);
         // Inspect the wire table state after registration.
         {

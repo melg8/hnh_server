@@ -22,7 +22,7 @@ pack automatically on first start.
 | `build-server.bat` | `cargo build --release` for the Rust server. |
 | `make-gameres.ps1` | Extracts `lib/haven-res.jar` into `gameres/` and overlays `res/compiled/` (auto-invoked by the start script when the pack is stale). |
 | `wait-server.ps1` | Helper used by `run-client.bat`: blocks until auth (1871) accepts TCP **and** the resource server (1872) answers a real HTTP GET for `gfx/hud/fbtn` (prevents the client racing a still-booting or half-serving server). |
-| `loadtest.bat` | Same as start but with 600 in-process bots in a saturated world and the 5-second `--perf` report. |
+| `loadtest.bat [bots]` | Saturated world + a full bot cohort (default 1000) that walks, fights, harvests and loots through the real UDP path, with the 5-second `--perf` report. |
 
 ## Typical flow
 
@@ -64,7 +64,7 @@ windows\start-server.bat --seed 42          REM default; fixed-seed reproducible
 windows\start-server.bat --workers 4        REM data-parallel tick fan-out
 windows\start-server.bat --shards 2         REM 2 UDP sockets (SO_REUSEPORT), kernel load spread
 windows\start-server.bat --bots 300 --perf  REM in-process load test + 5 s perf report
-windows\loadtest.bat                        REM 600 bots, saturated world, perf report
+windows\loadtest.bat 1000                   REM 1000 bots walk/fight/harvest/loot, perf report
 ```
 
 `--perf` prints `tick_us` every 5 seconds; the 10 Hz simulation budget is

@@ -1065,3 +1065,61 @@ set so tooltips update live. 105 tests green; s23c real-client e2e
 green. Model note: legacy per-piece numbers and the reduction formula
 are undocumented (combat-system.md open questions) - the chosen model
 is documented in armor.rs and isolated behind its two pure functions.
+
+## 2026-10-05 - Session 24: fighting/harvesting bot cohort at the 1000-session scale
+Continuation under .unlazy/session24. Master-prompt requirement: "эмуляцией
+1к подключений которые все бегают, сражаются и взаимодействуют с миром" -
+the in-process bots only walked before, and the biggest cohort proof was
+300 walkers.
+
+BOTS (bots.rs rewritten): each session now builds a wire-level world view -
+RMSG_RESID announcements fill a per-session wire-id -> name table,
+MSG_OBJDATA blocks feed a gob view (remove/move/lin/res/layers/overlay/
+buddy), and the behavior loop picks a target by class (drop > animal >
+tree/stone via a weighted roll: ~50% fight, ~30% harvest, ~20% loot) and
+clicks concrete gob ids like a real MapView. Three wire bugs found and
+pinned by tests: (1) on_rel payloads carry the rmsg type byte (parse_resid
+was reading it as half of the wire id - every gob resolved Other); (2)
+movement ops precede RES/LAYERS in a spawn block, so the view must insert
+placeholders (positions were lost for every spawned gob); (3) the old
+walk-only click carried ONE coordinate - on_map_click reads mc as the
+SECOND coord (coords.nth(1)), so NO bot click ever reached the game logic.
+Clicks now match MapView.java:738/747 exactly [c0, mc, button, modflags,
+gobid]. The bot tracks its own gob via the OD_BUDDY name plate and acts
+from the streamed self position; overlay adds count as bites.
+
+SERVER SCALE FIXES (all measured at 2 cores, --saturated):
+- tick_movement fan-out rewritten: per-block per-session MessageBuf +
+  send_raw became ONE combined OBJDATA datagram per session per tick
+  (batch_move_broadcast; the wire allows consecutive gob blocks, client
+  recv_objdata loops them). Movement phase: 68 ms -> 6-13 ms at 600+.
+- LINSTEP progress frames no longer clone into per-session unacked
+  (self-healing next tick) and the vis phase no longer re-sends movement
+  deltas (the needs_move rescan duplicated every progress frame).
+- unacked retransmit cache capped at the last 4 frames per gob: sessions
+  that never OBJACK (bots) grew it unbounded - the OOM killer at 3.8 GB
+  RSS in run 1k4/1k6. Retract sweep runs every 8th tick + on cell moves
+  (2xR hysteresis makes per-tick sweeps wasted work).
+- Raw (MAPDATA/OBJDATA) session queues are bounded with drop-on-full UDP
+  semantics; inbound client datagram queues likewise (try_send).
+- VIEW_RADIUS 500 -> 300 subtiles (27 tiles, still beyond the ~21-tile
+  client screen; chat AREA radius follows).
+
+VERIFIED: 113 unit tests green (8 new bot tests pin classification,
+objdata parsing incl. overlay-removal without sdt, targeting buckets,
+late RESID reclassification), fmt + clippy -D warnings clean. Gate run
+(server/scripts/verify_session24.sh load1k): 996/1000 connected, peak
+mean tick 64 ms < 100 ms budget, fights 59841 + harvests 126 + pickups
+20682 + bites 17323 in one 120 s cohort; 4 missed sessions are bootstrap
+timeouts under the login storm (handshake retries up to 30 s).
+
+WINDOWS: loadtest.bat takes an optional bot count (default 1000) and
+documents the bot behavior; windows/README + server/README updated.
+
+NEXT (handoff): true multi-node process split over the grid-owner
+contract (node processes own partitions; shared registry + border-cell
+forwarding); equipment effects on the avatar (visible layer changes on
+equip); craft pagina ad->action wiring; mapview ground-drop flow; the
+4-session bootstrap loss under login storms could drop with a token-
+bucket accept queue; vis scan is the next hot phase (20 ms at 1000) -
+cell-level in-view caching would cut it further.

@@ -17,7 +17,9 @@ or manually:
 cd server
 cargo run --release -- --seed 42            # world seed; same seed = same world
 # optional flags:
-#   --bots N        spawn N in-process load-test bots (real UDP path)
+#   --bots N        spawn N in-process load-test bots (real UDP path:
+#                   walk, fight, harvest, loot)
+#   --bot-secs S    bot behavior loop length in seconds (default 600)
 #   --saturated     dense objects + wildlife around spawn for visual load tests
 #   --perf          periodic perf stats
 ```
@@ -30,7 +32,12 @@ Ports: 1871/tcp TLS auth, 1870/udp game session, 1872/tcp resource HTTP.
   Work items group by grid-owner partition (see `src/grid_owner.rs`):
   each rayon task processes one owner's slice of the cell lattice, the
   same unit a separate node process would own in a multi-node layout.
-  300 moving bots tick in ~4.5-5 ms (100 ms budget) at workers=4.
+- Load cohort: `--bots 1000 --bot-secs 120 --saturated --workers 4 --perf`
+  drives 1000 real-UDP sessions that walk, fight the wildlife, harvest and
+  loot. Session 24 gate run: 996/1000 connected, peak mean tick 64 ms
+  (budget 100 ms) on a 2-core host; movement fan-out batches one OBJDATA
+  datagram per session per tick, and the per-gob retransmit cache is
+  capped, so memory stays flat for sessions that never OBJACK.
 - `--shards N` opens N UDP sockets sharing port 1870 via SO_REUSEPORT
   (session accept fan-out on one host).
 - Ownership uses rendezvous hashing: deterministic, no shared state,

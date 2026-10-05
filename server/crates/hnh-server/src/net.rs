@@ -36,7 +36,7 @@ pub enum NetCmd {
     /// New session accepted; game assigns a sid and returns it.
     Accept {
         game_tx: mpsc::UnboundedSender<Vec<u8>>,
-        raw_tx: mpsc::UnboundedSender<Vec<u8>>,
+        raw_tx: mpsc::Sender<Vec<u8>>,
         reply: oneshot::Sender<SessionId>,
     },
     Wdgmsg {
@@ -170,7 +170,7 @@ async fn recv_loop(
     game_tx: mpsc::UnboundedSender<NetCmd>,
     shard: usize,
 ) -> anyhow::Result<()> {
-    let mut sessions: HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>> = HashMap::new();
+    let mut sessions: HashMap<SocketAddr, mpsc::Sender<Vec<u8>>> = HashMap::new();
     let mut buf = vec![0u8; 65536];
     let mut deduper = ErrorDeduper::default();
     loop {
@@ -205,7 +205,10 @@ async fn recv_loop(
             }
             Some(_) => {
                 if let Some(tx) = sessions.get(&peer) {
-                    let _ = tx.send(data.to_vec());
+                    // Bounded queue: drop on full (a starved session loses
+                    // old client datagrams instead of blocking the shard
+                    // accept loop or growing without bound).
+                    let _ = tx.try_send(data.to_vec());
                 }
                 // Datagrams from unknown peers (other than SESS) are ignored.
             }
@@ -220,9 +223,9 @@ async fn on_sess(
     peer: SocketAddr,
     socket: &Arc<UdpSocket>,
     game_tx: &mpsc::UnboundedSender<NetCmd>,
-    sessions: &mut HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>,
+    sessions: &mut HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>,
     shard: usize,
-) -> Option<mpsc::UnboundedSender<Vec<u8>>> {
+) -> Option<mpsc::Sender<Vec<u8>>> {
     // Parse: uint16 flavour, string "Haven", uint16 PVER, string user, cookie.
     let mut m = hnh_proto::MessageBuf::from_slice(&data[1..]);
     let (Ok(_flavour), Ok(_game), Ok(pver), Ok(username)) = (m.u16(), m.str(), m.u16(), m.str())
@@ -246,8 +249,12 @@ async fn on_sess(
         return None;
     }
     // Ask the game task to allocate a sid and register the session.
+    // Raw datagram fan-out is BOUNDED with drop-on-full semantics: MAPDATA
+    // and OBJDATA are unreliable by protocol design, and an unbounded queue
+    // behind a starved sender task OOM-killed the process at the 1000-
+    // session scale (measured: 3.8 GB RSS before the kill).
     let (gameq_tx, gameq_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>(128);
     let (reply_tx, reply_rx) = oneshot::channel();
     if game_tx
         .send(NetCmd::Accept {
@@ -260,7 +267,9 @@ async fn on_sess(
         return None;
     }
     let Ok(sid) = reply_rx.await else { return None };
-    let (dgram_tx, dgram_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    // Inbound client datagrams are also bounded: a flooded client loses
+    // old commands instead of growing the queue without bound.
+    let (dgram_tx, dgram_rx) = mpsc::channel::<Vec<u8>>(1024);
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<NetCmd>();
     // Forward cmd_tx into the shared game channel.
     let shared = game_tx.clone();
@@ -286,9 +295,9 @@ struct Driver {
     sid: SessionId,
     rel_tx: RelSender,
     rel_rx: RelReceiver,
-    dgram_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    dgram_rx: mpsc::Receiver<Vec<u8>>,
     game_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    raw_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    raw_rx: mpsc::Receiver<Vec<u8>>,
     cmd_tx: mpsc::UnboundedSender<NetCmd>,
     last_recv: Instant,
     closed: bool,
@@ -297,9 +306,9 @@ struct Driver {
 async fn run_session(
     addr: SocketAddr,
     sid: SessionId,
-    dgram_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    dgram_rx: mpsc::Receiver<Vec<u8>>,
     game_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    raw_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    raw_rx: mpsc::Receiver<Vec<u8>>,
     cmd_tx: mpsc::UnboundedSender<NetCmd>,
     sock: Arc<UdpSocket>,
 ) {
