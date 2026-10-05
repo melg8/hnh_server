@@ -38,7 +38,7 @@ case "${1:-}" in
     fail() { echo "HANDOFF FAIL: $1"; exit 1; }
     rg -q "^## 2026-10-05 - Session 25" $REPO/HANDOFF.md || fail "no HANDOFF entry"
     git -C $REPO diff --quiet || git -C $REPO status --short | head -5
-    git -C $REPO log --oneline -1 | rg -q "session 25|equipment" || fail "no commit"
+    git -C $REPO log --oneline -1 | rg -q "verify_session25" || fail "no commit"
     git -C $REPO status --short | rg -q "^\s*M" && echo "(uncommitted changes remain - see above)" || true
     echo "HANDOFF ALL PASS"
     ;;
