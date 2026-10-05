@@ -758,6 +758,192 @@ public class DriveAgent {
             } catch (Throwable e) {
                 System.out.println("EQUIPVIS: err " + e);
             }
+
+            // ---------- phase 5: session 26 cursor item + ground drop ----------
+            // The held (cursor) stack must render at the pointer (the
+            // server-created drag Item widget), a map click must land it
+            // as a ground gob, and the gob must pick back up. Evidence:
+            // the client's own widget/gob state (not pixel guesses) plus
+            // full-window screenshots.
+            try {
+                Class<?> itemCls5 = Class.forName("haven.Item");
+                Object root5 = ui.getClass().getField("root").get(ui);
+                Object slen5 = get(ui, "slenhud");
+                if (slen5 != null) {
+                    java.lang.reflect.Method sm5 = slen5.getClass()
+                            .getMethod("wdgmsg", String.class, Object[].class);
+                    sm5.invoke(slen5, new Object[]{"inv", new Object[]{}});
+                    Thread.sleep(1000);
+                }
+                java.util.List items5 = collectChildren(root5, itemCls5);
+                java.lang.reflect.Method resNameM5 = itemCls5.getMethod("GetResName");
+                // Prefer the branch item: the pack mirrors it under
+                // gfx/terobjs/items/branch (a world shape with a neg
+                // layer), so the drop gob renders its true item sprite.
+                Object seedItem = null;
+                String seedName = "?";
+                String expectGob = "branch";
+                for (Object it : items5) {
+                    Field drF = itemCls5.getField("isDragging");
+                    if (drF.getBoolean(it)) continue;
+                    String nm = String.valueOf(resNameM5.invoke(it));
+                    if (nm != null && nm.contains("invobjs/branch")) {
+                        seedItem = it;
+                        seedName = nm;
+                        expectGob = "branch";
+                        break;
+                    }
+                    if (seedItem == null && nm != null && nm.contains("seed")) {
+                        // Fallback candidate (some seeds have no terobjs
+                        // twin; the server falls back to a visible shape).
+                        seedItem = it;
+                        seedName = nm;
+                        expectGob = "";
+                    }
+                }
+                if (seedItem == null) {
+                    System.out.println("CURSOR: no seed item in inventory");
+                } else {
+                    // Snapshot the gob ids before the drop: the ground
+                    // gob must be a NEW OCache entry.
+                    Object sess5 = get(ui, "sess");
+                    Object glob5 = get(sess5, "glob");
+                    Object oc5 = get(glob5, "oc");
+                    java.util.Set<Integer> beforeIds = new java.util.HashSet<Integer>();
+                    Object bi = oc5.getClass().getMethod("iterator").invoke(oc5);
+                    while (bi != null && ((java.util.Iterator<?>) bi).hasNext()) {
+                        Object g5 = ((java.util.Iterator<?>) bi).next();
+                        beforeIds.add((Integer) g5.getClass().getField("id").get(g5));
+                    }
+                    // Take onto the cursor (the same wdgmsg the mouse
+                    // click sends; Item.mousedown -> "take").
+                    java.lang.reflect.Method wdgmsgM5 = itemCls5
+                            .getMethod("wdgmsg", String.class, Object[].class);
+                    Object coordZ5 = Class.forName("haven.Coord").getField("z").get(null);
+                    wdgmsgM5.invoke(seedItem, new Object[]{"take", new Object[]{coordZ5}});
+                    Thread.sleep(1500);
+                    // Read the drag state back: an Item with isDragging
+                    // must exist (the server shipped the drag widget).
+                    String dragName = null;
+                    java.util.List items6 = collectChildren(root5, itemCls5);
+                    for (Object it : items6) {
+                        Field drF = itemCls5.getField("isDragging");
+                        if (drF.getBoolean(it)) {
+                            dragName = String.valueOf(resNameM5.invoke(it));
+                            break;
+                        }
+                    }
+                    if (dragName != null) {
+                        System.out.println("CURSOR DUMP: dragging=" + dragName);
+                    } else {
+                        System.out.println("CURSOR DUMP: dragging=NONE");
+                    }
+                    // Visual proof: park the pointer mid-screen, let the
+                    // drag item follow, capture the frame.
+                    robot.mouseMove(560, 380);
+                    Thread.sleep(800);
+                    java.awt.image.BufferedImage ci = robot.createScreenCapture(
+                            new java.awt.Rectangle(0, 0, 1024, 768));
+                    javax.imageio.ImageIO.write(ci, "png",
+                            new java.io.File("/tmp/client_cursor_item.png"));
+                    System.out.println("CURSOR SCREENSHOT: saved /tmp/client_cursor_item.png");
+                    boolean cursorOk = dragName != null
+                            && (dragName.contains("invobjs/branch") || dragName.contains("seed"));
+                    // Ground drop: a left click anywhere on the mapview
+                    // releases the drag (MapView.drop -> wdgmsg "drop").
+                    robot.mouseMove(560, 380);
+                    robot.mousePress(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                    robot.mouseRelease(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                    Thread.sleep(2500);
+                    // The new gob must carry the dropped resource (the
+                    // terobjs world shape: branch twin or the server's
+                    // visible fallback shape).
+                    String dropRes = null;
+                    Integer dropId = null;
+                    Object di = oc5.getClass().getMethod("iterator").invoke(oc5);
+                    while (di != null && ((java.util.Iterator<?>) di).hasNext()) {
+                        Object g5 = ((java.util.Iterator<?>) di).next();
+                        int id5 = g5.getClass().getField("id").getInt(g5);
+                        if (beforeIds.contains(id5)) continue;
+                        String[] names5 = (String[]) g5.getClass()
+                                .getMethod("resnames").invoke(g5);
+                        for (String n : names5) {
+                            boolean matched = (expectGob.isEmpty() && n != null)
+                                    || (n != null && n.contains(expectGob));
+                            if (matched) {
+                                dropRes = n;
+                                dropId = id5;
+                                break;
+                            }
+                        }
+                        if (dropRes != null) break;
+                    }
+                    System.out.println("GROUNDDROP DUMP: new-gob=" + dropRes
+                            + " id=" + dropId);
+                    robot.mouseMove(512, 384);
+                    Thread.sleep(1200);
+                    java.awt.image.BufferedImage gd = robot.createScreenCapture(
+                            new java.awt.Rectangle(0, 0, 1024, 768));
+                    javax.imageio.ImageIO.write(gd, "png",
+                            new java.io.File("/tmp/client_grounddrop.png"));
+                    System.out.println("GROUNDDROP SCREENSHOT: saved /tmp/client_grounddrop.png");
+                    boolean groundOk = dropRes != null;
+                    // Pick back up: a left click ON the gob (MapView
+                    // click with gobid -> the server's player_interact
+                    // pickup branch) moves the stack into the inventory
+                    // and retracts the gob.
+                    if (dropId != null) {
+                        Object dg5 = oc5.getClass().getMethod("getgob", int.class)
+                                .invoke(oc5, dropId.intValue());
+                        int[] gp5 = gobPos(dg5);
+                        if (gp5 != null) {
+                            Object mcv5 = get(mv, "mc");
+                            Object msz5 = getInherited(mv, "sz");
+                            int vcx5 = Integer.parseInt(coord(msz5).split(",")[0]) / 2;
+                            int vcy5 = Integer.parseInt(coord(msz5).split(",")[1]) / 2;
+                            int mcx5 = Integer.parseInt(coord(mcv5).split(",")[0]);
+                            int mcy5 = Integer.parseInt(coord(mcv5).split(",")[1]);
+                            int sx5 = (2 * (gp5[0] - mcx5) - 2 * (gp5[1] - mcy5)) + vcx5;
+                            int sy5 = ((gp5[0] - mcx5) + (gp5[1] - mcy5)) + vcy5;
+                            sx5 = Math.max(150, Math.min(880, sx5));
+                            sy5 = Math.max(120, Math.min(560, sy5));
+                            robot.mouseMove(sx5, sy5);
+                            robot.mousePress(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                            robot.mouseRelease(java.awt.event.InputEvent.BUTTON1_DOWN_MASK);
+                            Thread.sleep(2500);
+                            boolean gobGone = oc5.getClass().getMethod("getgob", int.class)
+                                    .invoke(oc5, dropId.intValue()) == null;
+                            boolean seedBack = false;
+                            java.util.List items7 = collectChildren(root5, itemCls5);
+                            for (Object it : items7) {
+                                Field drF = itemCls5.getField("isDragging");
+                                if (drF.getBoolean(it)) continue;
+                                String nm = String.valueOf(resNameM5.invoke(it));
+                                if (nm != null
+                                        && (nm.contains("invobjs/branch") || nm.contains("seed"))) {
+                                    seedBack = true;
+                                    break;
+                                }
+                            }
+                            System.out.println("PICKUP DUMP: gob-gone=" + gobGone
+                                    + " seed-in-inventory=" + seedBack);
+                            boolean pickupOk = gobGone && seedBack;
+                            String verdict = (cursorOk && groundOk && pickupOk)
+                                    ? "OK (held item visible, drop landed, pickup restored)"
+                                    : "FAIL cursor=" + cursorOk + " ground=" + groundOk
+                                      + " pickup=" + pickupOk;
+                            System.out.println("CURSOR VERDICT: " + verdict);
+                            System.out.println("GROUNDDROP VERDICT: " + (groundOk ? "OK" : "FAIL"));
+                        } else {
+                            System.out.println("GROUNDDROP VERDICT: FAIL (drop gob has no position)");
+                        }
+                    } else {
+                        System.out.println("GROUNDDROP VERDICT: FAIL (no new seed gob in OCache)");
+                    }
+                }
+            } catch (Throwable e) {
+                System.out.println("CURSOR: err " + e);
+            }
         } catch (Throwable e) {
             System.out.println("AGENT ERROR: " + e);
             e.printStackTrace();

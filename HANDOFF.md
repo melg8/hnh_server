@@ -1198,3 +1198,81 @@ out.cursor state but never ships the drag-item widget the original
 client renders under the mouse - equip works, the held stack is just
 invisible until dropped); carrying-pose state for bows/carried tools
 (their layers are arm/carrying only).
+
+## 2026-10-05 - Session 26: cursor item, ground drops, vis skip check, accept throttle
+Continuation under .unlazy/session26. Four backlog items from the
+Session 25 handoff.
+
+WHAT:
+1) CURSOR ITEM (the held stack is now visible): the server keeps the
+   out.cursor stack state but never shipped the drag Item widget the
+   client renders under the mouse - the held stack was invisible until
+   dropped. SessionOut gained cursor_wid, kept in sync by
+   sync_cursor_widget (create on take, "num" uimsg refresh on count
+   change, destroy on empty). Wired into inv_take, epry_take, inv_drop,
+   epry_drop and every on_map_itemact consumption path
+   (sink_material/station_itemact/plant_seed/legacy drop). The widget
+   is the Item.java factory contract: parent=root, args [res, q,
+   drag=1, grab Coord, tooltip, num]. refresh_inventory skips the
+   cursor wid so the rebuild never kills the held item.
+2) GROUND DROPS (mapview `drop`): the dispatcher ignored the mapview
+   drop wdgmsg entirely (Item drag release on the map). New
+   on_map_drop: take_cursor_stack -> spawn_drop_near -> hide widget.
+   WHILE WIRING THIS the real client exposed a bigger pre-existing
+   defect: ground drops spawned with the INVENTORY icon resource
+   (gfx/invobjs/*: image+tooltip layers, NO neg layer), so the sprite
+   init failed with "No negative found" and EVERY ground drop (wood,
+   stone, meat, loot, user drops) was invisible in the world. Fix: a
+   two-resource Drop kind - resname_idx renders a gfx/terobjs/items/<base>
+   world shape (image+neg; probed in the served pack via
+   resources::served, fallback gfx/terobjs/items/branch keeps unmapped
+   items visible), inv_res_idx restores the exact gfx/invobjs stack on
+   pickup. drop_info() now returns the INVENTORY resource.
+3) VIS SKIP CHECK (the 20 ms hot phase): any_dirty_in_view iterated the
+   WHOLE dirty set per session (O(sessions x dirty cells); bots keep
+   ~140 cells dirty across the lattice every tick). It now enumerates
+   the session's own view-cell range (~36-60 cells) and probes the
+   dirty HashSet with early exit. Pin test: a far-dirty world must not
+   trip the skip; the +1-cell boundary tolerance still rescans.
+4) ACCEPT THROTTLE (login storms): MSG_SESS handling awaited the game
+   task's Accept round trip INLINE on the shard recv loop - a login
+   storm stalled every other session's datagrams behind each handshake.
+   The loop now does parse+PVER+throttle+reply inline and spawns
+   finish_accept (game round trip + driver spawn) off the path. A
+   per-shard token bucket (burst 100, refill 50/s) bounds the accept
+   rate; a throttled handshake gets NO reply (the legacy client
+   retransmits every 2 s up to 10 times) and its single-use cookie is
+   NOT consumed. A pending-set keeps duplicate handshakes idempotent
+   while an accept is in flight.
+
+CLIENT: DriveAgent phase 5 (session 26 evidence): take a starter item
+(prefers the branch - its terobjs twin renders the true sprite) via the
+real widget chain, read back the drag Item (CURSOR DUMP:
+dragging=<res>), screenshot the held item at the pointer
+(/tmp/client_cursor_item.png), release it with a real map click
+(GROUNDDROP DUMP: new-gob=<terobjs res>), screenshot the ground gob
+(/tmp/client_grounddrop.png), then LEFT-click the gob to pick it back
+up (PICKUP DUMP: gob-gone=true seed-in-inventory=true). Verdicts:
+CURSOR VERDICT + GROUNDDROP VERDICT (server/scripts/verify_session26.sh
+checks the full list; the runner now waits for the phase-5 verdicts).
+
+EVIDENCE (s26c/s26d/s26gate real-client runs): the pre-fix run printed
+"gob 66059 resource <gfx/invobjs/branch(v2)> failed to init: ... No
+negative found" and GROUNDDROP DUMP: new-gob=null; after the fix the
+same flow reports new-gob=gfx/terobjs/items/branch, the screenshots
+READ: held branch + tooltip "Branch, quality 10" AT THE POINTER, branch
+on the grass next to the player, PICKUP restores the stack. Full
+regression green in the same run (PORTRAIT, MOVEMENT, NO TELEPORT,
+RAPID, 5x WALKDIR, EQUIP DOLL, ANIMALS, EQUIPVIS). Load: 300 sessions
+mean tick ~6 ms max 18 ms; 1000 sessions connect 1000/1000 with mean
+~45-50 ms during the staggered login bootstrap (worst transient 173 ms),
+settling after - the throttle paces the storm at 50 accepts/s by design.
+
+Verified: 127 unit tests green (5 new), fmt+clippy -D warnings clean.
+
+NEXT (handoff): true multi-node process split over the grid-owner
+contract; craft pagina ad->action wiring for the remaining recipes;
+vis-scan result caching (per-cell in-view result reuse - the scan
+itself, not the skip decision, dominates at 1000 moving sessions);
+carrying-pose state for bows/carried tools; cursor item pickup
+redirection (right-click-with-held-item onto a stack merges).

@@ -10,7 +10,7 @@
 //! simulation owner (grid-owner partitioning is the next scale-out step,
 //! see HANDOFF.md).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -170,7 +170,16 @@ async fn recv_loop(
     game_tx: mpsc::UnboundedSender<NetCmd>,
     shard: usize,
 ) -> anyhow::Result<()> {
-    let mut sessions: HashMap<SocketAddr, mpsc::Sender<Vec<u8>>> = HashMap::new();
+    // Shared per-shard session table. A std Mutex suffices: critical
+    // sections are map lookups/inserts and never held across awaits.
+    let sessions: Arc<std::sync::Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+    // Peers with an accept in flight (game-task handshake not finished
+    // yet). Duplicate MSG_SESS from these gets the idempotent 0 reply
+    // instead of a cookie re-consume (single-use -> spurious AUTH error).
+    let pending: Arc<std::sync::Mutex<HashSet<SocketAddr>>> =
+        Arc::new(std::sync::Mutex::new(HashSet::new()));
+    let mut throttle = AcceptThrottle::new();
     let mut buf = vec![0u8; 65536];
     let mut deduper = ErrorDeduper::default();
     loop {
@@ -196,15 +205,59 @@ async fn recv_loop(
         let data = &buf[..n];
         match data.first().copied() {
             Some(MSG_SESS) => {
-                if on_sess(data, peer, &socket, &game_tx, &mut sessions, shard)
-                    .await
-                    .is_some()
-                {
-                    // Route any immediate duplicates into the driver.
+                // Inline part: parse + validate + throttle + reply. No
+                // game-task round trip here — during a login storm that
+                // await stalled the whole shard's recv loop (handshake
+                // latency for every other session grew by the game
+                // task's queueing delay).
+                let already = {
+                    let s = sessions.lock().unwrap();
+                    s.contains_key(&peer) || pending.lock().unwrap().contains(&peer)
+                };
+                let mut m = hnh_proto::MessageBuf::from_slice(&data[1..]);
+                let (Ok(_flavour), Ok(_game), Ok(pver), Ok(username)) =
+                    (m.u16(), m.str(), m.u16(), m.str())
+                else {
+                    continue;
+                };
+                let cookie = m.rest().to_vec();
+                let err = if pver != PVER {
+                    SESSERR_PVER
+                } else if already {
+                    0 // idempotent re-accept of a live/in-flight session
+                } else if !throttle.take() {
+                    // Storm control: silently drop. The legacy client
+                    // retransmits MSG_SESS every 2 s up to 10 times
+                    // (Session.java RWorker), so it backs off naturally
+                    // until the storm drains. No cookie consumed.
+                    debug!(%peer, shard, "accept throttled (no tokens)");
+                    continue;
+                } else {
+                    match crate::auth().consume_cookie(&cookie) {
+                        Some(_user) => 0,
+                        None => SESSERR_AUTH,
+                    }
+                };
+                let _ = socket.send_to(&[MSG_SESS, err], peer).await;
+                if err != 0 || already {
+                    continue;
                 }
+                pending.lock().unwrap().insert(peer);
+                // Game-task handshake + driver spawn run off the recv
+                // loop path; the loop keeps draining datagrams meanwhile.
+                tokio::spawn(finish_accept(
+                    username,
+                    peer,
+                    Arc::clone(&socket),
+                    game_tx.clone(),
+                    Arc::clone(&sessions),
+                    Arc::clone(&pending),
+                    shard,
+                ));
             }
             Some(_) => {
-                if let Some(tx) = sessions.get(&peer) {
+                let tx = sessions.lock().unwrap().get(&peer).cloned();
+                if let Some(tx) = tx {
                     // Bounded queue: drop on full (a starved session loses
                     // old client datagrams instead of blocking the shard
                     // accept loop or growing without bound).
@@ -217,37 +270,71 @@ async fn recv_loop(
     }
 }
 
-/// Handle MSG_SESS: validate, reply, spawn a driver task.
-async fn on_sess(
-    data: &[u8],
-    peer: SocketAddr,
-    socket: &Arc<UdpSocket>,
-    game_tx: &mpsc::UnboundedSender<NetCmd>,
-    sessions: &mut HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>,
-    shard: usize,
-) -> Option<mpsc::Sender<Vec<u8>>> {
-    // Parse: uint16 flavour, string "Haven", uint16 PVER, string user, cookie.
-    let mut m = hnh_proto::MessageBuf::from_slice(&data[1..]);
-    let (Ok(_flavour), Ok(_game), Ok(pver), Ok(username)) = (m.u16(), m.str(), m.u16(), m.str())
-    else {
-        return None;
-    };
-    let cookie = m.rest().to_vec();
-    let auth = crate::auth();
-    let err = if pver != PVER {
-        SESSERR_PVER
-    } else if sessions.contains_key(&peer) {
-        0 // idempotent re-accept of a live session
-    } else {
-        match auth.consume_cookie(&cookie) {
-            Some(_user) => 0,
-            None => SESSERR_AUTH,
+/// Per-shard accept rate limiter (token bucket).
+///
+/// New-session accepts are the only unbounded work a remote peer can
+/// trigger per datagram (sid allocation, MAPDATA bootstrap, gob spawns),
+/// so a flood of MSG_SESS handshakes would otherwise queue unbounded
+/// work on the game task. Refill: 50 accepts/s sustained, burst 100 —
+/// a 1000-bot login storm drains over ~18 s instead of stampeding the
+/// game task; real players logging in alongside never notice.
+pub struct AcceptThrottle {
+    tokens: f64,
+    last: Instant,
+}
+
+/// Sustained new-session accept rate (tokens per second).
+pub const ACCEPT_RATE: f64 = 50.0;
+/// Maximum burst size (tokens).
+pub const ACCEPT_BURST: f64 = 100.0;
+
+impl AcceptThrottle {
+    pub fn new() -> Self {
+        Self {
+            tokens: ACCEPT_BURST,
+            last: Instant::now(),
         }
-    };
-    let _ = socket.send_to(&[MSG_SESS, err], peer).await;
-    if err != 0 || sessions.contains_key(&peer) {
-        return None;
     }
+
+    /// Try to take one token now.
+    pub fn take(&mut self) -> bool {
+        self.take_at(Instant::now())
+    }
+
+    /// Take with an explicit clock (tests inject synthetic time).
+    pub fn take_at(&mut self, now: Instant) -> bool {
+        let dt = now.duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.tokens = (self.tokens + dt * ACCEPT_RATE).min(ACCEPT_BURST);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for AcceptThrottle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Game-task half of the accept path (runs as its own task): allocate
+/// the sid, wire the channels, spawn the session driver. The inline
+/// part already validated PVER, throttled and consumed the cookie.
+async fn finish_accept(
+    username: String,
+    peer: SocketAddr,
+    socket: Arc<UdpSocket>,
+    game_tx: mpsc::UnboundedSender<NetCmd>,
+    sessions: Arc<std::sync::Mutex<HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>>>,
+    pending: Arc<std::sync::Mutex<HashSet<SocketAddr>>>,
+    shard: usize,
+) {
+    // Always clear the in-flight marker, even on error paths.
+    let _guard = PendingGuard(&pending, peer);
     // Ask the game task to allocate a sid and register the session.
     // Raw datagram fan-out is BOUNDED with drop-on-full semantics: MAPDATA
     // and OBJDATA are unreliable by protocol design, and an unbounded queue
@@ -264,9 +351,11 @@ async fn on_sess(
         })
         .is_err()
     {
-        return None;
+        return;
     }
-    let Ok(sid) = reply_rx.await else { return None };
+    let Ok(sid) = reply_rx.await else {
+        return;
+    };
     // Inbound client datagrams are also bounded: a flooded client loses
     // old commands instead of growing the queue without bound.
     let (dgram_tx, dgram_rx) = mpsc::channel::<Vec<u8>>(1024);
@@ -281,13 +370,20 @@ async fn on_sess(
             }
         }
     });
-    sessions.insert(peer, dgram_tx.clone());
+    sessions.lock().unwrap().insert(peer, dgram_tx.clone());
     info!(%peer, sid, shard, %username, "session accepted");
-    let sock = Arc::clone(socket);
     tokio::spawn(async move {
-        run_session(peer, sid, dgram_rx, gameq_rx, raw_rx, cmd_tx, sock).await;
+        run_session(peer, sid, dgram_rx, gameq_rx, raw_rx, cmd_tx, socket).await;
     });
-    Some(dgram_tx)
+}
+
+/// Clears the pending-accept marker when the accept task ends.
+struct PendingGuard<'a>(&'a Arc<std::sync::Mutex<HashSet<SocketAddr>>>, SocketAddr);
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().remove(&self.1);
+    }
 }
 
 struct Driver {
@@ -477,5 +573,38 @@ mod tests {
         assert!(d.should_log("os error 10049"));
         // take_suppressed resets the counter.
         assert_eq!(d.take_suppressed(), 0);
+    }
+
+    #[test]
+    fn accept_throttle_burst_then_refill() {
+        // Full burst is available immediately...
+        let mut t = AcceptThrottle::new();
+        let t0 = Instant::now();
+        for i in 0..ACCEPT_BURST as u32 {
+            assert!(t.take_at(t0), "token {i} of the burst must be available");
+        }
+        // ...then the bucket is empty: the storm is dropped. A 1 ms
+        // pause refills 0.05 tokens — not enough for one accept.
+        assert!(!t.take_at(t0 + Duration::from_millis(1)));
+
+        // Sustained refill: after a full drain, 1 s of idle time refills
+        // exactly ACCEPT_RATE tokens, then the bucket is empty again.
+        let mut accepted = 0;
+        for _ in 0..ACCEPT_RATE as u32 {
+            if t.take_at(t0 + Duration::from_secs(1)) {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, ACCEPT_RATE as u32, "1 s refills one rate window");
+        assert!(!t.take_at(t0 + Duration::from_secs(1)), "drained again");
+
+        // Idleness refills up to the burst cap, never beyond.
+        let mut t2 = AcceptThrottle::new();
+        let t1 = t2.last;
+        let far = t1 + Duration::from_secs(10_000);
+        for _ in 0..ACCEPT_BURST as u32 {
+            assert!(t2.take_at(far));
+        }
+        assert!(!t2.take_at(far), "burst cap, not infinite credit");
     }
 }

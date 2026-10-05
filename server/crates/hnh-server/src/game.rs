@@ -784,6 +784,7 @@ impl Game {
             pending_build: None,
             station_menu: None,
             cursor: None,
+            cursor_wid: None,
             grids_seen: HashSet::new(),
             vis_cell: None,
         };
@@ -922,6 +923,7 @@ impl Game {
             (Some("item"), "take") => self.inv_take(sid, wid),
             (Some("item"), "iact") => self.on_item_iact(sid, wid),
             (Some("mapview"), "itemact") => self.on_map_itemact(sid, &args),
+            (Some("mapview"), "drop") => self.on_map_drop(sid),
             (Some("mapview"), "click") => self.on_map_click(sid, &args),
             (Some("mapview"), "place") => self.on_map_place(sid, &args),
             (Some("scm"), "act") => {
@@ -1901,13 +1903,14 @@ impl Game {
                 self.push_lp_msgs(sid);
             }
             Kind::Drop { .. } => {
-                // Pick up: move into inventory.
-                let res_idx = self.world.gobs.res_idx[tslot];
+                // Pick up: move into inventory. The stack carries the
+                // INVENTORY resource (drop.0), not the gob's terobjs
+                // render shape (see spawn_drop_near).
                 if let Some(drop) = self.world.gobs.kind[tslot].drop_info() {
                     if let Some(p) = self.world.player_mut(sid) {
                         p.inv.push(InvStack {
-                            res: res_idx,
-                            count: drop.1 as u32,
+                            res: drop.0,
+                            count: drop.1,
                             ql: drop.2,
                             label: drop.3,
                         });
@@ -2599,6 +2602,14 @@ impl Game {
         }
     }
 
+    /// Spawn an item drop gob near `at`.
+    ///
+    /// Two resources per drop: the gob RENDERS with a gfx/terobjs/items
+    /// world shape (inventory item resources have no `neg` layer, so the
+    /// real client fails their sprite with "No negative found" and the
+    /// drop is invisible - measured on the GL client, session 26), while
+    /// Kind::Drop::inv_res_idx keeps the gfx/invobjs icon resource so
+    /// picking up restores the exact original stack.
     fn spawn_drop_near(
         &mut self,
         at: (i32, i32),
@@ -2606,13 +2617,16 @@ impl Game {
         ql: u8,
         label: &'static str,
     ) {
-        let res_idx = self.world.res.intern(resname);
+        let inv_res_idx = self.world.res.intern(resname);
+        let world_res = drop_world_res(resname);
+        let res_idx = self.world.res.intern(world_res);
         let jitter = |w: &mut World| (w.next_ai_rand(7) - 3) * 11;
         let jx = jitter(&mut self.world);
         let jy = jitter(&mut self.world);
         let id = self.world.gobs.spawn(
             Kind::Drop {
                 resname_idx: res_idx,
+                inv_res_idx,
                 ql,
                 label,
             },
@@ -2691,7 +2705,99 @@ impl Game {
             .map(|(id, _)| *id)
     }
 
+    // ------------------------------------------------------------------
+    // Cursor drag widget (session 26): the held stack rendered at the
+    // pointer. Legacy flow: Item.mousedown sends `take`; the server
+    // replies with a drag Item widget (drag=1 + grab offset) parented to
+    // the root; the client's Item constructor grabs the mouse and the
+    // widget follows it (Item.java drag constructor). Without it the
+    // held stack is invisible until dropped.
+    // ------------------------------------------------------------------
+
+    /// Keep the drag Item widget in sync with the cursor stack: create
+    /// it when a stack is picked up, refresh `num` when the count
+    /// changes, destroy it when the cursor empties. Call after any flow
+    /// that mutates `out.cursor` (take, drop, itemact consumption).
+    fn sync_cursor_widget(&mut self, sid: SessionId) {
+        let has_cursor = self.sessions.get(&sid).and_then(|o| o.cursor).is_some();
+        let has_widget = self.sessions.get(&sid).and_then(|o| o.cursor_wid).is_some();
+        match (has_cursor, has_widget) {
+            (false, _) => self.hide_cursor_widget(sid),
+            (true, false) => self.create_cursor_widget(sid),
+            (true, true) => {
+                let Some(stack) = self.sessions.get(&sid).and_then(|o| o.cursor) else {
+                    return;
+                };
+                let Some(out) = self.sessions.get_mut(&sid) else {
+                    return;
+                };
+                let w = out.cursor_wid.expect("BUG: has_widget checked");
+                out.send(wdg::wdgmsg(w, "num", &[ListVal::I(stack.count as i32)]));
+            }
+        }
+    }
+
+    /// Destroy the drag Item widget (cursor emptied). The cursor stack
+    /// itself is untouched.
+    fn hide_cursor_widget(&mut self, sid: SessionId) {
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        if let Some(w) = out.cursor_wid.take() {
+            out.send(wdg::dst_wdg(w));
+            out.widgets.remove(&w);
+        }
+    }
+
+    /// Create the drag Item widget for the current cursor stack.
+    fn create_cursor_widget(&mut self, sid: SessionId) {
+        let Some(stack) = self.sessions.get(&sid).and_then(|o| o.cursor) else {
+            return;
+        };
+        let res_name = self
+            .world
+            .res
+            .name(stack.res)
+            .unwrap_or("gfx/invobjs/stone");
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        if out.cursor_wid.is_some() {
+            return; // one drag widget at a time
+        }
+        let wire = out.res.wire_named(stack.res, res_name);
+        if let Some((name, ver)) = out.res.pending_announce(wire) {
+            out.send(wdg::resid(wire, name, ver));
+            out.res.mark_announced(wire);
+        }
+        let w = out.new_wid("item");
+        out.cursor_wid = Some(w);
+        // Item factory args (Item.java): res, q, drag flag, drag Coord
+        // (grab offset), tooltip, num. Parent 0 = root: the drag item
+        // floats over every window.
+        out.send(wdg::new_wdg(
+            w,
+            "item",
+            0,
+            0,
+            0,
+            &[
+                ListVal::I(wire as i32),
+                ListVal::I(stack.ql as i32),
+                ListVal::I(1),
+                ListVal::C(0, 0),
+                // Server tooltip = display name; food-and-fep.md Item.name()
+                // precedence makes this the fep.conf lookup key for food.
+                ListVal::S(stack.label.to_owned()),
+                ListVal::I(stack.count as i32),
+            ],
+        ));
+    }
+
     /// Rebuild inventory items: destroy old item widgets, create new ones.
+    /// The cursor drag widget is not touched (it is not an inventory
+    /// item); refresh_inventory runs on every cursor flow, so a stale
+    /// dst here would kill the drag widget the sync helper just made.
     fn refresh_inventory(&mut self, sid: SessionId) {
         let Some(inv_wid) = self.inv_window(sid) else {
             return;
@@ -2709,6 +2815,7 @@ impl Game {
             .iter()
             .filter(|(_, t)| t.as_str() == "item")
             .map(|(id, _)| *id)
+            .filter(|id| Some(*id) != out.cursor_wid)
             .collect();
         for id in old {
             out.send(wdg::dst_wdg(id));
@@ -2761,6 +2868,7 @@ impl Game {
         let Some(stack) = stack else {
             return;
         };
+        self.hide_cursor_widget(sid);
         if let Some(p) = self.world.player_mut(sid) {
             p.inv.push(stack);
         }
@@ -2891,6 +2999,7 @@ impl Game {
         let Some(stack) = stack else {
             return; // empty hand
         };
+        self.hide_cursor_widget(sid);
         self.world.players[pidx].equip[ep as usize] = Some(stack);
         self.send_epry_state(sid);
         self.stream_equipment_change(pidx);
@@ -2922,6 +3031,7 @@ impl Game {
         out.cursor = Some(stack);
         self.send_epry_state(sid);
         self.stream_equipment_change(pidx);
+        self.sync_cursor_widget(sid);
     }
 
     /// Broadcast one player's equipment change to every viewer: the
@@ -2968,6 +3078,7 @@ impl Game {
         }
         out.cursor = Some(stack);
         self.refresh_inventory(sid);
+        self.sync_cursor_widget(sid);
     }
 
     /// MapView `itemact(cc0, mc, modflags[, gobid, gobrc])`: the player
@@ -2986,17 +3097,22 @@ impl Game {
         if let Some(gob) = args.get(3).and_then(|a| a.as_int()) {
             if self.world.plans.contains_key(&gob) {
                 self.sink_material(sid, gob, cursor);
+                self.sync_cursor_widget(sid);
                 return;
             }
             if self.world.stations.contains_key(&gob) {
                 self.station_itemact(sid, gob, cursor);
+                self.sync_cursor_widget(sid);
                 return;
             }
             // Fall through to the map-space behaviors below for other
             // gob kinds (legacy iteminteract semantics).
         }
         match farm::spec_by_seed_label(label) {
-            Some(spec) => self.plant_seed(sid, spec, Self::tile_coord(mx, my), cursor),
+            Some(spec) => {
+                self.plant_seed(sid, spec, Self::tile_coord(mx, my), cursor);
+                self.sync_cursor_widget(sid);
+            }
             None => {
                 // Not a seed: legacy map click with a cursor item drops it.
                 let pos = self
@@ -3016,8 +3132,48 @@ impl Game {
                         out.cursor = None;
                     }
                 }
+                self.sync_cursor_widget(sid);
             }
         }
+    }
+
+    /// MapView `drop(modflags)`: release the held stack onto the ground
+    /// near the player (Item.java drag release onto the map target;
+    /// legacy spawns a ground gob). The drag widget is destroyed and the
+    /// cursor cleared; the dropped gob follows the normal pickup/despawn
+    /// path (`Kind::Drop`).
+    fn on_map_drop(&mut self, sid: SessionId) {
+        let Some(cursor) = self.take_cursor_stack(sid) else {
+            return;
+        };
+        self.hide_cursor_widget(sid);
+        let pos = self
+            .world
+            .player(sid)
+            .and_then(|p| self.world.gobs.get(p.gob))
+            .map(|slot| self.world.gobs.pos[slot]);
+        if let Some(pos) = pos {
+            let name = self
+                .world
+                .res
+                .name(cursor.res)
+                .unwrap_or("gfx/invobjs/stone")
+                .to_owned();
+            self.spawn_drop_near(pos, leak_static(&name), cursor.ql, cursor.label);
+            info!(
+                sid,
+                label = cursor.label,
+                count = cursor.count,
+                "ground drop"
+            );
+        }
+        self.refresh_inventory(sid);
+    }
+
+    /// Remove the cursor stack from the session (widget not touched;
+    /// callers own the drag-widget sync).
+    fn take_cursor_stack(&mut self, sid: SessionId) -> Option<InvStack> {
+        self.sessions.get_mut(&sid).and_then(|o| o.cursor.take())
     }
 
     /// Map units -> tile coordinates (11x11 map units per tile).
@@ -5568,15 +5724,41 @@ pub fn unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// World-gob resource for a dropped inventory item.
+///
+/// Inventory item resources (gfx/invobjs/*) carry image + tooltip layers
+/// but no `neg` hitbox layer, so the real client cannot render them as
+/// world gobs: the sprite init fails with "No negative found" and the
+/// drop never appears. The pack mirrors most items under
+/// gfx/terobjs/items/<base> with image + neg layers - drops use that
+/// world shape. When the pack has no terobj shape for an item, the
+/// generic branch shape keeps the drop VISIBLE (a wrong-but-visible
+/// shape beats an invisible one); the pickup still restores the original
+/// invobj via Kind::Drop::inv_res_idx.
+fn drop_world_res(inv_res_name: &str) -> &'static str {
+    let base = inv_res_name.rsplit('/').next().unwrap_or(inv_res_name);
+    let ter = format!("gfx/terobjs/items/{base}");
+    if crate::resources::served(&ter) {
+        leak_static(&ter)
+    } else {
+        "gfx/terobjs/items/branch"
+    }
+}
+
 impl Kind {
-    /// Extract (resname_idx, count, ql, display label) from a Drop kind.
-    pub fn drop_info(&self) -> Option<(u16, u8, u8, &'static str)> {
+    /// Extract (inv resname_idx, count, ql, display label) from a Drop
+    /// kind. The INVENTORY resource, not the gob's render resource: the
+    /// render shape is a gfx/terobjs/items world resource (needs a
+    /// `neg` layer), while the restored stack must carry the
+    /// gfx/invobjs icon resource the inventory widget renders.
+    pub fn drop_info(&self) -> Option<(u16, u32, u8, &'static str)> {
         match self {
             Kind::Drop {
-                resname_idx,
+                inv_res_idx,
                 ql,
                 label,
-            } => Some((*resname_idx, 1, *ql, label)),
+                ..
+            } => Some((*inv_res_idx, 1, *ql, label)),
             _ => None,
         }
     }
@@ -5875,6 +6057,198 @@ mod tests {
             streamed_after_take >= 2,
             "unequip must re-stream the drawable and the doll"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Session 26: cursor drag widget + ground drops
+    // ------------------------------------------------------------------
+
+    /// Taking a stack onto the cursor must create the drag Item widget
+    /// with drag=1 + a grab Coord (the legacy held-item body at the
+    /// pointer); dropping it back must destroy that widget and leave no
+    /// table entry behind.
+    #[tokio::test]
+    async fn take_creates_and_drop_destroys_cursor_widget() {
+        let (mut g, mut rx, _raw) = entered_game("cursoruser");
+        g.open_inventory(1);
+        // The starter kit ships Wheat Seeds; take that stack.
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let item_wid = g.sessions[&1]
+            .item_wids
+            .iter()
+            .find(|(_, &idx)| {
+                g.world.players[pidx].inv.get(idx).map(|s| s.label) == Some("Wheat Seeds")
+            })
+            .map(|(w, _)| *w)
+            .expect("starter wheat seeds must have an item widget");
+        g.inv_take(1, item_wid);
+
+        let out = g.sessions.get(&1).unwrap();
+        assert!(out.cursor.is_some(), "cursor holds the taken stack");
+        let cw = out.cursor_wid.expect("drag widget must exist after take");
+        assert_eq!(out.widgets.get(&cw).map(String::as_str), Some("item"));
+        // Wire proof: the NEWWDG for the cursor wid carries drag=1 and a
+        // grab Coord among its args (Item.java factory contract).
+        let mut saw_drag_widget = false;
+        while let Ok(msg) = rx.try_recv() {
+            if msg.first() != Some(&RMSG_NEWWDG) {
+                continue;
+            }
+            let mut m = hnh_proto::MessageBuf::from_slice(&msg[1..]);
+            let id = m.u16().unwrap();
+            let ty = m.str().unwrap();
+            if id != cw || ty != "item" {
+                continue;
+            }
+            let (_x, _y) = m.coord2().unwrap();
+            let _parent = m.u16().unwrap();
+            let mut args = Vec::new();
+            while let Some(a) = m.list_arg().unwrap() {
+                args.push(a);
+            }
+            // args: [res, q, dragFlag, (dragCoord), tooltip, num]
+            assert!(args.len() >= 6, "drag item args: {args:?}");
+            assert_eq!(args[2], hnh_proto::ListArg::Int(1), "drag flag");
+            assert!(
+                matches!(args[3], hnh_proto::ListArg::Coord(..)),
+                "grab coord expected: {args:?}"
+            );
+            saw_drag_widget = true;
+        }
+        assert!(saw_drag_widget, "cursor drag widget must be on the wire");
+
+        // Drop back into the inventory: widget destroyed, table clean.
+        g.inv_drop(1, cw, &[]);
+        let out = g.sessions.get(&1).unwrap();
+        assert!(out.cursor.is_none(), "cursor empty after drop");
+        assert!(out.cursor_wid.is_none(), "drag widget id cleared");
+        assert!(
+            !out.widgets.contains_key(&cw),
+            "destroyed drag widget leaves the widget table"
+        );
+        let mut saw_dst = false;
+        while let Ok(msg) = rx.try_recv() {
+            if msg.first() == Some(&RMSG_DSTWDG) && msg.len() >= 3 {
+                let id = u16::from_le_bytes([msg[1], msg[2]]);
+                saw_dst |= id == cw;
+            }
+        }
+        assert!(saw_dst, "the drag widget destruction must be on the wire");
+    }
+
+    /// MapView `drop` must land the held stack as a ground gob near the
+    /// player and clear the cursor (stack + drag widget).
+    #[tokio::test]
+    async fn map_drop_spawns_ground_gob_and_clears_cursor() {
+        let (mut g, mut rx, mut raw) = entered_game("dropuser");
+        g.open_inventory(1);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let item_wid = g.sessions[&1]
+            .item_wids
+            .iter()
+            .find(|(_, &idx)| {
+                g.world.players[pidx].inv.get(idx).map(|s| s.label) == Some("Wheat Seeds")
+            })
+            .map(|(w, _)| *w)
+            .expect("starter wheat seeds must have an item widget");
+        g.inv_take(1, item_wid);
+        assert!(g.sessions[&1].cursor.is_some());
+        // Drain bootstrap + take traffic.
+        while rx.try_recv().is_ok() {}
+        while raw.try_recv().is_ok() {}
+        let count_drops = |g: &Game| {
+            g.world
+                .gobs
+                .kind
+                .iter()
+                .zip(g.world.gobs.alive.iter())
+                .filter(|(_, a)| **a)
+                .filter(|(k, _)| matches!(k, Kind::Drop { .. }))
+                .count()
+        };
+        let drops_before = count_drops(&g);
+
+        g.on_map_drop(1);
+
+        let out = g.sessions.get(&1).unwrap();
+        assert!(out.cursor.is_none(), "cursor cleared by the drop");
+        assert!(out.cursor_wid.is_none(), "drag widget gone after the drop");
+        // A Drop gob appeared.
+        let drops_after = count_drops(&g);
+        assert!(
+            drops_after > drops_before,
+            "map drop must spawn a ground gob ({drops_before} -> {drops_after})"
+        );
+        // The drop gob must have been announced on the raw wire (OBJDATA).
+        let mut saw_objdata = false;
+        while let Ok(p) = raw.try_recv() {
+            if p.first() == Some(&MSG_OBJDATA) {
+                saw_objdata = true;
+            }
+        }
+        assert!(saw_objdata, "the ground gob must be streamed to the client");
+    }
+
+    /// The take -> ground-drop round trip conserves the stack: what left
+    /// the inventory came back as the same resource/count on the ground.
+    #[tokio::test]
+    async fn map_drop_conserves_stack_contents() {
+        let (mut g, _rx, _raw) = entered_game("dropq");
+        g.open_inventory(1);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let item_wid = g.sessions[&1]
+            .item_wids
+            .iter()
+            .find(|(_, &idx)| {
+                g.world.players[pidx].inv.get(idx).map(|s| s.label) == Some("Wheat Seeds")
+            })
+            .map(|(w, _)| *w)
+            .expect("item widget");
+        let taken = {
+            let inv = &g.world.players[pidx].inv;
+            let idx = g.sessions[&1].item_wids[&item_wid];
+            inv[idx]
+        };
+        g.inv_take(1, item_wid);
+        g.on_map_drop(1);
+        // The new Drop gob: inv_res_idx == the taken stack's resource
+        // (pickup restores the exact icon), render res != inv res (the
+        // world shape must be a terobjs resource with a neg layer).
+        let mut hit_inv = false;
+        let mut render_is_world_shape = false;
+        for (k, _alive) in g
+            .world
+            .gobs
+            .kind
+            .iter()
+            .zip(g.world.gobs.alive.iter())
+            .filter(|(_, a)| **a)
+        {
+            if let Kind::Drop {
+                resname_idx,
+                inv_res_idx,
+                ql,
+                label,
+            } = k
+            {
+                if *inv_res_idx == taken.res && *ql == taken.ql && *label == taken.label {
+                    hit_inv = true;
+                    let render_name = g.world.res.name(*resname_idx).unwrap_or("");
+                    render_is_world_shape |= render_name.starts_with("gfx/terobjs/items/");
+                }
+            }
+        }
+        assert!(
+            hit_inv,
+            "the drop must carry the taken stack's inventory resource (res {})",
+            taken.res
+        );
+        assert!(
+            render_is_world_shape,
+            "the drop gob must render with a gfx/terobjs/items world shape"
+        );
+        let inv_name = g.world.res.name(taken.res).unwrap_or("");
+        assert!(inv_name.starts_with("gfx/invobjs/"));
     }
 
     /// Regression test (avatar bug): the player's own gob must be streamed

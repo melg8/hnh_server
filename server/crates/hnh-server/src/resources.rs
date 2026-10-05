@@ -17,6 +17,18 @@ pub fn init_res_dir(dir: PathBuf) {
     let _ = VER_CACHE.set(std::sync::Mutex::new(HashMap::new()));
 }
 
+/// Whether the served pack carries `<name>` (flat or nested layout).
+/// Ground-drop rendering needs this probe: inventory item resources
+/// carry no `neg` layer and cannot render as world gobs, so the drop
+/// spawner checks for the item's gfx/terobjs/items/<base> world shape
+/// before falling back to a generic visible shape.
+pub fn served(name: &str) -> bool {
+    let Some(dir) = RES_DIR.get() else {
+        return false;
+    };
+    resolve_res_file(dir, name).exists()
+}
+
 /// Resolve a resource name to its file on disk, exactly like res_http
 /// serves it: flat (`<dir>/<name>.res`) first, then the nested layout
 /// (`<dir>/<name>/<base>.res`) that the shipped pack stores base

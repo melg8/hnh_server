@@ -177,9 +177,13 @@ pub enum Kind {
     },
     Stone,
     /// Item lying on the ground. `label` carries the display name so food
-    /// keeps its fep.conf identity from ground to inventory.
+    /// keeps its fep.conf identity from ground to inventory. The gob
+    /// renders with `resname_idx` (a gfx/terobjs/items world shape that
+    /// has a `neg` layer); picking up restores `inv_res_idx` (the
+    /// gfx/invobjs icon resource the inventory widget needs).
     Drop {
         resname_idx: u16,
+        inv_res_idx: u16,
         ql: u8,
         label: &'static str,
     },
@@ -504,6 +508,10 @@ pub struct SessionOut {
     pub station_menu: Option<(u16, GobId)>,
     /// Item stack currently held on the cursor (take -> itemact flow).
     pub cursor: Option<InvStack>,
+    /// Widget id of the drag Item widget following the mouse (the
+    /// cursor stack's on-screen body). Kept in sync by
+    /// `game::sync_cursor_widget` after every cursor mutation.
+    pub cursor_wid: Option<u16>,
     /// Map grids this client already holds (MAPDATA re-send targeting).
     pub grids_seen: HashSet<(i32, i32)>,
     /// Last tick's player cell (dirty-cell skip decision; None = first

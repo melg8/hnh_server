@@ -57,17 +57,17 @@ DISPLAY=:99 LD_LIBRARY_PATH=$JOGL:$X11 LIBGL_ALWAYS_SOFTWARE=1 \
 JPID=$!
 
 # --- wait for a verdict ---
-# The agent now also produces session-21/25 evidence after the movement
+# The agent now also produces session-21/25/26 evidence after the movement
 # phases (directional walk frames, equipment doll, animals in view, the
-# equip-visuals dump), so wait for the LAST verdict line, not just
-# MOVEMENT2.
-for i in $(seq 1 300); do
-  if rg -q "EQUIPVIS VERDICT|EQUIPVIS: err|EQUIPVIS: no linen|AGENT ERROR|no mapview|no player gob|no UI instance" /tmp/client_$TAG.log 2>/dev/null; then
+# equip-visuals dump, cursor item + ground drop), so wait for the LAST
+# verdict line, not just MOVEMENT2.
+for i in $(seq 1 420); do
+  if rg -q "CURSOR VERDICT|GROUNDDROP VERDICT|CURSOR: no seed|CURSOR: err|EQUIPVIS: err|EQUIPVIS: no linen|AGENT ERROR|no mapview|no player gob|no UI instance" /tmp/client_$TAG.log 2>/dev/null; then
     break
   fi
   sleep 1
 done
 sleep 3
 echo "=== agent + client errors ==="
-rg "AGENT|MOVEMENT|WALKDIR|EQUIP|PORTRAIT|ANIMALS|Exception|error" /tmp/client_$TAG.log | rg -v "meat|wood" | head -40
+rg "AGENT|MOVEMENT|WALKDIR|EQUIP|PORTRAIT|ANIMALS|CURSOR|GROUNDDROP|PICKUP|Exception|error" /tmp/client_$TAG.log | rg -v "meat|wood" | head -40
 exit 0

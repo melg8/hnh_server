@@ -22,7 +22,8 @@ use std::collections::{HashMap, HashSet};
 use crate::state::GobId;
 
 /// Square cell edge in subtiles. 250 ≫ max per-tick movement, small
-/// enough that a view square (±1000 subtiles) touches ≤ 100 cells.
+/// enough that a view square (±300..1000 subtiles, view radius and the
+/// 2x retract square) touches at most ~60 cells.
 pub const CELL: i32 = 250;
 
 #[inline]
@@ -99,12 +100,24 @@ impl VisIndex {
     /// Whether any dirty cell intersects the view square around (px, py)
     /// expanded by one cell (boundary-exit tolerance). `span` is the view
     /// half-width in subtiles.
+    ///
+    /// Cost is O(view cells) with early exit — the view square touches at
+    /// most ~36 cells at the session-24 view radius — probing the dirty
+    /// HashSet per cell. The previous implementation iterated the whole
+    /// dirty set per session (O(sessions x dirty cells): at the 1000-
+    /// session scale that was the dominant vis-phase cost when many
+    /// movers keep their cells dirty across the whole lattice).
     pub fn any_dirty_in_view(&self, px: i32, py: i32, span: i32) -> bool {
         let (cx0, cx1) = cell_range(px - span - CELL, px + span + CELL);
         let (cy0, cy1) = cell_range(py - span - CELL, py + span + CELL);
-        self.dirty
-            .iter()
-            .any(|&(cx, cy)| cx >= cx0 && cx <= cx1 && cy >= cy0 && cy <= cy1)
+        for cy in cy0..=cy1 {
+            for cx in cx0..=cx1 {
+                if self.dirty.contains(&(cx, cy)) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Gobs in the cells intersecting the view square. The caller applies
@@ -241,5 +254,36 @@ mod tests {
         // The old cell (0,0) intersects the view; the new cell (1,0) is
         // within the +1 tolerance even though it is outside the square.
         assert!(v.any_dirty_in_view(0, 0, 1000));
+    }
+
+    #[test]
+    fn skip_check_is_cell_probe_not_dirty_set_walk() {
+        // Session-26 perf pin: with a huge dirty population spread across
+        // the lattice, the skip decision must still be correct and must
+        // probe only the session's own view cells (the old implementation
+        // walked the whole dirty set per session).
+        let mut v = VisIndex::default();
+        // 200 far-apart movers keep their cells dirty every tick.
+        for i in 0..200 {
+            let x = 10_000 + (i % 40) * 250;
+            let y = 10_000 + (i / 40) * 250;
+            v.insert(100 + i, (x, y));
+        }
+        // Nothing near the origin: skip (no dirty cell in view).
+        assert!(
+            !v.any_dirty_in_view(0, 0, 300),
+            "far dirt must not trip the skip check"
+        );
+        assert!(!v.any_dirty_in_view(0, 0, 1000));
+        // One dirty cell inside the view: rescan.
+        v.insert(1, (100, 100));
+        assert!(v.any_dirty_in_view(0, 0, 300));
+        v.clear_dirty();
+        // Dirty cell just outside the view but within the +1-cell
+        // boundary tolerance: still rescans (a mover leaving the view).
+        v.insert(2, (250 * 2, 0)); // cell (2,0): outside span 300, inside +CELL
+        assert!(v.any_dirty_in_view(0, 0, 300));
+        // Far outside even the tolerance: skip.
+        assert!(!v.any_dirty_in_view(0, 0, 100));
     }
 }
