@@ -98,7 +98,17 @@ public class AvaRender extends TexI {
             else
                 imgs.addAll(r.get().layers(imgc));
         }
-        Collections.sort(imgs);
+        // Draw order: the pack encodes the body's stacking as subz within
+        // the shared z plane (legs 4 < pants 6 < torso... head 14 < hair
+        // 17 < banzai arms 19). Sorting by z alone left the order to the
+        // resource-id order of the layer list, so a piece whose wire id
+        // sorted early (pants) was painted UNDER the body part it covers
+        // (the doll walked around bare with its clothes on its back).
+        Collections.sort(imgs, (a, b) -> {
+            if (a.z != b.z)
+                return (a.z - b.z);
+            return (a.subz - b.subz);
+        });
         if (!pending && images != null && images.equals(imgs))
             return;
         images = imgs;
@@ -136,6 +146,23 @@ public class AvaRender extends TexI {
         g.dispose();
         back = buf;
         update(convert(buf, tdim));
+        if (System.getProperty("haven.avadebug") != null) {
+            StringBuilder sb = new StringBuilder("AVACOMP: imgs=").append(imgs.size())
+                    .append(" pending=").append(pending).append(" layers:");
+            for (Indir<Resource> r : layers) {
+                sb.append(' ').append(r.get() == null ? "?" : r.get().name);
+            }
+            System.out.println(sb);
+            for (Resource.Image i : imgs) {
+                System.out.println("AVAIMG: off=" + i.o + " sz=" + i.sz
+                        + " imgnull=" + (i.img == null) + " hash=" + System.identityHashCode(i));
+            }
+            try {
+                javax.imageio.ImageIO.write(buf, "png",
+                        new java.io.File("/tmp/ava_client_buf_" + System.currentTimeMillis() + ".png"));
+            } catch (Throwable ignore) {
+            }
+        }
     }
 
     @Override
@@ -145,5 +172,16 @@ public class AvaRender extends TexI {
         if (loading)
             recomp();
         super.render(g, c, ul, br, sz);
+    }
+
+    /**
+     * The Equipment window draws the doll through GOut.image(TexI),
+     * which bypasses render() and its loading refresh; cdraw calls this
+     * first so late-arriving equipment layers recomposite (the doll
+     * stayed bare when a piece's borka resource was still in flight).
+     */
+    public void refreshIfLoading() {
+        if (loading)
+            recomp();
     }
 }

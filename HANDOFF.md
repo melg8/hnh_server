@@ -1123,3 +1123,78 @@ equip); craft pagina ad->action wiring; mapview ground-drop flow; the
 4-session bootstrap loss under login storms could drop with a token-
 bucket accept queue; vis scan is the next hot phase (20 ms at 1000) -
 cell-level in-view caching would cut it further.
+
+## 2026-10-05 - Session 25: equipment visuals (clothing on the world avatar and the Equipment doll)
+Continuation under .unlazy/session25. Backlog item "equipment effects on
+the avatar (visible layer changes on equip)" from sessions 21-24.
+
+WHAT: equipping or un-equipping an item now changes the avatar's
+composited layers. The server gained `equip.rs`: an invobj ->
+borka-layer table (50 pieces: shirts, pants, shoes, hats, helms, capes,
+cloaks, belt, backpack, quiver, gloves, one-handed gear) inventoried
+from the served pack by scripts/inventory_clothes.py +
+scripts/diff_clothes_poses.py. The per-piece file prefixes are NOT
+derivable from the piece name and CHANGE between poses
+(hat-chief standing-N/walking-N, hat-sprucecap standing-N/sprucecap-N,
+leather boots bootz-/boots- swap) - hence the per-pose template pair.
+Layer names materialize once as leaked 'static strings keyed by
+(piece, pose, art octant), zero-alloc lookups at stream time. The doll
+set derives from the standing templates with banzai arms; pieces that
+ship no banzai variant (eq-* weapons) render on the world avatar only;
+carrying-only pieces (bows) stay unrendered until a carrying pose
+state exists (documented in equip.rs).
+
+WIRE: epry drop/take now call stream_equipment_change ->
+stream_pose (OD_LAYERS re-stream with the piece layers to every
+viewer) + stream_avatar (OD_AVATAR push: owner gets the banzai doll
+set, others the standing set). Spawn blocks and stream_spawn announce
+lists carry the same layers, so late joiners see the outfit.
+
+CLIENT FIXES (fork, verified on the real client):
+1) AvaRender.recomp sorted the composited images by z alone; the
+   pack's stacking lives in SUBZ (legs 4 < pants 6 < torso 5 is wrong
+   too - the ladder is legs 4, torso 5, pants 6, cape 13, head 14,
+   helm 18, hair 17, banzai arms 19). With all z=0 the paint order
+   fell back to the resource-id order of the layer list, so a piece
+   whose wire id sorted early was painted UNDER the body part it
+   covers: the doll stood bare with its pants on its back. recomp now
+   sorts by (z, subz).
+2) AvaRender.render() refreshes the composite while resources stream
+   in, but Equipory.cdraw draws through GOut.image(TexI) which bypasses
+   render() - the doll never recomposited after a piece's borka
+   resource arrived. cdraw now calls ava.rend.refreshIfLoading().
+3) open_inventory sent new_wdg("inv") with an EMPTY arg list; the
+   client's Inventory factory requires the grid-size Coord and threw
+   ArrayIndexOutOfBounds inside RemoteUI.run, killing the whole UI
+   thread (inventory + equipment + everything after). The grid size
+   (4x8) now ships in the widget args.
+
+EVIDENCE (s25v/s25w real-client runs): EQUIPVIS VERDICT: OK - the
+agent equips the starter linen pants through the REAL widget chain
+(item wdgmsg take -> epry drop), reads back EQUIPVIS DUMP
+DRESSED/UNDRESSED (doll Avatar.rend names pants-0 when dressed, not
+when not) and WORLD DUMP DRESSED/UNDRESSED (the Layered layer list on
+the world gob), and screenshots both: /tmp/client_equip_dressed.png vs
+/tmp/client_equip_undressed.png (pixel-diff confined to the pants slot
++ the doll's legs) and /tmp/client_world_player.png (the world avatar
+in pants). Full regression in the same run: PORTRAIT, MOVEMENT,
+NO TELEPORT, RAPID CLICKS, five WALKDIR legs, EQUIP DOLL, ANIMALS all
+green. Starter kit now also ships linen pants + shirt so every fresh
+character has something to wear. server/scripts/verify_session25.sh
+runs the whole checklist (TAG=<tag>).
+
+Verified: 122 unit tests green (9 new: equip table, pose-specific
+prefixes, doll banzai set, hand-side split, pack cross-check; wire test
+equip_change_streams_layers_and_avatar pins the OD_LAYERS re-stream +
+OD_AVATAR push on equip and the re-stream on unequip), fmt+clippy -D
+warnings clean.
+
+NEXT (handoff): true multi-node process split over the grid-owner
+contract; craft pagina ad->action wiring; mapview ground-drop flow
+(dea3f67 hardened the client side); token-bucket accept queue for the
+login-storm bootstrap loss; vis-scan cell caching (the 20 ms hot phase
+at 1000 sessions); cursor item visibility (the server keeps the
+out.cursor state but never ships the drag-item widget the original
+client renders under the mouse - equip works, the held stack is just
+invisible until dropped); carrying-pose state for bows/carried tools
+(their layers are arm/carrying only).

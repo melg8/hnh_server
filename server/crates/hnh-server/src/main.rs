@@ -10,6 +10,7 @@ mod bots;
 mod build;
 mod chat;
 mod craft;
+mod equip;
 mod farm;
 mod fight;
 mod game;

@@ -206,13 +206,21 @@ scripts/jogl/verify_charlist_portrait.sh <tag>
 `MOVEMENT: MOVED` plus `SPEED VERDICT: OK` (measured tiles/s inside the
 documented 3.0 walk gait window), `NO TELEPORT: OK`, and
 `RAPID CLICKS: GLIDING` are the movement pass lines; `PORTRAIT: OK` is the
-pass line for the login card. The client log is at `/tmp/client_<tag>.log`,
-the server trace at `/tmp/server_<tag>.log`. For visual verification
-(portrait, avatar pose, rendering) the agent saves full-window screenshots
-to `/tmp/client_charlist.png`, `/tmp/client_walking.png`,
+pass line for the login card. `EQUIP DOLL: avagob=... ava-rend=OK` plus the
+session-25 `EQUIPVIS VERDICT: OK` / `WORLD DUMP DRESSED|UNDRESSED` lines are
+the equipment-visuals pass marks: the equip-visuals phase equips the starter
+linen pants through the real widget chain and reads back both the doll
+(Avatar.rend) and the world drawable (Layered.layers) - a missing or
+stuck-on piece means the equip pipeline broke. The client log is at
+`/tmp/client_<tag>.log`, the server trace at `/tmp/server_<tag>.log`. For
+visual verification (portrait, avatar pose, rendering) the agent saves
+full-window screenshots to `/tmp/client_charlist.png`,
+`/tmp/client_walking.png`, `/tmp/client_equip_dressed.png`,
+`/tmp/client_equip_undressed.png`, `/tmp/client_world_player.png`,
 `/tmp/client_world_*.png` - READ them, do not assume. The client debug flag
 `-Dhaven.debugclicks=true` traces which branch consumes a map click when
-you need to debug input handling.
+you need to debug input handling; `-Dhaven.avadebug=1` traces the doll
+composite (layer list + per-image offsets) into the client log.
 
 Session-21 evidence lines (part of every full e2e run): the agent orders
 three directional legs (`WALKDIR EAST|NORTH|SOUTH: ARRIVED` with

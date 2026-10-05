@@ -1159,6 +1159,11 @@ impl Game {
                 // playable out of the box.
                 ("gfx/invobjs/seed-wheat", 5, 10, "Wheat Seeds"),
                 ("gfx/invobjs/seed-carrot", 5, 10, "Carrot Seeds"),
+                // Starter clothing: wearable pieces render on the avatar
+                // (equip.rs) and give the Equipment doll something to
+                // show right away.
+                ("gfx/invobjs/linenpants", 1, 10, "Linen Pants"),
+                ("gfx/invobjs/linenshirt", 1, 10, "Linen Shirt"),
             ];
             for (resname, count, ql, label) in kit {
                 let gidx = self.world.res.intern(resname);
@@ -1405,6 +1410,12 @@ impl Game {
         let hp = self.world.gobs.hp[slot];
         let max_hp = self.world.gobs.max_hp[slot];
         let mv = self.world.gobs.mv[slot];
+        // Equipped pieces read before the session borrow (the names feed
+        // both the world drawable and the doll attribute below).
+        let equip: Vec<&'static str> = match kind {
+            Kind::Player { player } => self.player_equip_names(player),
+            _ => Vec::new(),
+        };
         let res_name = self
             .world
             .res
@@ -1460,7 +1471,9 @@ impl Game {
             }
         }
         // Composited drawables (players + animals): server-side pose
-        // resolution of concrete directional frame resources.
+        // resolution of concrete directional frame resources. Player
+        // blocks append the equipped pieces' clothing layers (equip.rs)
+        // to both the world drawable and the doll attribute.
         if is_player || is_animal {
             let moving = mv.is_some();
             let facing = self.world.gobs.facing[slot];
@@ -1473,6 +1486,11 @@ impl Game {
                     let w = out.res.wire_named(gi, part);
                     m.uint16(w);
                 }
+                for part in crate::equip::world_layers(&equip, moving, facing) {
+                    let gi = self.world.res.intern(part);
+                    let w = out.res.wire_named(gi, part);
+                    m.uint16(w);
+                }
                 m.uint16(65535);
                 if let Some(p) = self.world.players.get(player) {
                     // Avatar attribute (OD_AVATAR): drives the Equipment
@@ -1481,10 +1499,18 @@ impl Game {
                     // viewer gets the banzai doll pose; everyone else gets
                     // the standing idle set.
                     let own = out.player_gob == Some(id);
-                    let doll = if own {
+                    let doll: Vec<&'static str> = if own {
                         avatar_doll_layers()
+                            .iter()
+                            .copied()
+                            .chain(crate::equip::doll_layers(&equip))
+                            .collect()
                     } else {
                         avatar_pose_layers(false, facing)
+                            .iter()
+                            .copied()
+                            .chain(crate::equip::world_layers(&equip, false, facing))
+                            .collect()
                     };
                     m.uint8(OD_AVATAR);
                     for part in doll {
@@ -1526,6 +1552,15 @@ impl Game {
             return;
         };
         let res_idx = self.world.gobs.res_idx[slot];
+        // Gob render facts read before the session borrow (players carry
+        // equipped piece names into the spawn block below).
+        let kind = self.world.gobs.kind[slot];
+        let moving = self.world.gobs.mv[slot].is_some();
+        let facing = self.world.gobs.facing[slot];
+        let equip: Vec<&'static str> = match kind {
+            Kind::Player { player } => self.player_equip_names(player),
+            _ => Vec::new(),
+        };
         let Some(out) = self.sessions.get_mut(&sid) else {
             return;
         };
@@ -1547,15 +1582,14 @@ impl Game {
         // resource the OD_LAYERS block references before the spawn block.
         // The client resolves OD_LAYERS ids through these RESIDs; without
         // them the avatar renders invisible ("no doll").
-        let kind = self.world.gobs.kind[slot];
-        let moving = self.world.gobs.mv[slot].is_some();
-        let facing = self.world.gobs.facing[slot];
         let layers: Vec<&'static str> = match kind {
             Kind::Player { .. } => {
-                let mut v = Vec::with_capacity(13);
+                let mut v = Vec::with_capacity(13 + 4 * equip.len());
                 v.push(AVATAR_BASE);
                 v.extend(avatar_pose_layers(moving, facing).iter().copied());
+                v.extend(crate::equip::world_layers(&equip, moving, facing));
                 v.extend(avatar_doll_layers().iter().copied());
+                v.extend(crate::equip::doll_layers(&equip));
                 v
             }
             Kind::Animal { species } => {
@@ -2639,7 +2673,11 @@ impl Game {
             .map(|(id, _)| *id);
         if existing.is_none() {
             let w = out.new_wid("invwnd");
-            out.send(wdg::new_wdg(w, "inv", 350, 250, 0, &[]));
+            // The client's Inventory factory requires the grid size
+            // (Coord isz, cells); an empty arg list crashes its create()
+            // (ArrayIndexOutOfBounds) and kills the whole UI thread.
+            // 4 columns x 8 rows matches the refresh_inventory layout.
+            out.send(wdg::new_wdg(w, "inv", 350, 250, 0, &[ListVal::C(4, 8)]));
             self.refresh_inventory(sid);
         }
     }
@@ -2745,6 +2783,21 @@ impl Game {
             .map(|(id, _)| *id)
     }
 
+    /// The equipped pieces' inventory resource names for one player, in
+    /// slot order. Only resources the equip::table knows how to render
+    /// pass the filter (the equip module drops non-wearables itself; the
+    /// empty-name fallback guards a stale resource index after a pack
+    /// change).
+    fn player_equip_names(&self, player: usize) -> Vec<&'static str> {
+        self.world.players[player]
+            .equip
+            .iter()
+            .flatten()
+            .map(|s| self.world.res.name(s.res).unwrap_or(""))
+            .filter(|n| !n.is_empty())
+            .collect()
+    }
+
     /// Create the paperdoll window if absent, then resync its contents.
     fn open_epry(&mut self, sid: SessionId) {
         if self.epry_window(sid).is_none() {
@@ -2840,6 +2893,7 @@ impl Game {
         };
         self.world.players[pidx].equip[ep as usize] = Some(stack);
         self.send_epry_state(sid);
+        self.stream_equipment_change(pidx);
     }
 
     /// epry "take" (slot): pick the equipped item back onto the cursor.
@@ -2867,6 +2921,19 @@ impl Game {
         };
         out.cursor = Some(stack);
         self.send_epry_state(sid);
+        self.stream_equipment_change(pidx);
+    }
+
+    /// Broadcast one player's equipment change to every viewer: the
+    /// world drawable (OD_LAYERS) re-streams with the piece layers and
+    /// the doll attribute (OD_AVATAR) recomposites on the owner.
+    fn stream_equipment_change(&mut self, pidx: usize) {
+        let gob = self.world.players[pidx].gob;
+        let Some(slot) = self.world.gobs.get(gob) else {
+            return;
+        };
+        self.stream_pose(slot);
+        self.stream_avatar(slot);
     }
 
     // ------------------------------------------------------------------
@@ -4560,7 +4627,17 @@ impl Game {
         let moving = self.world.gobs.mv[slot].is_some();
         let facing = self.world.gobs.facing[slot];
         let (base_name, layer_names): (&'static str, Vec<&'static str>) = match kind {
-            Kind::Player { .. } => (AVATAR_BASE, avatar_pose_layers(moving, facing).to_vec()),
+            Kind::Player { player } => {
+                let equip = self.player_equip_names(player);
+                (
+                    AVATAR_BASE,
+                    avatar_pose_layers(moving, facing)
+                        .iter()
+                        .copied()
+                        .chain(crate::equip::world_layers(&equip, moving, facing))
+                        .collect(),
+                )
+            }
             Kind::Animal { species } => (
                 kritter_base(species),
                 vec![kritter_pose_layer(species, moving, facing)],
@@ -4613,6 +4690,68 @@ impl Game {
                 .entry(id)
                 .or_default()
                 .insert(self.world.gobs.frame[slot], block);
+        }
+    }
+
+    /// Stream the Equipment-doll avatar attribute (OD_AVATAR) of the
+    /// player gob at `slot` to every viewer: the owner receives the
+    /// banzai doll set (+ the equipped pieces' doll layers), other
+    /// viewers the standing idle set. Fires on equip/unequip so the doll
+    /// recomposites live (Equipory.cdraw re-reads Avatar.rend).
+    fn stream_avatar(&mut self, slot: usize) {
+        let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
+        let Kind::Player { player } = self.world.gobs.kind[slot] else {
+            return;
+        };
+        let facing = self.world.gobs.facing[slot];
+        let frame_i32 = self.world.gobs.frame[slot] as i32;
+        let equip = self.player_equip_names(player);
+        let viewers: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, o)| o.visible.contains(&id))
+            .map(|(s, _)| *s)
+            .collect();
+        for v in viewers {
+            let Some(out) = self.sessions.get_mut(&v) else {
+                continue;
+            };
+            let own = out.player_gob == Some(id);
+            let layers: Vec<&'static str> = if own {
+                avatar_doll_layers()
+                    .iter()
+                    .copied()
+                    .chain(crate::equip::doll_layers(&equip))
+                    .collect()
+            } else {
+                avatar_pose_layers(false, facing)
+                    .iter()
+                    .copied()
+                    .chain(crate::equip::world_layers(&equip, false, facing))
+                    .collect()
+            };
+            let mut announces: Vec<Vec<u8>> = Vec::new();
+            let mut wire_ids: Vec<u16> = Vec::with_capacity(layers.len());
+            for n in &layers {
+                let gi = self.world.res.intern(n);
+                let w = out.res.wire_named(gi, n);
+                if let Some((rn, rv)) = out.res.pending_announce(w) {
+                    announces.push(wdg::resid(w, rn, rv));
+                    out.res.mark_announced(w);
+                }
+                wire_ids.push(w);
+            }
+            for a in announces {
+                out.send(a);
+            }
+            let mut m = MessageBuf::new();
+            m.uint8(MSG_OBJDATA).uint8(0).int32(id).int32(frame_i32);
+            m.uint8(OD_AVATAR);
+            for w in &wire_ids {
+                m.uint16(*w);
+            }
+            m.uint16(65535).uint8(OD_END);
+            out.send_raw(m.finish());
         }
     }
 
@@ -5583,6 +5722,159 @@ mod tests {
         g.on_wdgmsg(1, epry, "take", vec![hnh_proto::ListArg::Int(4)]);
         assert!(g.world.players[pidx].equip[4].is_none());
         assert!(g.sessions.get(&1).unwrap().cursor.is_some(), "hand kept");
+    }
+
+    /// Extract the (op, layer wire ids) pairs from one raw OBJDATA block
+    /// (the same layout the spawn-block test walks).
+    fn objdata_layer_lists(block: &[u8]) -> Vec<(u8, Vec<u16>)> {
+        if block.len() < 10 || block[0] != MSG_OBJDATA {
+            return Vec::new();
+        }
+        let mut off = 10;
+        let mut out = Vec::new();
+        while off < block.len() {
+            let code = block[off];
+            off += 1;
+            match code {
+                OD_END => break,
+                OD_RES => {
+                    let wire = u16::from_le_bytes([block[off], block[off + 1]]);
+                    off += 2;
+                    if wire & 0x8000 != 0 {
+                        let n = block[off] as usize;
+                        off += 1 + n;
+                    }
+                }
+                OD_MOVE => off += 8,
+                OD_LINBEG => off += 20,
+                OD_LINSTEP => off += 4,
+                OD_LAYERS | OD_AVATAR => {
+                    let mut ids = Vec::new();
+                    while off + 2 <= block.len() {
+                        let id = u16::from_le_bytes([block[off], block[off + 1]]);
+                        off += 2;
+                        if id == 65535 {
+                            break;
+                        }
+                        ids.push(id);
+                    }
+                    out.push((code, ids));
+                }
+                OD_HEALTH => off += 1,
+                OD_BUDDY => break,
+                _ => break,
+            }
+        }
+        out
+    }
+
+    /// Equipping must re-stream the world drawable (OD_LAYERS) with the
+    /// piece's borka layers and push the updated doll attribute
+    /// (OD_AVATAR) to the owner; unequipping streams again without the
+    /// piece (the live doll/world update, not just a spawn-time view).
+    #[tokio::test]
+    async fn equip_change_streams_layers_and_avatar() {
+        let (mut g, mut rx, mut raw) = entered_game("equipvisuser");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        // Hand the player a wearable (server-side grant, like a pickup).
+        let pants = "gfx/invobjs/linenpants";
+        let res = g.world.res.intern(pants);
+        g.world.players[pidx].inv.push(InvStack {
+            res,
+            count: 1,
+            ql: 10,
+            label: "",
+        });
+        // Drain the bootstrap traffic: only the CHANGE may be asserted.
+        while rx.try_recv().is_ok() {}
+        while raw.try_recv().is_ok() {}
+
+        // Reserve the wire id of the layer name the equip table emits
+        // for the standing pants (wire_named allocates once per session,
+        // so the later stream reuses this id). The world gob is idle, so
+        // the standing set of the SPAWN facing applies (spawn faces
+        // movement octant 1 - the camera-facing front).
+        let gob = g.world.players[pidx].gob;
+        let slot = g.world.gobs.get(gob).expect("player gob slot");
+        let facing = g.world.gobs.facing[slot];
+        let pants_le: &str =
+            crate::equip::world_layers([&"gfx/invobjs/linenpants"], false, facing)[0];
+        let pants_layer: &'static str = pants_le;
+        let layer_res = g.world.res.intern(pants_layer);
+        let pants_wire = g
+            .sessions
+            .get_mut(&1)
+            .unwrap()
+            .res
+            .wire_named(layer_res, pants_layer);
+
+        // Equip: take the stack onto the cursor, drop it into slot 2.
+        let slen = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "slen")
+            .map(|(k, _)| *k)
+            .unwrap();
+        g.on_wdgmsg(1, slen, "inv", vec![]);
+        // The starting inventory already holds a branch: target the
+        // granted stack's widget (the last inventory index) explicitly.
+        let pants_idx = g.world.players[pidx].inv.len() - 1;
+        let item_wid = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .item_wids
+            .iter()
+            .find(|(_, &idx)| idx == pants_idx)
+            .map(|(&w, _)| w)
+            .unwrap_or_else(|| panic!("granted stack widget at idx {pants_idx}"));
+        g.on_wdgmsg(1, item_wid, "take", vec![]);
+        let epry = g.epry_window(1).unwrap();
+        g.on_wdgmsg(1, epry, "drop", vec![hnh_proto::ListArg::Int(2)]);
+        assert!(g.world.players[pidx].equip[2].is_some());
+
+        // The OD_LAYERS re-stream must carry the pants wire id, and the
+        // doll attribute (OD_AVATAR) must be pushed with it too.
+        let mut saw_world = false;
+        let mut saw_doll = false;
+        while let Ok(block) = raw.try_recv() {
+            for (op, ids) in objdata_layer_lists(&block) {
+                if ids.contains(&pants_wire) {
+                    if op == OD_LAYERS {
+                        saw_world = true;
+                    }
+                    if op == OD_AVATAR {
+                        saw_doll = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_world,
+            "equip must re-stream OD_LAYERS carrying wire id {pants_le:?}"
+        );
+        assert!(saw_doll, "equip must push OD_AVATAR carrying the piece");
+
+        // Unequip: another OD_LAYERS/OD_AVATAR pair streams (now without
+        // the piece - the layer lists shrink back).
+        while raw.try_recv().is_ok() {}
+        g.on_wdgmsg(1, epry, "take", vec![hnh_proto::ListArg::Int(2)]);
+        assert!(g.world.players[pidx].equip[2].is_none());
+        let mut streamed_after_take = 0;
+        while let Ok(block) = raw.try_recv() {
+            for (op, _) in objdata_layer_lists(&block) {
+                if op == OD_LAYERS || op == OD_AVATAR {
+                    streamed_after_take += 1;
+                }
+            }
+        }
+        assert!(
+            streamed_after_take >= 2,
+            "unequip must re-stream the drawable and the doll"
+        );
     }
 
     /// Regression test (avatar bug): the player's own gob must be streamed

@@ -55,12 +55,19 @@ public class DriveAgent {
 
     static <T> List<T> collectChildren(Object w, Class<T> cls) throws Exception {
         List<T> out = new ArrayList<T>();
+        collectChildrenRec(w, cls, out, 0);
+        return out;
+    }
+
+    @SuppressWarnings("unchecked")
+    static void collectChildrenRec(Object w, Class<?> cls, List<?> out, int depth) throws Exception {
+        if (depth > 12) return;
         Object child = w.getClass().getField("child").get(w);
         while (child != null) {
-            if (cls.isInstance(child)) out.add(cls.cast(child));
+            if (cls.isInstance(child)) ((List<Object>) out).add(child);
+            collectChildrenRec(child, cls, out, depth + 1);
             child = child.getClass().getField("next").get(child);
         }
-        return out;
     }
 
     // ---------- phase 1: login ----------
@@ -610,9 +617,193 @@ public class DriveAgent {
             } catch (Throwable e) {
                 System.out.println("ANIMALS SCREENSHOT: err " + e);
             }
+
+            // ---------- phase 4: session 25 equipment visuals ----------
+            // Equip a starter clothing piece through the same widget
+            // wdgmsg path the mouse uses (Item "take" onto the cursor,
+            // epry "drop" into a slot), then read the Avatar.rend dump:
+            // the doll recomposites from the streamed OD_AVATAR, so the
+            // dump naming the piece's borka layers is the wire-level
+            // proof, and the screenshots are the visual one.
+            try {
+                Object equip4 = get(ui, "equip");
+                if (equip4 == null) {
+                    System.out.println("EQUIPVIS: no equipory window");
+                } else {
+                    Class<?> itemCls = Class.forName("haven.Item");
+                    Object root4 = ui.getClass().getField("root").get(ui);
+                    // Open the inventory first: the item widgets are
+                    // created server-side only when the window exists
+                    // (the same wdgmsg the HUD's inventory button sends).
+                    Object slen = get(ui, "slenhud");
+                    if (slen != null) {
+                        java.lang.reflect.Method sm = slen.getClass()
+                                .getMethod("wdgmsg", String.class, Object[].class);
+                        sm.invoke(slen, new Object[]{"inv", new Object[]{}});
+                        Thread.sleep(1200);
+                    }
+                    @SuppressWarnings("rawtypes")
+                    java.util.List items = collectChildren(root4, itemCls);
+                    // The starter kit ships branch/stone/meat/seeds AND
+                    // linen pants + shirt: pick the linen pants by its
+                    // RESOURCE name (Item.name() is the display tooltip;
+                    // GetResName() is the wire resource path).
+                    Object bagItem = null;
+                    String bagName = "?";
+                    java.lang.reflect.Method resNameM = itemCls.getMethod("GetResName");
+                    for (Object it : items) {
+                        Field drF = itemCls.getField("isDragging");
+                        if (drF.getBoolean(it)) continue;
+                        String nm = String.valueOf(resNameM.invoke(it));
+                        System.out.println("EQUIPVIS: inventory item " + nm);
+                        if (nm != null && nm.contains("linenpants")) {
+                            bagItem = it;
+                            bagName = nm;
+                            break;
+                        }
+                    }
+                    if (bagItem == null) {
+                        System.out.println("EQUIPVIS: no linen pants in the inventory");
+                    } else {
+                    System.out.println("EQUIPVIS: equipping " + bagName);
+                    java.lang.reflect.Method wdgmsgM = itemCls
+                            .getMethod("wdgmsg", String.class, Object[].class);
+                    Object coordZ = Class.forName("haven.Coord").getField("z").get(null);
+                    // Take the wearable onto the cursor, drop it into
+                    // slot 2 (legs) through the epry widget itself.
+                    wdgmsgM.invoke(bagItem, new Object[]{"take", new Object[]{coordZ}});
+                    Thread.sleep(600);
+                    java.lang.reflect.Method eqmsg = equip4.getClass()
+                            .getMethod("wdgmsg", String.class, Object[].class);
+                    eqmsg.invoke(equip4, new Object[]{"drop", new Object[]{Integer.valueOf(2)}});
+                    // Resources for the piece's borka layers stream in on
+                    // demand; give the doll time to load and recomposite.
+                    Thread.sleep(3500);
+                    String dressed = avaDump(mv);
+                    System.out.println("EQUIPVIS DUMP DRESSED: " + dressed.replace('\n', '|'));
+                    // Large doll-region screenshots for the visual diff:
+                    // the Equipment window sits at its laid-out position.
+                    try {
+                        Object wc4 = getInherited(equip4, "c");
+                        Object wsz4 = getInherited(equip4, "sz");
+                        int ex4 = Integer.parseInt(coord(wc4).split(",")[0]);
+                        int ey4 = Integer.parseInt(coord(wc4).split(",")[1]);
+                        int ew4 = Math.min(512, Integer.parseInt(coord(wsz4).split(",")[0]));
+                        int eh4 = Math.min(400, Integer.parseInt(coord(wsz4).split(",")[1]));
+                        java.awt.image.BufferedImage ed = robot.createScreenCapture(
+                                new java.awt.Rectangle(ex4, ey4, ew4, eh4));
+                        javax.imageio.ImageIO.write(ed, "png", new java.io.File("/tmp/client_equip_dressed.png"));
+                        System.out.println("EQUIPVIS DOLL SHOT: dressed saved " + ex4 + "," + ey4 + " " + ew4 + "x" + eh4);
+                    } catch (Throwable e3) {
+                        System.out.println("EQUIPVIS DOLL SHOT: err " + e3);
+                    }
+                    // Park the mouse at the screen center so the fork
+                    // camera pans back to the player, then capture the
+                    // world avatar in clothes: crop around the gob's
+                    // projected screen position (m2s = (2x-2y, x+y)).
+                    robot.mouseMove(512, 384);
+                    Thread.sleep(1800);
+                    java.awt.image.BufferedImage d1 = robot.createScreenCapture(
+                            new java.awt.Rectangle(0, 0, 1024, 768));
+                    javax.imageio.ImageIO.write(d1, "png", new java.io.File("/tmp/client_world_dressed.png"));
+                    System.out.println("WORLD DUMP DRESSED: " + worldLayerDump(mv));
+                    try {
+                        Object g2 = getPlayerGob(mv);
+                        int[] gp = gobPos(g2);
+                        Object mcv2 = get(mv, "mc");
+                        Object msz2 = getInherited(mv, "sz");
+                        int vcx2 = Integer.parseInt(coord(msz2).split(",")[0]) / 2;
+                        int vcy2 = Integer.parseInt(coord(msz2).split(",")[1]) / 2;
+                        int mcx2 = Integer.parseInt(coord(mcv2).split(",")[0]);
+                        int mcy2 = Integer.parseInt(coord(mcv2).split(",")[1]);
+                        int sx = (2 * (gp[0] - mcx2) - 2 * (gp[1] - mcy2)) + vcx2;
+                        int sy = ((gp[0] - mcx2) + (gp[1] - mcy2)) + vcy2;
+                        sx = Math.max(60, Math.min(960, sx));
+                        sy = Math.max(60, Math.min(700, sy));
+                        javax.imageio.ImageIO.write(d1.getSubimage(sx - 45, sy - 60, 90, 110),
+                                "png", new java.io.File("/tmp/client_world_player.png"));
+                        System.out.println("WORLD PLAYER SHOT: saved at " + sx + "," + sy);
+                    } catch (Throwable e4) {
+                        System.out.println("WORLD PLAYER SHOT: err " + e4);
+                    }
+                    // Unequip: the doll must drop the piece again.
+                    eqmsg.invoke(equip4, new Object[]{"take", new Object[]{Integer.valueOf(2), Integer.valueOf(0)}});
+                    Thread.sleep(3500);
+                    String undressed = avaDump(mv);
+                    System.out.println("EQUIPVIS DUMP UNDRESSED: " + undressed.replace('\n', '|'));
+                    System.out.println("WORLD DUMP UNDRESSED: " + worldLayerDump(mv));
+                    try {
+                        Object wc5 = getInherited(equip4, "c");
+                        Object wsz5 = getInherited(equip4, "sz");
+                        int ex5 = Integer.parseInt(coord(wc5).split(",")[0]);
+                        int ey5 = Integer.parseInt(coord(wc5).split(",")[1]);
+                        int ew5 = Math.min(512, Integer.parseInt(coord(wsz5).split(",")[0]));
+                        int eh5 = Math.min(400, Integer.parseInt(coord(wsz5).split(",")[1]));
+                        java.awt.image.BufferedImage eu = robot.createScreenCapture(
+                                new java.awt.Rectangle(ex5, ey5, ew5, eh5));
+                        javax.imageio.ImageIO.write(eu, "png", new java.io.File("/tmp/client_equip_undressed.png"));
+                        System.out.println("EQUIPVIS DOLL SHOT: undressed saved");
+                    } catch (Throwable e3) {
+                        System.out.println("EQUIPVIS DOLL SHOT: err " + e3);
+                    }
+                    String piece = "pants-linen";
+                    boolean ok = dressed.contains(piece) && !undressed.contains(piece);
+                    System.out.println("EQUIPVIS VERDICT: " + (ok ? "OK (doll recomposites with the equipped piece)" : "FAIL"));
+                    // Re-equip for the closing screenshot set: the world
+                    // avatar in clothes (the next screenshots carry it).
+                    eqmsg.invoke(equip4, new Object[]{"drop", new Object[]{Integer.valueOf(2)}});
+                    Thread.sleep(3000);
+                    }
+                }
+            } catch (Throwable e) {
+                System.out.println("EQUIPVIS: err " + e);
+            }
         } catch (Throwable e) {
             System.out.println("AGENT ERROR: " + e);
             e.printStackTrace();
+        }
+    }
+
+    /** The Avatar.rend layer dump of the viewer's own gob ("" when the
+     *  attribute or the render is missing). */
+    static String avaDump(Object mv) {
+        try {
+            Object g = getPlayerGob(mv);
+            if (g == null) return "no-gob";
+            Object ava = g.getClass().getMethod("getattr", Class.class)
+                    .invoke(g, Class.forName("haven.Avatar"));
+            if (ava == null) return "no-avatar-attr";
+            Object rend = ava.getClass().getField("rend").get(ava);
+            if (rend == null) return "no-rend";
+            return (String) rend.getClass().getMethod("Dump").invoke(rend);
+        } catch (Throwable e) {
+            return "dump-err " + e;
+        }
+    }
+
+    /** The world drawable's layer names (Layered.layers) of the player
+     *  gob - the OD_LAYERS wire state the world renderer composites. */
+    static String worldLayerDump(Object mv) {
+        try {
+            Object g = getPlayerGob(mv);
+            if (g == null) return "no-gob";
+            Object draw = g.getClass().getMethod("getattr", Class.class)
+                    .invoke(g, Class.forName("haven.Drawable"));
+            if (draw == null) return "no-drawable";
+            if (!Class.forName("haven.Layered").isInstance(draw)) return "not-layered";
+            Object layers = draw.getClass().getField("layers").get(draw);
+            StringBuilder sb = new StringBuilder();
+            for (Object r : (java.util.List<?>) layers) {
+                java.lang.reflect.Method gm = r.getClass().getMethod("get");
+                gm.setAccessible(true);
+                Object res = gm.invoke(r);
+                java.lang.reflect.Field nf = res.getClass().getField("name");
+                nf.setAccessible(true);
+                sb.append(nf.get(res)).append('|');
+            }
+            return sb.toString();
+        } catch (Throwable e) {
+            return "dump-err " + e;
         }
     }
 

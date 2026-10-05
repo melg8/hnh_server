@@ -48,7 +48,7 @@ fi
 cd $REPO/build
 CP="haven.jar:../lib/jogl.jar:../lib/gluegen-rt.jar:../lib/haven-res.jar:../lib/js-14.jar:../lib/jogg.jar:../lib/jorbis.jar:../lib/antlr-3.2.jar:../lib/jnlp.jar"
 DISPLAY=:99 LD_LIBRARY_PATH=$JOGL:$X11 LIBGL_ALWAYS_SOFTWARE=1 \
-  $J8/bin/java -cp "$CP" \
+  $J8/bin/java -Dhaven.avadebug=1 -cp "$CP" \
   -Djava.library.path=$JOGL \
   -Dhaven.resdir=$REPO/gameres \
   -Dhaven.driveuser=$USERNAME \
@@ -57,11 +57,12 @@ DISPLAY=:99 LD_LIBRARY_PATH=$JOGL:$X11 LIBGL_ALWAYS_SOFTWARE=1 \
 JPID=$!
 
 # --- wait for a verdict ---
-# The agent now also produces session-21 evidence after the movement
-# phases (directional walk frames, equipment doll, animals in view), so
-# wait for the LAST verdict line, not just MOVEMENT2.
+# The agent now also produces session-21/25 evidence after the movement
+# phases (directional walk frames, equipment doll, animals in view, the
+# equip-visuals dump), so wait for the LAST verdict line, not just
+# MOVEMENT2.
 for i in $(seq 1 300); do
-  if rg -q "ANIMALS SCREENSHOT|AGENT ERROR|no mapview|no player gob|no UI instance" /tmp/client_$TAG.log 2>/dev/null; then
+  if rg -q "EQUIPVIS VERDICT|EQUIPVIS: err|EQUIPVIS: no linen|AGENT ERROR|no mapview|no player gob|no UI instance" /tmp/client_$TAG.log 2>/dev/null; then
     break
   fi
   sleep 1
