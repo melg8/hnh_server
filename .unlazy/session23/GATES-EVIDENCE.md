@@ -65,3 +65,20 @@ by session 21 G6 and the unit suite).
 
 Runner improvement: the e2e run log now greps the full verdict set
 (WALKDIR/EQUIP/PORTRAIT/ANIMALS) instead of only AGENT/MOVEMENT lines.
+
+## Follow-up (same session): armor class end to end
+
+- armor.rs: per-piece base def/abs for the 14 armor pieces the shipped
+  pack contains; quality scaling sqrt(q/10) pinned to the documented
+  anchors (Q10 tusk helm 1/7, Q160 4/28); tooltip line "Armor class: D/A"
+  composed into the epry "set" sync ( Equipory.calcAC sums it); combat
+  applications: hurt_player damage shrinks by abs
+  (dmg*50/(50+abs)), animal bites chip the player's defence bar through
+  defense_chip (chip*50/(50+def)).
+- craft.rs: recipe "hcloak" (Hide cloak from 2 raw cow hides,
+  paginae/craft/hcloak, dex softcap) - the armor economy entry point;
+  resources verified against lib/haven-res.jar (invobjs/cloak-hide,
+  hide-raw-cow, paginae/craft/hcloak).
+- 105 unit tests green (5 new armor tests), fmt+clippy -D warnings
+  clean; real-client e2e (s23c, workers=4) green: portrait, movement x2,
+  five walkdir legs, equip doll ava-rend=OK.

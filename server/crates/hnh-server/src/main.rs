@@ -4,6 +4,7 @@
 //!   cargo run --release -- --seed 42
 //! Ports: 1871/tcp TLS auth, 1870/udp game, 1872/tcp resource HTTP.
 
+mod armor;
 mod auth;
 mod bots;
 mod build;

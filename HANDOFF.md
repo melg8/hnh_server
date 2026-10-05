@@ -1052,3 +1052,16 @@ needs a shared registry + border-cell forwarding); equipment effects
 mapview ground-drop flow; an animals-in-view hunt fallback that
 teleports the camera to the nearest predator would make the s23b-style
 animal screenshot deterministic.
+
+## 2026-10-05 - Session 23 follow-up: armor class end to end
+armor.rs lands the server side of the Equipment window armor class:
+per-piece base def/abs (14 pieces verified against the shipped pack),
+quality scaling sqrt(q/10) pinned to the documented tusk-helmet anchors,
+tooltip composition into the epry "set" sync, and two combat
+applications (absorption shrines HP damage, defense slows the
+breakthrough). Recipe "hcloak" (2 raw cow hides -> hide cloak) gives the
+pipeline a craftable source; equip/unequip already re-pushed the epry
+set so tooltips update live. 105 tests green; s23c real-client e2e
+green. Model note: legacy per-piece numbers and the reduction formula
+are undocumented (combat-system.md open questions) - the chosen model
+is documented in armor.rs and isolated behind its two pure functions.

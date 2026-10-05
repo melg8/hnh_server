@@ -163,14 +163,27 @@ pub struct Recipe {
 
 /// Recipes implemented this session. Ingredient/output resources must exist
 /// in the served resource pack (verified against lib/haven-res.jar).
-pub const RECIPES: &[Recipe] = &[Recipe {
-    id: "axe",
-    name: "Stone axe",
-    inputs: &[("gfx/invobjs/branch", 1), ("gfx/invobjs/stone", 1)],
-    outputs: &[("gfx/invobjs/axe", 1)],
-    pagina: "paginae/craft/axe",
-    softcap_attr: "str",
-}];
+pub const RECIPES: &[Recipe] = &[
+    Recipe {
+        id: "axe",
+        name: "Stone axe",
+        inputs: &[("gfx/invobjs/branch", 1), ("gfx/invobjs/stone", 1)],
+        outputs: &[("gfx/invobjs/axe", 1)],
+        pagina: "paginae/craft/axe",
+        softcap_attr: "str",
+    },
+    // First armor entry into the economy: two cow hides sew into a hide
+    // cloak (gfx/invobjs/cloak-hide, armor::PIECES). Gives the armor
+    // class pipeline a craftable source end to end.
+    Recipe {
+        id: "hcloak",
+        name: "Hide cloak",
+        inputs: &[("gfx/invobjs/hide-raw-cow", 2)],
+        outputs: &[("gfx/invobjs/cloak-hide", 1)],
+        pagina: "paginae/craft/hcloak",
+        softcap_attr: "dex",
+    },
+];
 
 /// Raw -> roasted meat mapping for the `roast` recipe (paginae/craft/roastmeat,
 /// ad = ["craft", "roast"]). Keys are the raw item display labels; values the

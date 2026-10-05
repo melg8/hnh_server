@@ -2826,8 +2826,18 @@ impl Game {
                     }
                     args.push(ListVal::I(wire as i32));
                     args.push(ListVal::I(s.ql as i32));
-                    if !s.label.is_empty() {
-                        args.push(ListVal::S(s.label.to_owned()));
+                    // Armor pieces append the "Armor class: D/A" tooltip
+                    // line; Equipory.calcAC parses and sums it per slot
+                    // (combat-system.md: the server owns the numbers).
+                    let tt = match crate::armor::ac_line(name, i32::from(s.ql)) {
+                        Some(line) if !s.label.is_empty() => {
+                            format!("{}\n{}", s.label, line)
+                        }
+                        Some(line) => line,
+                        None => s.label.to_owned(),
+                    };
+                    if !tt.is_empty() {
+                        args.push(ListVal::S(tt));
                     }
                 }
                 None => args.push(ListVal::I(-1)),
@@ -5028,6 +5038,9 @@ impl Game {
                 .get(&p_sid)
                 .map(|out| out.fight.own_def)
                 .unwrap_or(crate::fight::BAR_FULL);
+            // Armor defense slows the breakthrough (armor.rs); fetched
+            // outside the mutable borrow below.
+            let (def_ac, _) = self.armor_totals(pidx);
             // Animal offence builds; swing chips the player's defence.
             let mut bite = None;
             {
@@ -5039,7 +5052,8 @@ impl Game {
                     let str = *self.world.players[pidx].attrs.get("str").unwrap_or(&10);
                     // Animal bites are lighter than player swings.
                     let dmg = (5 * str / 10).max(1) / 2;
-                    let new_def = (own_def - crate::fight::SWING_DEF_DMG).max(0);
+                    let chip = crate::armor::defense_chip(crate::fight::SWING_DEF_DMG, def_ac);
+                    let new_def = (own_def - chip).max(0);
                     if new_def <= crate::fight::OPENING_THRESHOLD {
                         bite = Some(dmg);
                     }
@@ -5169,10 +5183,31 @@ impl Game {
         }
     }
 
+    /// Summed equipment armor class (defense, absorption), quality-scaled
+    /// per piece. The client computes the same sum from the tooltips
+    /// (Equipory.calcAC); the server applies it in combat (armor.rs).
+    fn armor_totals(&self, pidx: usize) -> (i32, i32) {
+        let mut def = 0;
+        let mut abs = 0;
+        for slot in &self.world.players[pidx].equip {
+            let Some(s) = slot else { continue };
+            let name = self.world.res.name(s.res).unwrap_or("");
+            if let Some((d, a)) = crate::armor::ac_of(name, i32::from(s.ql)) {
+                def += d;
+                abs += a;
+            }
+        }
+        (def, abs)
+    }
+
     /// Apply animal damage to a player (health quarters stream too).
     fn hurt_player(&mut self, pidx: usize, dmg: i32, from: GobId) {
         let sid = self.world.players[pidx].session;
         let pgob = self.world.players[pidx].gob;
+        // Equipment absorption shrinks the damage that reaches HP
+        // (armor.rs: dmg * K / (K + abs_total)).
+        let (_, abs_total) = self.armor_totals(pidx);
+        let dmg = crate::armor::reduce_damage(dmg, abs_total);
         let p = &mut self.world.players[pidx];
         p.hp -= dmg;
         p.stamina = (p.stamina - 2).max(0);
