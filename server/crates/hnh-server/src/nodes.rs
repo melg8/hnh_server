@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 /// Protocol version of the node link; mismatching peers are rejected so a
 /// stale process cannot corrupt a newer cluster's state.
@@ -69,6 +69,9 @@ pub struct GuestState {
     pub kind: GuestKind,
     pub hp: i32,
     pub max_hp: i32,
+    /// Authoritative gait speed in subtiles/second (transfer needs it to
+    /// keep retarget math identical on the new owner).
+    pub speed: i32,
 }
 
 /// Copy of `state::LinMove` (that type is game-internal; the node link
@@ -109,10 +112,11 @@ pub enum NodeMsg {
     Hello { proto: u16, node: usize },
     /// Liveness probe; also exercises the codec in unit tests.
     Ping,
-    /// Viewer -> owner: start streaming gobs in these cells.
-    Sub { cells: Vec<(i32, i32)> },
+    /// Viewer -> owner: start streaming gobs in these cells. `from` is
+    /// the sender's node index (the shared membership identity).
+    Sub { from: usize, cells: Vec<(i32, i32)> },
     /// Viewer -> owner: stop streaming these cells.
-    Unsub { cells: Vec<(i32, i32)> },
+    Unsub { from: usize, cells: Vec<(i32, i32)> },
     /// Area chat broadcast with the same radius semantics: the receiver
     /// filters its sessions by the SENDER's position (guest or local).
     Chat {
@@ -161,9 +165,8 @@ impl FrameReader {
     ) -> std::io::Result<Option<NodeMsg>> {
         loop {
             if self.buf.len() >= 4 {
-                let len =
-                    u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]])
-                        as usize;
+                let len = u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]])
+                    as usize;
                 if len > MAX_FRAME {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -506,9 +509,13 @@ mod tests {
         });
         msg_roundtrip(NodeMsg::Ping);
         msg_roundtrip(NodeMsg::Sub {
+            from: 1,
             cells: vec![(0, 0), (-3, 7), (i32::MAX / 250, i32::MIN / 250)],
         });
-        msg_roundtrip(NodeMsg::Unsub { cells: vec![(1, 1)] });
+        msg_roundtrip(NodeMsg::Unsub {
+            from: 0,
+            cells: vec![(1, 1)],
+        });
         msg_roundtrip(NodeMsg::Chat {
             from: "developer".into(),
             at: (-1200, 900),
@@ -532,6 +539,7 @@ mod tests {
             kind: GuestKind::Animal { species: 2 },
             hp: 50,
             max_hp: 50,
+            speed: 33,
         }));
         msg_roundtrip(NodeMsg::GuestUpdate(GuestState {
             id: 7,
@@ -545,6 +553,7 @@ mod tests {
             },
             hp: 100,
             max_hp: 100,
+            speed: 50,
         }));
         msg_roundtrip(NodeMsg::GuestRetract { id: 0x0002_0004 });
         msg_roundtrip(NodeMsg::GuestTransfer(GuestState {
@@ -558,6 +567,7 @@ mod tests {
             },
             hp: 1,
             max_hp: 1,
+            speed: 0,
         }));
     }
 
@@ -566,7 +576,10 @@ mod tests {
         let msgs = vec![
             NodeMsg::Ping,
             NodeMsg::GuestRetract { id: 9 },
-            NodeMsg::Sub { cells: vec![(1, 2)] },
+            NodeMsg::Sub {
+                from: 0,
+                cells: vec![(1, 2)],
+            },
         ];
         let mut wire = Vec::new();
         for m in &msgs {
@@ -593,7 +606,8 @@ mod tests {
     #[test]
     fn frame_length_cap_rejects_bogus_prefix() {
         let mut fr = FrameReader::new();
-        fr.buf.extend_from_slice(&(MAX_FRAME as u32 + 1).to_le_bytes());
+        fr.buf
+            .extend_from_slice(&(MAX_FRAME as u32 + 1).to_le_bytes());
         let (mut a, _b) = tokio::io::duplex(64);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -605,15 +619,21 @@ mod tests {
 
     #[test]
     fn membership_parses_and_rejects_bad_lists() {
-        let cfg = ClusterConfig::parse("127.0.0.1:7100,127.0.0.1:7101", 1)
-            .expect("valid two-node list");
+        let cfg =
+            ClusterConfig::parse("127.0.0.1:7100,127.0.0.1:7101", 1).expect("valid two-node list");
         assert_eq!(cfg.node_count(), 2);
-        assert_eq!(cfg.listen(), "127.0.0.1:7101".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            cfg.listen(),
+            "127.0.0.1:7101".parse::<SocketAddr>().unwrap()
+        );
         let peers: Vec<(usize, SocketAddr)> = cfg.peers().collect();
         assert_eq!(peers, vec![(0, "127.0.0.1:7100".parse().unwrap())]);
 
         assert!(ClusterConfig::parse("", 0).is_err());
-        assert!(ClusterConfig::parse("127.0.0.1:7100", 0).is_err(), "one node is not a cluster");
+        assert!(
+            ClusterConfig::parse("127.0.0.1:7100", 0).is_err(),
+            "one node is not a cluster"
+        );
         assert!(ClusterConfig::parse("127.0.0.1:7100,127.0.0.1:7101", 2).is_err());
         assert!(ClusterConfig::parse("127.0.0.1:7100,nonsense", 0).is_err());
         assert!(ClusterConfig::parse("127.0.0.1:7100,127.0.0.1:7100", 0).is_err());

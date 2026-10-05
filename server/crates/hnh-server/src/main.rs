@@ -86,10 +86,15 @@ struct Args {
     cert: Option<String>,
     key: Option<String>,
     perf: bool,
+    /// Cluster membership list (listen addresses of every node).
+    cluster: Option<String>,
+    /// This process's node index into the cluster list.
+    node: usize,
 }
 
 fn usage() -> &'static str {
-    "hnh-server [--seed N] [--bots N] [--bot-secs S] [--saturated] [--shards N] [--workers N] [--perf] [--res-dir DIR] [--cert P] [--key P]\n"
+    "hnh-server [--seed N] [--bots N] [--bot-secs S] [--saturated] [--shards N] [--workers N] [--perf] [--res-dir DIR] [--cert P] [--key P] \
+        [--cluster host:port,host:port --node N]\n"
 }
 
 fn parse_args() -> Args {
@@ -104,6 +109,8 @@ fn parse_args() -> Args {
         cert: None,
         key: None,
         perf: false,
+        cluster: None,
+        node: 0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -118,6 +125,8 @@ fn parse_args() -> Args {
             "--res-dir" => a.res_dir = it.next(),
             "--cert" => a.cert = it.next(),
             "--key" => a.key = it.next(),
+            "--cluster" => a.cluster = it.next(),
+            "--node" => a.node = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--help" | "-h" => {
                 print!("{}", usage());
                 std::process::exit(0);
@@ -167,8 +176,39 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         Ok(p) => std::path::PathBuf::from(p),
         Err(_) => default_repo_dir("save").join("world.json"),
     };
-    let game = Game::new(args.seed, cmd_rx, net_rx, args.saturated, save_path);
-    let mut game = game;
+    // Cluster mesh: spawned BEFORE the game task so peer links negotiate
+    // while the world loads; inbound frames flow into the game command
+    // channel as Cmd::NodeMsg.
+    let mut game;
+    match &args.cluster {
+        Some(list) => {
+            let cfg = nodes::ClusterConfig::parse(list, args.node)
+                .map_err(|e| anyhow::anyhow!("--cluster: {e}"))?;
+            let (node_tx, node_rx) = tokio::sync::mpsc::unbounded_channel::<nodes::NodeMsg>();
+            let mesh = nodes::run(cfg.clone(), node_tx).await;
+            let fwd_tx = cmd_tx.clone();
+            tokio::spawn(async move {
+                let mut node_rx = node_rx;
+                while let Some(msg) = node_rx.recv().await {
+                    if fwd_tx.send(game::Cmd::NodeMsg(msg)).is_err() {
+                        break;
+                    }
+                }
+            });
+            game = Game::new_clustered(
+                args.seed,
+                cmd_rx,
+                net_rx,
+                args.saturated,
+                save_path,
+                &cfg,
+                mesh,
+            );
+        }
+        None => {
+            game = Game::new(args.seed, cmd_rx, net_rx, args.saturated, save_path);
+        }
+    };
     game.workers = workers;
     let game_handle = tokio::spawn(game.run());
 

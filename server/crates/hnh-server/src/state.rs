@@ -40,6 +40,14 @@ pub type SessionId = u32;
 /// across node processes for globally-unique ids.
 pub const MAX_SLOT: usize = (1 << 16) - 1;
 
+/// Simulation vitals bundle (combat + movement) transferred with a gob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Vitals {
+    pub hp: i32,
+    pub max_hp: i32,
+    pub speed: i32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Species {
     Deer,
@@ -315,18 +323,12 @@ pub struct Gobs {
     /// arrivals, re-facings never re-send an identical layer set).
     pub pose_streamed: Vec<u8>,
     free: Vec<usize>,
-    /// Lowest slot of this node's allocation range (cluster layout).
-    node_base: usize,
     /// Dirty-cell spatial index maintained by every mutator (spawn, kill,
     /// set_pos); see visidx.rs for the skip-proof semantics.
     pub vis: crate::visidx::VisIndex,
 }
 
 impl Gobs {
-    pub fn new() -> Self {
-        Self::with_layout(NonZeroUsize::new(1).expect("one node"), 0)
-    }
-
     /// Cluster layout: gob slots partition across node processes so gob
     /// ids are globally unique by construction — node `me` allocates only
     /// slots in `[me*per, (me+1)*per)` (the last node also owns the
@@ -356,7 +358,6 @@ impl Gobs {
             // Descending: pops hand out the LOWEST free slot of my range
             // first, keeping ids dense from the range base.
             free: (lo..hi).rev().collect(),
-            node_base: lo,
             vis: crate::visidx::VisIndex::default(),
         }
     }
@@ -440,9 +441,7 @@ impl Gobs {
         kind: Kind,
         pos: (i32, i32),
         res_idx: u16,
-        hp: i32,
-        max_hp: i32,
-        speed: i32,
+        v: Vitals,
     ) {
         let (slot, gen) = split_gob_id(id);
         self.ensure_capacity(slot);
@@ -452,9 +451,9 @@ impl Gobs {
         self.res_idx[slot] = res_idx;
         self.alive[slot] = true;
         self.kind[slot] = kind;
-        self.hp[slot] = hp;
-        self.max_hp[slot] = max_hp;
-        self.speed[slot] = speed;
+        self.hp[slot] = v.hp;
+        self.max_hp[slot] = v.max_hp;
+        self.speed[slot] = v.speed;
         self.mv[slot] = None;
         self.facing[slot] = 1;
         self.pose_streamed[slot] = u8::MAX;
@@ -756,8 +755,14 @@ pub struct GuestGob {
     pub hp: i32,
     pub max_hp: i32,
     pub cell: (i32, i32),
-    /// Last tick the guest was announced/updated by its owner (GC input:
-    /// a stale guest with no viewers and no subscription drops).
+    /// True when the owner pushed this guest because it stands in a cell
+    /// I own (territory rule); such guests never GC on my side - the owner
+    /// retracts them when the player goes home. Subscription guests (the
+    /// default) GC when unviewed and unsubscribed.
+    pub territory: bool,
+    /// Last tick the owner refreshed this guest (diagnostics; also a GC
+    /// backstop input for future policies).
+    #[allow(dead_code)]
     pub last_seen_tick: u64,
 }
 
@@ -780,6 +785,10 @@ pub struct Perf {
     pub vis_gob_scans: u64,
     pub vis_skipped: u64,
     pub vis_cells: usize,
+    /// Node-link publishes sent (cumulative) and guest rows ingested
+    /// (cumulative) - cluster-mode counters for the perf report.
+    pub guest_pub: u64,
+    pub guest_ingests: u64,
 }
 
 impl World {
@@ -1012,7 +1021,10 @@ mod cluster_tests {
                     } else {
                         lo + (MAX_SLOT + 1) / nodes
                     };
-                    assert!((lo..hi).contains(&slot), "slot {slot} outside node {me} range");
+                    assert!(
+                        (lo..hi).contains(&slot),
+                        "slot {slot} outside node {me} range"
+                    );
                 }
             }
         }
@@ -1025,18 +1037,30 @@ mod cluster_tests {
     #[test]
     fn spawn_with_id_reuses_exact_id_and_claims_the_slot() {
         let mut src = Gobs::with_layout(nz(2), 0);
-        let id = src.spawn(Kind::Animal { species: Species::Wolf }, (100, 100), 3, 40, 33);
+        let id = src.spawn(
+            Kind::Animal {
+                species: Species::Wolf,
+            },
+            (100, 100),
+            3,
+            40,
+            33,
+        );
         let (slot, gen) = split_gob_id(id);
 
         let mut dst = Gobs::with_layout(nz(2), 1);
         dst.spawn_with_id(
             id,
-            Kind::Animal { species: Species::Wolf },
+            Kind::Animal {
+                species: Species::Wolf,
+            },
             (150, 120),
             3,
-            25,
-            40,
-            33,
+            Vitals {
+                hp: 25,
+                max_hp: 40,
+                speed: 33,
+            },
         );
         assert_eq!(split_gob_id(dst.get(id).map(|_| id).unwrap()), (slot, gen));
         let s = dst.get(id).expect("transferred gob alive on the new node");
@@ -1052,11 +1076,27 @@ mod cluster_tests {
         let (tslot, tgen) = split_gob_id(taken);
         fresh.kill(taken);
         let other = fresh.spawn(Kind::Tree { harvests: 0 }, (1, 1), 0, 1, 0);
-        assert_ne!(split_gob_id(other).0, tslot, "killed slot must be reused via free list");
+        assert_ne!(
+            split_gob_id(other).0,
+            tslot,
+            "killed slot must be reused via free list"
+        );
         let _ = (tslot, tgen);
 
         // Re-insert with the same id (idempotent authority claim).
-        dst.spawn_with_id(id, Kind::Animal { species: Species::Wolf }, (150, 120), 3, 25, 40, 33);
+        dst.spawn_with_id(
+            id,
+            Kind::Animal {
+                species: Species::Wolf,
+            },
+            (150, 120),
+            3,
+            Vitals {
+                hp: 25,
+                max_hp: 40,
+                speed: 33,
+            },
+        );
         assert!(dst.alive[dst.get(id).expect("still alive")]);
     }
 
@@ -1066,10 +1106,30 @@ mod cluster_tests {
     #[test]
     fn transferred_gob_survives_kill_and_reinsert() {
         let mut a = Gobs::with_layout(nz(3), 2);
-        let id = a.spawn(Kind::Animal { species: Species::Deer }, (0, 0), 1, 10, 33);
+        let id = a.spawn(
+            Kind::Animal {
+                species: Species::Deer,
+            },
+            (0, 0),
+            1,
+            10,
+            33,
+        );
         a.kill(id);
         let mut b = Gobs::with_layout(nz(3), 0);
-        b.spawn_with_id(id, Kind::Animal { species: Species::Deer }, (5, 5), 1, 10, 10, 33);
+        b.spawn_with_id(
+            id,
+            Kind::Animal {
+                species: Species::Deer,
+            },
+            (5, 5),
+            1,
+            Vitals {
+                hp: 10,
+                max_hp: 10,
+                speed: 33,
+            },
+        );
         assert!(b.get(id).is_some(), "id must resolve after transfer");
         assert!(b.kill(id), "kill resolves the transferred id");
         assert!(b.get(id).is_none());

@@ -221,6 +221,8 @@ pub enum Cmd {
     ReportPerf {},
     /// Graceful stop: flush persistence and exit the loop.
     Shutdown {},
+    /// Inbound node-link message (cluster mode only).
+    NodeMsg(crate::nodes::NodeMsg),
 }
 
 pub struct Game {
@@ -245,6 +247,36 @@ pub struct Game {
     /// Milliseconds of online time per granted LP (skills.rs accrual;
     /// precomputed once from HNH_LP_RATE, u64::MAX = disabled).
     lp_ms_per_lp: u64,
+    /// Multi-node cluster state. `None` in the default single-node process:
+    /// every cell is owned by node 0, authority checks short-circuit and no
+    /// mesh socket exists (zero added tick cost vs the single-node build).
+    pub cluster: Option<Cluster>,
+}
+
+/// Live multi-node state (session 27): peer subscriptions, guest
+/// publishing bookkeeping and the mesh handle. See `nodes.rs` for the wire
+/// and `grid_owner.rs` for the ownership function.
+pub struct Cluster {
+    pub me: usize,
+    pub nodes: std::num::NonZeroUsize,
+    pub mesh: crate::nodes::Mesh,
+    /// Per-peer subscribed cells: what THAT peer's sessions view inside MY
+    /// cells (I stream guest updates for these).
+    pub peer_subs: HashMap<usize, HashSet<(i32, i32)>>,
+    /// My current subscriptions per peer: cells I view that the peer owns
+    /// (mirrored locally to diff out Sub/Unsub deltas).
+    pub my_subs: HashMap<usize, HashSet<(i32, i32)>>,
+    /// Foreign owner node currently holding each of my abroad players
+    /// (home node keeps authority and streams updates to that owner).
+    pub player_abroad: HashMap<GobId, usize>,
+}
+
+/// Publish event kind for a local gob's guest stream.
+#[derive(Clone, Copy)]
+enum GuestEv {
+    Announce,
+    Update,
+    Retract,
 }
 
 impl Game {
@@ -485,7 +517,41 @@ impl Game {
                     .unwrap_or(1.0);
                 crate::skills::ms_per_lp(rate)
             },
+            cluster: None,
         }
+    }
+
+    /// Cluster-mode constructor: the world gob-slot layout, the mesh and
+    /// the per-peer subscription tables all derive from the shared
+    /// membership. The mesh task itself is spawned by main (async), which
+    /// forwards inbound frames as `Cmd::NodeMsg`.
+    pub fn new_clustered(
+        seed: u64,
+        rx: tokio::sync::mpsc::UnboundedReceiver<Cmd>,
+        net_rx: tokio::sync::mpsc::UnboundedReceiver<crate::net::NetCmd>,
+        saturated: bool,
+        save_path: std::path::PathBuf,
+        cfg: &crate::nodes::ClusterConfig,
+        mesh: crate::nodes::Mesh,
+    ) -> Self {
+        let mut g = Self::new(seed, rx, net_rx, saturated, save_path);
+        let nodes = std::num::NonZeroUsize::new(cfg.node_count()).expect("cluster >= 2 nodes");
+        g.world = World::with_layout(seed, nodes, cfg.me);
+        g.cluster = Some(Cluster {
+            me: cfg.me,
+            nodes,
+            mesh,
+            peer_subs: HashMap::new(),
+            my_subs: HashMap::new(),
+            player_abroad: HashMap::new(),
+        });
+        info!(
+            me = cfg.me,
+            nodes = cfg.node_count(),
+            listen = %cfg.listen(),
+            "cluster node starting"
+        );
+        g
     }
 
     pub fn alloc_sid(&mut self) -> SessionId {
@@ -721,6 +787,7 @@ impl Game {
             // Handled in the run loop; reaching handle_cmd means no loop is
             // running (e.g. during tests), so this is a no-op.
             Cmd::Shutdown {} => {}
+            Cmd::NodeMsg(msg) => self.on_node_msg(msg),
         }
     }
 
@@ -1550,9 +1617,15 @@ impl Game {
     /// Stream a spawn (full state) for one gob to one session, announcing
     /// its resource id first if the session has not seen it.
     fn stream_spawn(&mut self, sid: SessionId, id: GobId) {
-        let Some(slot) = self.world.gobs.get(id) else {
+        // Cluster guests take their own spawn path (state lives in the
+        // guest table, not the SoA columns).
+        if self.world.gobs.get(id).is_none() {
+            if self.world.guests.contains_key(&id) {
+                self.stream_guest_spawn(sid, id);
+            }
             return;
-        };
+        }
+        let slot = self.world.gobs.get(id).expect("checked above");
         let res_idx = self.world.gobs.res_idx[slot];
         // Gob render facts read before the session borrow (players carry
         // equipped piece names into the spawn block below).
@@ -1745,15 +1818,21 @@ impl Game {
                     out.visible
                         .iter()
                         .filter(|&&id| {
-                            self.world
+                            // Position: local gob columns first, cluster
+                            // guests second; neither = dead, must retract.
+                            let gpos = self
+                                .world
                                 .gobs
                                 .get(id)
-                                .map(|slot| {
-                                    let (gx, gy) = self.world.gobs.pos[slot];
+                                .map(|slot| self.world.gobs.pos[slot])
+                                .or_else(|| self.world.guests.get(&id).map(|g| g.pos));
+                            match gpos {
+                                Some((gx, gy)) => {
                                     (gx - px).abs() > VIEW_RADIUS * 2
                                         || (gy - py).abs() > VIEW_RADIUS * 2
-                                })
-                                .unwrap_or(true) // dead gobs get retracted too
+                                }
+                                None => true, // dead gobs get retracted too
+                            }
                         })
                         .copied()
                         .collect()
@@ -1770,6 +1849,9 @@ impl Game {
     /// In-range gob scan around a point: query the dirty-cell index for
     /// the view cells, then apply the exact distance filter (cells are
     /// coarse buckets; the filter preserves the old O(all gobs) result).
+    /// Cluster guests merge in (foreign-authority gobs rendered locally);
+    /// the guest table only holds gobs some local session subscribed to,
+    /// so the scan cost stays bounded by what this node actually views.
     fn scan_visible(&self, px: i32, py: i32) -> Vec<GobId> {
         let candidates = self.world.gobs.vis.gobs_in_view(px, py, VIEW_RADIUS);
         let mut out = Vec::new();
@@ -1779,6 +1861,12 @@ impl Game {
             };
             let (gx, gy) = self.world.gobs.pos[slot];
             if (gx - px).abs() > VIEW_RADIUS || (gy - py).abs() > VIEW_RADIUS {
+                continue;
+            }
+            out.push(id);
+        }
+        for (&id, g) in &self.world.guests {
+            if (g.pos.0 - px).abs() > VIEW_RADIUS || (g.pos.1 - py).abs() > VIEW_RADIUS {
                 continue;
             }
             out.push(id);
@@ -1801,6 +1889,948 @@ impl Game {
     }
 
     // ------------------------------------------------------------------
+    // Multi-node cluster (grid-owner process split, session 27).
+    //
+    // Authority rule: animals and world gobs are simulated by the owner of
+    // the VisIndex cell they stand in (grid_owner::owner_of); players are
+    // ALWAYS simulated by their home node (the node their UDP session
+    // landed on). Foreign-authority gobs render locally as guests through
+    // the same visibility machinery — see nodes.rs for the wire contract.
+    // ------------------------------------------------------------------
+
+    fn is_cluster(&self) -> bool {
+        self.cluster.is_some()
+    }
+
+    /// Owning node of one VisIndex cell (0 in single-node mode).
+    fn cell_owner(&self, cell: (i32, i32)) -> usize {
+        match &self.cluster {
+            Some(c) => crate::grid_owner::owner_of(cell, c.nodes),
+            None => 0,
+        }
+    }
+
+    /// Simulation authority for the gob at `slot`. Players in MY gob table
+    /// are my sessions' players — homed here by definition. Everything else
+    /// follows its cell's owner.
+    fn is_authority_slot(&self, slot: usize) -> bool {
+        match &self.cluster {
+            None => true,
+            Some(c) => {
+                if matches!(self.world.gobs.kind[slot], Kind::Player { .. }) {
+                    return true;
+                }
+                let cell = crate::visidx::cell_of(
+                    self.world.gobs.pos[slot].0,
+                    self.world.gobs.pos[slot].1,
+                );
+                crate::grid_owner::owner_of(cell, c.nodes) == c.me
+            }
+        }
+    }
+
+    /// Node-link message dispatch (cluster mode only).
+    fn on_node_msg(&mut self, msg: crate::nodes::NodeMsg) {
+        use crate::nodes::NodeMsg;
+        match msg {
+            NodeMsg::Ping => {}
+            NodeMsg::Hello { .. } => {} // handshake handled by the mesh
+            NodeMsg::Sub { from, cells } => {
+                let Some(c) = self.cluster.as_mut() else {
+                    return;
+                };
+                let owned: Vec<(i32, i32)> = cells
+                    .into_iter()
+                    .filter(|&cell| crate::grid_owner::owner_of(cell, c.nodes) == c.me)
+                    .collect();
+                tracing::debug!(from, cells = owned.len(), "peer subscribed");
+                c.peer_subs.insert(from, owned.into_iter().collect());
+            }
+            NodeMsg::Unsub { from, cells } => {
+                let Some(c) = self.cluster.as_mut() else {
+                    return;
+                };
+                if let Some(subs) = c.peer_subs.get_mut(&from) {
+                    for cell in cells {
+                        subs.remove(&cell);
+                    }
+                    if subs.is_empty() {
+                        c.peer_subs.remove(&from);
+                    }
+                }
+            }
+            NodeMsg::Chat { from, at, text } => self.deliver_remote_chat(&from, at, &text),
+            NodeMsg::GuestAnnounce(st) => self.ingest_guest(st),
+            NodeMsg::GuestUpdate(st) => self.ingest_guest(st),
+            NodeMsg::GuestRetract { id } => self.remove_guest(id),
+            NodeMsg::GuestTransfer(st) => self.promote_transfer(st),
+        }
+    }
+
+    /// Render state of the local gob at `slot` as a wire guest state.
+    fn guest_state_from_slot(&self, id: GobId, slot: usize) -> Option<crate::nodes::GuestState> {
+        use crate::nodes::{GuestKind, GuestLinMove, GuestState};
+        let kind = match self.world.gobs.kind[slot] {
+            Kind::Animal { species } => GuestKind::Animal {
+                species: species.index(),
+            },
+            Kind::Player { player } => GuestKind::Player {
+                name: self.world.players.get(player)?.name.clone(),
+                equip: self
+                    .player_equip_names(player)
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            },
+            _ => return None, // only movers + players publish; the rest never leave their cell
+        };
+        Some(GuestState {
+            id,
+            pos: self.world.gobs.pos[slot],
+            mv: self.world.gobs.mv[slot].map(|lm| GuestLinMove {
+                sx: lm.sx,
+                sy: lm.sy,
+                tx: lm.tx,
+                ty: lm.ty,
+                steps: lm.steps,
+                step: lm.step,
+                started_ms: lm.started_ms,
+                total_ms: lm.total_ms,
+            }),
+            moving: self.world.gobs.mv[slot].is_some(),
+            facing: self.world.gobs.facing[slot],
+            kind,
+            hp: self.world.gobs.hp[slot],
+            max_hp: self.world.gobs.max_hp[slot],
+            speed: self.world.gobs.speed[slot],
+        })
+    }
+
+    /// Recipient peers for a local gob's guest stream: every peer
+    /// subscribed to the gob's cell, plus (for abroad players) the owner
+    /// of the cell the player stands in.
+    fn publish_targets(&self, id: GobId, slot: usize) -> Vec<usize> {
+        let Some(c) = &self.cluster else {
+            return Vec::new();
+        };
+        let cell = crate::visidx::cell_of(self.world.gobs.pos[slot].0, self.world.gobs.pos[slot].1);
+        let mut targets: Vec<usize> = c
+            .peer_subs
+            .iter()
+            .filter(|(_, cells)| cells.contains(&cell))
+            .map(|(p, _)| *p)
+            .collect();
+        if matches!(self.world.gobs.kind[slot], Kind::Player { .. }) {
+            if let Some(&owner) = c.player_abroad.get(&id) {
+                if !targets.contains(&owner) {
+                    targets.push(owner);
+                }
+            }
+        }
+        targets
+    }
+
+    /// Publish one local gob event to interested peers. Announce = full
+    /// state (new viewer/owner), Update = movement/pose delta, Retract =
+    /// death/removal.
+    fn publish(&mut self, id: GobId, ev: GuestEv) {
+        use crate::nodes::NodeMsg;
+        if !self.is_cluster() {
+            return;
+        }
+        let Some(slot) = self.world.gobs.get(id) else {
+            return;
+        };
+        let Some(st) = self.guest_state_from_slot(id, slot) else {
+            return;
+        };
+        for peer in self.publish_targets(id, slot) {
+            let msg = match ev {
+                GuestEv::Announce => NodeMsg::GuestAnnounce(st.clone()),
+                GuestEv::Update => NodeMsg::GuestUpdate(st.clone()),
+                GuestEv::Retract => NodeMsg::GuestRetract { id },
+            };
+            self.cluster
+                .as_ref()
+                .expect("checked above")
+                .mesh
+                .send(peer, msg);
+            self.world.perf.guest_pub += 1;
+        }
+    }
+
+    /// Per-tick cluster maintenance: subscription diffs, player territory
+    /// publishing, animal authority transfer on cell crossing, guest GC.
+    fn tick_cluster(&mut self) {
+        use crate::nodes::NodeMsg;
+        if !self.is_cluster() {
+            return;
+        }
+        let me = self.cluster.as_ref().expect("cluster").me;
+
+        // --- Subscription maintenance (every 10 ticks): my sessions' view
+        // cells unioned, filtered per peer to the cells that peer owns,
+        // diffed against the current subscription set.
+        if self.world.tick.is_multiple_of(10) {
+            let wanted = self.wanted_view_cells();
+            let nodes = self.cluster.as_ref().expect("cluster").nodes;
+            let n = nodes.get();
+            let mut sends: Vec<(usize, NodeMsg)> = Vec::new();
+            {
+                let c = self.cluster.as_mut().expect("cluster");
+                for peer in 0..n {
+                    if peer == c.me {
+                        continue;
+                    }
+                    let want: HashSet<(i32, i32)> = wanted
+                        .iter()
+                        .copied()
+                        .filter(|&cell| crate::grid_owner::owner_of(cell, nodes) == peer)
+                        .collect();
+                    let cur = c.my_subs.entry(peer).or_default();
+                    let added: Vec<(i32, i32)> = want.difference(cur).copied().collect();
+                    let removed: Vec<(i32, i32)> = cur.difference(&want).copied().collect();
+                    if !added.is_empty() {
+                        sends.push((
+                            peer,
+                            NodeMsg::Sub {
+                                from: me,
+                                cells: added,
+                            },
+                        ));
+                    }
+                    if !removed.is_empty() {
+                        sends.push((
+                            peer,
+                            NodeMsg::Unsub {
+                                from: me,
+                                cells: removed,
+                            },
+                        ));
+                    }
+                    *cur = want;
+                }
+            }
+            for (peer, msg) in sends {
+                self.cluster.as_ref().expect("cluster").mesh.send(peer, msg);
+            }
+        }
+
+        // --- Player territory publishing: a local player standing in a
+        // foreign cell is announced to that cell's owner (the only node
+        // whose sessions can possibly see the player); back home, the
+        // foreign owner is told to retract.
+        let player_cells: Vec<(GobId, usize)> = self
+            .world
+            .players
+            .iter()
+            .filter_map(|p| {
+                let slot = self.world.gobs.get(p.gob)?;
+                let cell = crate::visidx::cell_of(
+                    self.world.gobs.pos[slot].0,
+                    self.world.gobs.pos[slot].1,
+                );
+                Some((p.gob, self.cell_owner(cell)))
+            })
+            .collect();
+        for (pgob, owner) in player_cells {
+            let abroad = self
+                .cluster
+                .as_ref()
+                .expect("cluster")
+                .player_abroad
+                .clone();
+            let prev = abroad.get(&pgob).copied();
+            if Some(owner) == prev {
+                continue;
+            }
+            if owner == me {
+                // Back on home ground: retract from the previous owner.
+                if let Some(old) = prev {
+                    self.cluster
+                        .as_ref()
+                        .expect("cluster")
+                        .mesh
+                        .send(old, NodeMsg::GuestRetract { id: pgob });
+                    self.cluster
+                        .as_mut()
+                        .expect("cluster")
+                        .player_abroad
+                        .remove(&pgob);
+                }
+            } else {
+                // Retract from the OLD owner if the player switched foreign
+                // cells owned by different nodes, then announce to the new.
+                if let Some(old) = prev.filter(|&o| o != owner) {
+                    self.cluster
+                        .as_ref()
+                        .expect("cluster")
+                        .mesh
+                        .send(old, NodeMsg::GuestRetract { id: pgob });
+                }
+                self.cluster
+                    .as_mut()
+                    .expect("cluster")
+                    .player_abroad
+                    .insert(pgob, owner);
+                self.publish(pgob, GuestEv::Announce);
+            }
+        }
+
+        // --- Animal authority transfer: an animal standing in a foreign
+        // cell moves to its cell's owner (full state, SAME id), and the
+        // local copy demotes to a guest so local viewers never flicker.
+        let animal_ids = self.world.animal_gobs.clone();
+        for id in animal_ids {
+            let Some(slot) = self.world.gobs.get(id) else {
+                continue;
+            };
+            let cell =
+                crate::visidx::cell_of(self.world.gobs.pos[slot].0, self.world.gobs.pos[slot].1);
+            let owner = self.cell_owner(cell);
+            if owner == me {
+                continue;
+            }
+            let Some(st) = self.guest_state_from_slot(id, slot) else {
+                continue;
+            };
+            self.cluster
+                .as_ref()
+                .expect("cluster")
+                .mesh
+                .send(owner, NodeMsg::GuestTransfer(st.clone()));
+            // Demote: copy into the guest table, drop from every sim table,
+            // kill the gob row, and re-index the id as a guest. The wire
+            // frame counter carries over so emitted finalizers stay ahead
+            // of what viewers already applied.
+            let frame = self.world.gobs.frame[slot];
+            let res_idx = self.world.gobs.res_idx[slot];
+            let mv = st.mv.map(|g| LinMove {
+                sx: g.sx,
+                sy: g.sy,
+                tx: g.tx,
+                ty: g.ty,
+                steps: g.steps,
+                step: g.step,
+                started_ms: g.started_ms,
+                total_ms: g.total_ms,
+            });
+            let cell = crate::visidx::cell_of(st.pos.0, st.pos.1);
+            self.world.animal_fights.remove(&id);
+            self.world.guests.insert(
+                id,
+                crate::state::GuestGob {
+                    pos: st.pos,
+                    mv,
+                    frame,
+                    moving: st.moving,
+                    facing: st.facing,
+                    kind: st.kind,
+                    res_idx,
+                    hp: st.hp,
+                    max_hp: st.max_hp,
+                    cell,
+                    territory: false,
+                    last_seen_tick: self.world.tick,
+                },
+            );
+            self.world.gobs.kill(id);
+            self.world.gobs.vis.insert(id, st.pos);
+            self.world.animal_gobs.retain(|&a| a != id);
+            tracing::debug!(id, owner, "animal authority transferred");
+        }
+
+        // --- Guest GC (every 50 ticks): a guest nobody renders and
+        // nobody subscribes can never come back on its own (its owner
+        // only streams to subscribed cells) — retract and drop it.
+        if self.world.tick.is_multiple_of(50) {
+            let subscribed: HashSet<(i32, i32)> = self
+                .cluster
+                .as_ref()
+                .expect("cluster")
+                .my_subs
+                .values()
+                .flatten()
+                .copied()
+                .collect();
+            let any_visible =
+                |g: &Self, id: GobId| g.sessions.values().any(|o| o.visible.contains(&id));
+            let stale: Vec<GobId> = self
+                .world
+                .guests
+                .iter()
+                .filter(|(id, g)| {
+                    !g.territory && !subscribed.contains(&g.cell) && !any_visible(self, **id)
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            for id in stale {
+                self.remove_guest(id);
+            }
+        }
+    }
+
+    /// Union of the view cells of all local sessions (subscription basis).
+    fn wanted_view_cells(&self) -> HashSet<(i32, i32)> {
+        let mut out = HashSet::new();
+        for out_session in self.sessions.values() {
+            let Some(pg) = out_session
+                .player_gob
+                .and_then(|id| self.world.gobs.get(id))
+            else {
+                continue;
+            };
+            let (px, py) = self.world.gobs.pos[pg];
+            let span = VIEW_RADIUS;
+            let (cx0, cx1) = (
+                (px - span).div_euclid(crate::visidx::CELL),
+                (px + span).div_euclid(crate::visidx::CELL),
+            );
+            let (cy0, cy1) = (
+                (py - span).div_euclid(crate::visidx::CELL),
+                (py + span).div_euclid(crate::visidx::CELL),
+            );
+            for cy in cy0..=cy1 {
+                for cx in cx0..=cx1 {
+                    out.insert((cx, cy));
+                }
+            }
+        }
+        out
+    }
+
+    /// Ingest a foreign-authority gob (announce or update): store/replace
+    /// the guest row, keep the dirty-cell index honest so the vis scan
+    /// spawns/retracts it for local sessions, and emit wire finalizers to
+    /// sessions already rendering it when the movement state changes.
+    fn ingest_guest(&mut self, st: crate::nodes::GuestState) {
+        use crate::nodes::GuestKind;
+        let cell = crate::visidx::cell_of(st.pos.0, st.pos.1);
+        let (moving, facing, pos, mv) = (st.moving, st.facing, st.pos, st.mv);
+        let kind = st.kind.clone();
+        let id = st.id;
+        let existed = self.world.guests.contains_key(&id);
+        // Resolve render resource + inventory of layers locally.
+        let res_idx = match &kind {
+            GuestKind::Animal { species } => {
+                let sp = match crate::state::Species::from_index(*species) {
+                    Some(sp) => sp,
+                    None => {
+                        tracing::warn!(id, species, "guest animal species out of range");
+                        return;
+                    }
+                };
+                self.world.res.intern(sp.resname())
+            }
+            GuestKind::Player { .. } => self.world.res.intern("gfx/borka/body"),
+            GuestKind::Static { res_name } => self.world.res.intern(leak_static(res_name.as_str())),
+        };
+        let mv_lin = mv.map(|g| LinMove {
+            sx: g.sx,
+            sy: g.sy,
+            tx: g.tx,
+            ty: g.ty,
+            steps: g.steps,
+            step: g.step,
+            started_ms: g.started_ms,
+            total_ms: g.total_ms,
+        });
+        // Determine which local sessions already render this gob and what
+        // changed, BEFORE mutating (wire finalizers mirror local movement:
+        // LINBEG on new move, OD_MOVE on finish, OD_LAYERS on pose flip).
+        let viewers: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, o)| o.visible.contains(&id))
+            .map(|(s, _)| *s)
+            .collect();
+        let (pose_flipped, move_changed) = match self.world.guests.get(&id) {
+            Some(old) => (
+                old.moving != moving || old.facing != facing,
+                old.mv.is_some() != mv_lin.is_some(),
+            ),
+            None => (false, false),
+        };
+        self.world.guests.insert(
+            id,
+            crate::state::GuestGob {
+                pos,
+                mv: mv_lin,
+                frame: self.world.guests.get(&id).map(|g| g.frame).unwrap_or(0),
+                moving,
+                facing,
+                kind,
+                res_idx,
+                hp: st.hp,
+                max_hp: st.max_hp,
+                cell,
+                territory: false,
+                last_seen_tick: self.world.tick,
+            },
+        );
+        if !existed {
+            // New guest: dirty-cell insert so the vis scan spawns it.
+            self.world.gobs.vis.insert(id, pos);
+            self.world.perf.guest_ingests += 1;
+            tracing::debug!(id, ?moving, "guest ingested");
+            return;
+        }
+        // Existing guest: reposition the index (both cells dirty) and
+        // stream the same finalizers the owner's viewers got.
+        self.world.gobs.vis.reposition(id, pos);
+        if pose_flipped || move_changed {
+            self.world.guests.get_mut(&id).expect("just inserted").frame += 1;
+            let frame = self.world.guests.get(&id).expect("just inserted").frame;
+            let mut m = MessageBuf::new();
+            m.uint8(MSG_OBJDATA).uint8(0).int32(id).int32(frame as i32);
+            match &mv_lin {
+                Some(lm) => {
+                    m.uint8(OD_LINBEG)
+                        .coord(lm.sx, lm.sy)
+                        .coord(lm.tx, lm.ty)
+                        .int32(lm.steps);
+                }
+                None => {
+                    m.uint8(OD_MOVE).coord(pos.0, pos.1);
+                }
+            }
+            m.uint8(OD_LINSTEP)
+                .int32(mv_lin.map(|g| g.steps).unwrap_or(0));
+            m.uint8(OD_END);
+            let block = m.finish();
+            for sid in &viewers {
+                if let Some(out) = self.sessions.get_mut(sid) {
+                    out.send_raw(block.clone());
+                    Self::record_unacked(out, id, frame, block.clone());
+                }
+            }
+            // Pose flip streams the new layer set (same server-side pose
+            // resolution as local movers).
+            if pose_flipped {
+                for sid in viewers {
+                    self.stream_guest_pose(sid, id);
+                }
+            }
+        }
+    }
+
+    /// Remove a guest entirely (owner retract or GC): drop the row, clean
+    /// the vis index, and retract it from every session rendering it.
+    fn remove_guest(&mut self, id: GobId) {
+        if self.world.guests.remove(&id).is_none() {
+            return;
+        }
+        self.world.gobs.vis.remove(id);
+        let sids: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, o)| o.visible.contains(&id))
+            .map(|(s, _)| *s)
+            .collect();
+        for sid in sids {
+            self.stream_retract(sid, id);
+        }
+    }
+
+    /// Authority handoff inbound: materialize the transferred gob under
+    /// its EXACT id and take over simulation.
+    fn promote_transfer(&mut self, st: crate::nodes::GuestState) {
+        use crate::nodes::GuestKind;
+        let crate::nodes::GuestState {
+            id,
+            pos,
+            mv,
+            moving,
+            facing,
+            kind,
+            hp,
+            max_hp,
+            speed,
+        } = st;
+        // Only animals transfer (players stay homed; stationary gobs never
+        // leave their spawn cell). Anything else arriving here is a peer
+        // bug — reject rather than corrupt local tables.
+        let species = match kind {
+            GuestKind::Animal { species } => match crate::state::Species::from_index(species) {
+                Some(sp) => sp,
+                None => {
+                    tracing::warn!(id, species, "transfer species out of range");
+                    return;
+                }
+            },
+            other => {
+                tracing::warn!(?other, id, "transfer of a non-animal guest rejected");
+                return;
+            }
+        };
+        let res_idx = self.world.res.intern(species.resname());
+        let was_guest = self.world.guests.remove(&id).is_some();
+        self.world.gobs.spawn_with_id(
+            id,
+            Kind::Animal { species },
+            pos,
+            res_idx,
+            Vitals { hp, max_hp, speed },
+        );
+        if let Some(slot) = self.world.gobs.get(id) {
+            self.world.gobs.facing[slot] = facing;
+            self.world.gobs.pose_streamed[slot] = if moving { 8 + facing } else { facing };
+            if let Some(g) = mv {
+                self.world.gobs.mv[slot] = Some(LinMove {
+                    sx: g.sx,
+                    sy: g.sy,
+                    tx: g.tx,
+                    ty: g.ty,
+                    steps: g.steps,
+                    step: g.step,
+                    started_ms: g.started_ms,
+                    total_ms: g.total_ms,
+                });
+            }
+        }
+        if !self.world.animal_gobs.contains(&id) {
+            self.world.animal_gobs.push(id);
+        }
+        let _ = was_guest;
+        tracing::debug!(id, "animal authority claimed");
+        // My subscribers may already render this gob (border viewers):
+        // announce so their sessions re-acquire it if it left their view
+        // while it was a guest elsewhere.
+        self.publish(id, GuestEv::Announce);
+    }
+
+    /// Area chat from a remote node: same radius filter, but against the
+    /// SENDER's position carried on the message.
+    fn deliver_remote_chat(&mut self, from: &str, at: (i32, i32), text: &str) {
+        let line = format!("{from}: {text}");
+        let recipients: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, out)| {
+                if out.chat_wid == 0 {
+                    return false;
+                }
+                let Some(gob) = out.player_gob else {
+                    return false;
+                };
+                let Some(slot) = self.world.gobs.get(gob) else {
+                    return false;
+                };
+                crate::chat::within_radius(
+                    self.world.gobs.pos[slot],
+                    at,
+                    crate::chat::AREA_CHAT_RADIUS,
+                )
+            })
+            .map(|(s, _)| *s)
+            .collect();
+        for r in recipients {
+            self.chat_line(r, &line, None);
+        }
+    }
+
+    /// Guest movement progress: identical timing model to local movers
+    /// (the owner authored the linmove params; progress math is pure), so
+    /// no per-tick streaming from the owner is needed — each subscriber
+    /// derives LINSTEP locally for its viewing sessions.
+    fn tick_guests(&mut self) {
+        if self.world.guests.is_empty() {
+            return;
+        }
+        let now = self.world.now_ms;
+        let ids: Vec<GobId> = self.world.guests.keys().copied().collect();
+        for id in ids {
+            let (mv, finished, pos, frame) = {
+                let Some(g) = self.world.guests.get_mut(&id) else {
+                    continue;
+                };
+                let Some(lm) = g.mv else {
+                    continue;
+                };
+                g.frame += 1;
+                let frame = g.frame;
+                let elapsed = now.saturating_sub(lm.started_ms);
+                if elapsed >= u64::from(lm.total_ms) {
+                    (None, true, (lm.tx, lm.ty), frame)
+                } else {
+                    let (cx, cy) = lm.pos_at(now);
+                    let l = lm.step_at(now);
+                    let linstep = l > lm.step;
+                    g.mv = Some(LinMove { step: l, ..lm });
+                    (
+                        if linstep { Some((l, lm.steps)) } else { None },
+                        false,
+                        (cx, cy),
+                        frame,
+                    )
+                }
+            };
+            // Apply: position + dirty-cell index.
+            {
+                let g = self.world.guests.get_mut(&id).expect("checked above");
+                g.pos = pos;
+            }
+            self.world.gobs.vis.reposition(id, pos);
+            let mut viewers: Vec<SessionId> = self
+                .sessions
+                .iter()
+                .filter(|(_, o)| o.visible.contains(&id))
+                .map(|(s, _)| *s)
+                .collect();
+            if viewers.is_empty() {
+                continue;
+            }
+            if finished {
+                let g = self.world.guests.get_mut(&id).expect("checked above");
+                g.moving = false;
+                let facing = g.facing;
+                let mut m = MessageBuf::new();
+                m.uint8(MSG_OBJDATA)
+                    .uint8(0)
+                    .int32(id)
+                    .int32(frame as i32)
+                    .uint8(OD_MOVE)
+                    .coord(pos.0, pos.1)
+                    .uint8(OD_LINSTEP)
+                    .int32(0)
+                    .uint8(OD_END);
+                let block = m.finish();
+                for sid in viewers.drain(..) {
+                    if let Some(out) = self.sessions.get_mut(&sid) {
+                        out.send_raw(block.clone());
+                        Self::record_unacked(out, id, frame, block.clone());
+                    }
+                    // Rest pose: standing layers of the current facing.
+                    self.stream_guest_pose(sid, id);
+                    let _ = facing;
+                }
+            } else if let Some((l, _steps)) = mv {
+                let mut m = MessageBuf::new();
+                m.uint8(MSG_OBJDATA)
+                    .uint8(0)
+                    .int32(id)
+                    .int32(frame as i32)
+                    .uint8(OD_LINSTEP)
+                    .int32(l)
+                    .uint8(OD_END);
+                let block = m.finish();
+                for sid in viewers.drain(..) {
+                    if let Some(out) = self.sessions.get_mut(&sid) {
+                        out.send_raw(block.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Spawn block for a guest (mirrors `encode_gob_block`'s player/animal
+    /// branches reading the GuestGob row instead of the SoA columns).
+    fn encode_guest_block(&mut self, sid: SessionId, id: GobId) -> Option<Vec<u8>> {
+        use crate::nodes::GuestKind;
+        let g = self.world.guests.get(&id)?.clone();
+        let out = self.sessions.get_mut(&sid)?;
+        if !out.visible.insert(id) {
+            return None;
+        }
+        let mut m = MessageBuf::new();
+        m.uint8(MSG_OBJDATA)
+            .uint8(0)
+            .int32(id)
+            .int32(g.frame as i32);
+        if let GuestKind::Static { res_name } = &g.kind {
+            let name = leak_static(self.world.res.name(g.res_idx).unwrap_or(res_name.as_str()));
+            let w = out.res.wire_named(g.res_idx, name);
+            m.uint8(OD_RES).uint16(w);
+        }
+        match &g.mv {
+            Some(lm) => {
+                m.uint8(OD_LINBEG)
+                    .coord(lm.sx, lm.sy)
+                    .coord(lm.tx, lm.ty)
+                    .int32(lm.steps);
+                m.uint8(OD_LINSTEP).int32(lm.step);
+            }
+            None => {
+                m.uint8(OD_MOVE).coord(g.pos.0, g.pos.1);
+            }
+        }
+        m.uint8(OD_LAYERS);
+        match &g.kind {
+            GuestKind::Player { name, equip } => {
+                let base = "gfx/borka/body";
+                let bi = self.world.res.intern(base);
+                m.uint16(out.res.wire_named(bi, base));
+                let equip_static: Vec<&'static str> =
+                    equip.iter().map(|s| leak_static(s)).collect();
+                for part in avatar_pose_layers(g.moving, g.facing) {
+                    let gi = self.world.res.intern(part);
+                    m.uint16(out.res.wire_named(gi, part));
+                }
+                for part in crate::equip::world_layers(&equip_static, g.moving, g.facing) {
+                    let gi = self.world.res.intern(part);
+                    m.uint16(out.res.wire_named(gi, part));
+                }
+                m.uint16(65535);
+                // Non-own viewer: standing doll set (the own viewer's gob
+                // is always local-homed, never a guest).
+                let doll: Vec<&'static str> = avatar_pose_layers(false, g.facing)
+                    .iter()
+                    .copied()
+                    .chain(
+                        crate::equip::world_layers(&equip_static, false, g.facing)
+                            .iter()
+                            .copied(),
+                    )
+                    .collect();
+                m.uint8(OD_AVATAR);
+                for part in doll {
+                    let gi = self.world.res.intern(part);
+                    m.uint16(out.res.wire_named(gi, part));
+                }
+                m.uint16(65535);
+                m.uint8(OD_BUDDY).string(name).uint8(0).uint8(0);
+            }
+            GuestKind::Animal { species } => {
+                let sp = crate::state::Species::from_index(*species)?;
+                let base = kritter_base(sp);
+                let bi = self.world.res.intern(base);
+                m.uint16(out.res.wire_named(bi, base));
+                let part = kritter_pose_layer(sp, g.moving, g.facing);
+                let gi = self.world.res.intern(part);
+                m.uint16(out.res.wire_named(gi, part));
+                m.uint16(65535);
+            }
+            GuestKind::Static { .. } => {
+                // OD_RES already carries the sprite; close the (empty)
+                // layer list for wire regularity.
+                m.uint16(65535);
+            }
+        }
+        let quarters = ((g.hp * 4) / g.max_hp.max(1)).clamp(0, 4) as u8;
+        m.uint8(OD_HEALTH).uint8(quarters);
+        m.uint8(OD_END);
+        Some(m.finish())
+    }
+
+    /// Stream a guest spawn to one session: RESID announcements first
+    /// (mirror stream_spawn's announce logic), then the encoded block.
+    fn stream_guest_spawn(&mut self, sid: SessionId, id: GobId) {
+        use crate::nodes::GuestKind;
+        let Some(g) = self.world.guests.get(&id).cloned() else {
+            return;
+        };
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        // Announce the render resource(s) this session has not seen yet.
+        let mut layers: Vec<&'static str> = Vec::new();
+        match &g.kind {
+            GuestKind::Animal { species } => {
+                if let Some(sp) = crate::state::Species::from_index(*species) {
+                    layers.push(kritter_base(sp));
+                    layers.push(kritter_pose_layer(sp, g.moving, g.facing));
+                }
+            }
+            GuestKind::Player { equip, .. } => {
+                let equip_static: Vec<&'static str> =
+                    equip.iter().map(|s| leak_static(s)).collect();
+                layers.push("gfx/borka/body");
+                layers.extend(avatar_pose_layers(g.moving, g.facing).iter().copied());
+                layers.extend(crate::equip::world_layers(
+                    &equip_static,
+                    g.moving,
+                    g.facing,
+                ));
+                layers.extend(avatar_doll_layers().iter().copied());
+                layers.extend(crate::equip::doll_layers(&equip_static));
+            }
+            GuestKind::Static { .. } => {}
+        }
+        let static_res = matches!(g.kind, GuestKind::Static { .. });
+        for layer_name in layers {
+            let gi = self.world.res.intern(layer_name);
+            let w = out.res.wire_named(gi, layer_name);
+            if let Some((name, ver)) = out.res.pending_announce(w) {
+                let msg = wdg::resid(w, name, ver);
+                out.send(msg);
+                out.res.mark_announced(w);
+            }
+        }
+        if static_res {
+            let name = self
+                .world
+                .res
+                .name(g.res_idx)
+                .unwrap_or("gfx/terobjs/items/branch");
+            let w = out.res.wire_named(g.res_idx, name);
+            if let Some((rname, ver)) = out.res.pending_announce(w) {
+                let msg = wdg::resid(w, rname, ver);
+                out.send(msg);
+                out.res.mark_announced(w);
+            }
+        }
+        if let Some(block) = self.encode_guest_block(sid, id) {
+            let frame = self.world.guests.get(&id).map(|g| g.frame).unwrap_or(0);
+            if let Some(out) = self.sessions.get_mut(&sid) {
+                out.send_raw(block.clone());
+                Self::record_unacked(out, id, frame, block);
+            }
+        }
+    }
+
+    /// Re-stream one guest's pose layers to one session (pose flip).
+    fn stream_guest_pose(&mut self, sid: SessionId, id: GobId) {
+        use crate::nodes::GuestKind;
+        let Some(g) = self.world.guests.get(&id).cloned() else {
+            return;
+        };
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        let mut m = MessageBuf::new();
+        m.uint8(MSG_OBJDATA)
+            .uint8(0)
+            .int32(id)
+            .int32(g.frame as i32)
+            .uint8(OD_LAYERS);
+        match &g.kind {
+            GuestKind::Player { equip, .. } => {
+                let base = "gfx/borka/body";
+                let bi = self.world.res.intern(base);
+                m.uint16(out.res.wire_named(bi, base));
+                let equip_static: Vec<&'static str> =
+                    equip.iter().map(|s| leak_static(s)).collect();
+                for part in avatar_pose_layers(g.moving, g.facing) {
+                    let gi = self.world.res.intern(part);
+                    m.uint16(out.res.wire_named(gi, part));
+                }
+                for part in crate::equip::world_layers(&equip_static, g.moving, g.facing) {
+                    let gi = self.world.res.intern(part);
+                    m.uint16(out.res.wire_named(gi, part));
+                }
+                m.uint16(65535);
+            }
+            GuestKind::Animal { species } => {
+                let Some(sp) = crate::state::Species::from_index(*species) else {
+                    return;
+                };
+                let base = kritter_base(sp);
+                let bi = self.world.res.intern(base);
+                m.uint16(out.res.wire_named(bi, base));
+                let part = kritter_pose_layer(sp, g.moving, g.facing);
+                let gi = self.world.res.intern(part);
+                m.uint16(out.res.wire_named(gi, part));
+                m.uint16(65535);
+            }
+            GuestKind::Static { .. } => {
+                m.uint16(65535);
+            }
+        }
+        m.uint8(OD_END);
+        let block = m.finish();
+        out.send_raw(block);
+    }
+
     // Player commands
     // ------------------------------------------------------------------
 
@@ -2018,6 +3048,19 @@ impl Game {
             .collect();
         for r in recipients {
             self.chat_line(r, &line, None);
+        }
+        // Cluster: relay the line to every peer (each node re-filters by
+        // the sender's position for its own sessions).
+        if self.is_cluster() {
+            let c = self.cluster.as_ref().expect("cluster");
+            c.mesh.broadcast(
+                c.nodes.get(),
+                crate::nodes::NodeMsg::Chat {
+                    from: sender_name,
+                    at: sender_pos,
+                    text: text.to_string(),
+                },
+            );
         }
     }
 
@@ -2468,6 +3511,17 @@ impl Game {
     }
 
     fn start_fight(&mut self, sid: SessionId, target: GobId, species: Species) {
+        // Cluster: the target's authority lives on another node — opening
+        // a LOCAL fight against a guest would desync its HP (cross-node
+        // interaction relay is the next backlog item). Ignore for now.
+        if self.world.guests.contains_key(&target) {
+            tracing::debug!(
+                sid,
+                target,
+                "fight against a guest target ignored (no relay yet)"
+            );
+            return;
+        }
         if let Some(p) = self.world.player_mut(sid) {
             p.fight_target = Some(target);
             p.atk_cd = 0;
@@ -2645,6 +3699,9 @@ impl Game {
                 self.stream_spawn(sid, id);
             }
         }
+        // Cluster: tell subscribed peers about the new gob (they render it
+        // as a guest for their sessions).
+        self.publish(id, GuestEv::Announce);
     }
 
     fn broadcast_retract(&mut self, id: GobId) {
@@ -2652,6 +3709,8 @@ impl Game {
         for sid in sids {
             self.stream_retract(sid, id);
         }
+        // Cluster: subscribers drop their guest copy.
+        self.publish(id, GuestEv::Retract);
     }
 
     fn session_in_range(&self, sid: SessionId, id: GobId) -> bool {
@@ -4561,6 +5620,10 @@ impl Game {
         self.tick_farming();
         // Production stations: bounded by the live station set.
         self.tick_stations();
+        // Cluster maintenance (subs/abroad/transfer/GC) + guest movement
+        // interpolation: both no-op without a cluster configuration.
+        self.tick_cluster();
+        self.tick_guests();
         // The dirty set served this tick's visibility pass; spawn marks
         // after this point (farming/station drops) dirty the next pass.
         self.world.gobs.vis.clear_dirty();
@@ -4587,6 +5650,12 @@ impl Game {
         let mut finished: Vec<(usize, i32, i32)> = Vec::new();
         for slot in 0..self.world.gobs.alive.len() {
             if !self.world.gobs.alive[slot] {
+                continue;
+            }
+            // Cluster: foreign-authority gobs do not move here (their owner
+            // simulates them; locally they are guests advanced by
+            // tick_guests). Single-node: always true, branch predicts.
+            if !self.is_authority_slot(slot) {
                 continue;
             }
             let Some(lm) = self.world.gobs.mv[slot] else {
@@ -4657,6 +5726,9 @@ impl Game {
                 self.world.gobs.pose_streamed[slot] = dir;
                 self.stream_pose(slot);
             }
+            // Cluster: publish the arrival to subscribed peers (and the
+            // cell owner, for players standing abroad).
+            self.publish(id, GuestEv::Update);
         }
         self.batch_move_broadcast(linsteps, fin_blocks);
     }
@@ -5007,6 +6079,10 @@ impl Game {
             self.world.gobs.pose_streamed[slot] = walking;
             self.stream_pose(slot);
         }
+        // Cluster: the move start/retarget is a guest update for subscribed
+        // peers (and the cell owner, for players standing abroad).
+        let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
+        self.publish(id, GuestEv::Update);
         true
     }
 
@@ -5016,7 +6092,18 @@ impl Game {
     /// function maps to true cross-process grid owners later.
     fn tick_animals(&mut self) {
         let tick = self.world.tick;
-        let animal_ids: Vec<GobId> = self.world.animal_gobs.clone();
+        // Cluster: only cell-owned animals simulate here (foreign ones are
+        // guests or other nodes' authority; transferred out on crossing).
+        let animal_ids: Vec<GobId> = self
+            .world
+            .animal_gobs
+            .iter()
+            .copied()
+            .filter(|&id| match self.world.gobs.get(id) {
+                Some(slot) => self.is_authority_slot(slot),
+                None => false,
+            })
+            .collect();
         // Phase A (parallel): pure intent computation over immutable SoA
         // state. Randomness derives from (tick, slot) hashes so the pass is
         // deterministic and race-free without a shared RNG. Work groups by
@@ -7121,5 +8208,455 @@ mod tests {
             g.world.gobs.pose_streamed[slot], 0,
             "standing set of dir 0 restored after arrival"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Session 27: multi-node cluster (authority, guests, transfer, chat)
+    // ------------------------------------------------------------------
+
+    use std::num::NonZeroUsize;
+
+    /// Test harness: game + widget-msg channel + raw-block channel + mesh
+    /// publish sink (what this node would send to its peers).
+    type ClusterHarness = (
+        Game,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
+        tokio::sync::mpsc::UnboundedReceiver<(usize, crate::nodes::NodeMsg)>,
+    );
+
+    /// A game wired for node `me` of a `nodes`-node cluster WITHOUT a real
+    /// mesh: guest publishes land in a drainable channel (mesh_rx), which
+    /// lets tests assert exactly what this node would send to its peers.
+    fn clustered_game(name: &str, me: usize, nodes: usize) -> ClusterHarness {
+        let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut g = Game::new(
+            42,
+            cmd_rx,
+            net_rx,
+            false,
+            std::env::temp_dir().join(format!("hnh-cluster-test-{}.json", name)),
+        );
+        let (mesh_tx, mesh_rx) = tokio::sync::mpsc::unbounded_channel();
+        let nz = NonZeroUsize::new(nodes).expect("nodes");
+        g.world = World::with_layout(42, nz, me);
+        g.cluster = Some(Cluster {
+            me,
+            nodes: nz,
+            mesh: crate::nodes::Mesh { out_tx: mesh_tx },
+            peer_subs: HashMap::new(),
+            my_subs: HashMap::new(),
+            player_abroad: HashMap::new(),
+        });
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(4096);
+        g.session_connected(1, tx, raw_tx);
+        let wid = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "charlist")
+            .map(|(k, _)| *k)
+            .expect("charlist widget");
+        g.on_wdgmsg(
+            1,
+            wid,
+            "play",
+            vec![hnh_proto::ListArg::Str(name.to_owned())],
+        );
+        for _ in 0..3 {
+            g.tick();
+        }
+        (g, rx, raw_rx, mesh_rx)
+    }
+
+    /// First position around (px, py) whose VisIndex cell belongs to a node
+    /// other than `me` (scans outward; cells are 250 subtiles).
+    fn foreign_cell_pos(g: &Game, me: usize) -> (i32, i32) {
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let slot = g.world.gobs.get(pgob).expect("player gob");
+        let (px, py) = g.world.gobs.pos[slot];
+        for r in [260, 400, 600, 900, 1300, 1800] {
+            for (dx, dy) in [(r, 0), (0, r), (-r, 0), (0, -r), (r, r), (-r, -r)] {
+                let c = crate::visidx::cell_of(px + dx, py + dy);
+                let owner = match &g.cluster {
+                    Some(cl) => crate::grid_owner::owner_of(c, cl.nodes),
+                    None => 0,
+                };
+                if owner != me {
+                    return (px + dx, py + dy);
+                }
+            }
+        }
+        panic!("no foreign cell found near spawn");
+    }
+
+    /// First position around the player whose VisIndex cell belongs to
+    /// `me` (mirror of foreign_cell_pos for home-ground fixtures).
+    fn home_cell_pos(g: &Game, me: usize) -> (i32, i32) {
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let slot = g.world.gobs.get(pgob).expect("player gob");
+        let (px, py) = g.world.gobs.pos[slot];
+        for r in [11, 130, 260, 400, 600, 900, 1300, 1800] {
+            for (dx, dy) in [(r, r), (0, r), (r, 0), (-r, -r), (0, -r), (-r, 0)] {
+                let c = crate::visidx::cell_of(px + dx, py + dy);
+                let owner = match &g.cluster {
+                    Some(cl) => crate::grid_owner::owner_of(c, cl.nodes),
+                    None => 0,
+                };
+                if owner == me {
+                    return (px + dx, py + dy);
+                }
+            }
+        }
+        panic!("no home cell found near spawn");
+    }
+
+    /// A gob id from another node's allocation range (slot stride).
+    fn foreign_node_gob_id(me: usize, nodes: usize, seq: usize) -> GobId {
+        let per = (MAX_SLOT + 1) / nodes;
+        let slot = me * per + seq; // my own range is NOT foreign; pick another
+        let slot = if slot == me * per + seq {
+            (nodes - me - 1) * per + seq + 3
+        } else {
+            slot
+        };
+        gob_id_from_slot(slot % (MAX_SLOT + 1), 1)
+    }
+
+    /// G3: a foreign-cell animal must not simulate on this node while a
+    /// local-cell animal does, and a player standing in a foreign cell
+    /// keeps moving (players are always authored by their home node).
+    #[tokio::test]
+    async fn authority_follows_cells_but_players_stay_home() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("authuser", 0, 2);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).expect("player gob");
+
+        // Home-cell deer (mine): flees when the player is close.
+        let res = g.world.res.intern(Species::Deer.resname());
+        let (hx, hy) = home_cell_pos(&g, 0);
+        let local_deer = g.world.gobs.spawn(
+            Kind::Animal {
+                species: Species::Deer,
+            },
+            (hx, hy),
+            res,
+            10,
+            33,
+        );
+        g.world.animal_gobs.push(local_deer);
+        // Foreign-cell deer: same species, other node's cell.
+        let (fx, fy) = foreign_cell_pos(&g, 0);
+        let foreign_deer = g.world.gobs.spawn(
+            Kind::Animal {
+                species: Species::Deer,
+            },
+            (fx, fy),
+            res,
+            10,
+            33,
+        );
+        g.world.animal_gobs.push(foreign_deer);
+
+        for _ in 0..12 {
+            g.tick();
+        }
+        let lslot = g.world.gobs.get(local_deer).expect("local deer alive");
+        assert!(
+            g.world.gobs.mv[lslot].is_some(),
+            "home deer must simulate (flee from the nearby player)"
+        );
+        // The foreign deer never simulates here: the cluster pass hands it
+        // to its owner on the first tick (demoted to a local guest).
+        assert!(
+            g.world.guests.contains_key(&foreign_deer) && g.world.gobs.get(foreign_deer).is_none(),
+            "foreign deer must transfer out, not simulate locally"
+        );
+
+        // Player authority: teleport into the foreign cell and click a
+        // nearby target — the home node still simulates its own player.
+        g.world.gobs.set_pos(pslot, (fx, fy));
+        g.player_walk(1, pgob, (fx + 30, fy));
+        let pslot = g.world.gobs.get(pgob).expect("player gob");
+        assert!(
+            g.world.gobs.mv[pslot].is_some(),
+            "a player abroad must keep moving on its home node"
+        );
+    }
+
+    /// G4: a guest announce flows through the visibility machinery — the
+    /// session spawns it, receives movement finalizers on update, and the
+    /// retract drops it from the session's visible set.
+    #[tokio::test]
+    async fn guest_ingest_update_reach_sessions() {
+        let (mut g, _rx, mut raw, _mesh) = clustered_game("guestuser", 0, 2);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+
+        let gid = foreign_node_gob_id(0, 2, 7);
+        assert_ne!(gid, pgob, "guest id must never collide with local ids");
+        let st = crate::nodes::GuestState {
+            id: gid,
+            pos: (px + 60, py),
+            mv: None,
+            moving: false,
+            facing: 1,
+            kind: crate::nodes::GuestKind::Animal {
+                species: Species::Wolf.index(),
+            },
+            hp: 50,
+            max_hp: 50,
+            speed: 33,
+        };
+        g.on_node_msg(crate::nodes::NodeMsg::GuestAnnounce(st));
+        g.tick();
+        assert!(
+            g.sessions[&1].visible.contains(&gid),
+            "an in-view guest must spawn to the session through the vis scan"
+        );
+        // Wire proof: the session received an OBJDATA block for the guest
+        // carrying OD_LAYERS (server-side pose resolution mirrors locals).
+        let mut saw_layers = false;
+        while let Ok(block) = raw.try_recv() {
+            if block.first() != Some(&MSG_OBJDATA) {
+                continue;
+            }
+            let id = i32::from_le_bytes([block[2], block[3], block[4], block[5]]);
+            if id != gid {
+                continue;
+            }
+            for (op, _) in objdata_layer_lists(&block) {
+                if op == OD_LAYERS {
+                    saw_layers = true;
+                }
+            }
+        }
+        assert!(saw_layers, "guest spawn must carry the pose layer list");
+
+        // Update: the owner starts the wolf moving; the guest row adopts
+        // the linmove and the progress loop advances it.
+        let st2 = crate::nodes::GuestState {
+            id: gid,
+            pos: (px + 60, py),
+            mv: Some(crate::nodes::GuestLinMove {
+                sx: px + 60,
+                sy: py,
+                tx: px + 260,
+                ty: py,
+                steps: 10,
+                step: 0,
+                started_ms: g.world.now_ms,
+                total_ms: 300,
+            }),
+            moving: true,
+            facing: 0,
+            kind: crate::nodes::GuestKind::Animal {
+                species: Species::Wolf.index(),
+            },
+            hp: 50,
+            max_hp: 50,
+            speed: 33,
+        };
+        g.on_node_msg(crate::nodes::NodeMsg::GuestUpdate(st2));
+        g.tick();
+        let gr = g.world.guests.get(&gid).expect("guest row");
+        assert!(
+            gr.mv.is_some() && gr.mv.as_ref().unwrap().step > 0,
+            "guest progress must advance locally from the linmove params"
+        );
+
+        // Retract: the owner reports death; the session drops the gob.
+        g.on_node_msg(crate::nodes::NodeMsg::GuestRetract { id: gid });
+        assert!(
+            !g.sessions[&1].visible.contains(&gid),
+            "retracted guest must drop"
+        );
+        assert!(!g.world.guests.contains_key(&gid));
+    }
+
+    /// G5: an animal standing in a foreign cell transfers to its owner
+    /// (GuestTransfer on the mesh), demotes to a guest locally with the
+    /// SAME id, and the receiver claims it into its sim tables.
+    #[tokio::test]
+    async fn animal_transfer_keeps_identity_across_nodes() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("xfer0", 0, 2);
+        let (fx, fy) = foreign_cell_pos(&g, 0);
+        let res = g.world.res.intern(Species::Wolf.resname());
+        let id = g.world.gobs.spawn(
+            Kind::Animal {
+                species: Species::Wolf,
+            },
+            (fx, fy),
+            res,
+            40,
+            33,
+        );
+        g.world.animal_gobs.push(id);
+        g.tick();
+        // Sender side: mesh carries the transfer to the owner; the local
+        // copy is a guest (viewers keep rendering, sim stops).
+        let mut transferred = None;
+        while let Ok((peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::GuestTransfer(st) = msg {
+                transferred = Some((peer, st));
+            }
+        }
+        let (peer, st) = transferred.expect("transfer must publish to the cell owner");
+        assert_eq!(peer, 1, "the foreign cell's owner receives the transfer");
+        assert_eq!(st.id, id, "transfer preserves the gob id");
+        assert!(
+            g.world.guests.contains_key(&id) && g.world.gobs.get(id).is_none(),
+            "the old owner demotes the gob to a guest"
+        );
+        assert!(
+            !g.world.animal_gobs.contains(&id),
+            "the old owner stops simulating the transferred animal"
+        );
+
+        // Receiver side: a fresh node-1 game claims the exact id.
+        let (mut g1, _rx1, _raw1, _mesh1) = clustered_game("xfer1", 1, 2);
+        let wpos = st.pos;
+        g1.on_node_msg(crate::nodes::NodeMsg::GuestTransfer(st));
+        let slot = g1
+            .world
+            .gobs
+            .get(id)
+            .expect("transferred gob alive on the new owner");
+        assert!(g1.world.gobs.alive[slot]);
+        assert!(
+            g1.world.animal_gobs.contains(&id),
+            "the new owner simulates it"
+        );
+        // Deterministic resume: a player walks into the wolf's aggro radius
+        // on the new owner - the wolf must chase (AI runs there now).
+        let pidx1 = *g1.world.by_session.get(&1).unwrap();
+        let pg1 = g1.world.players[pidx1].gob;
+        let ps1 = g1.world.gobs.get(pg1).unwrap();
+        g1.world.gobs.set_pos(ps1, (wpos.0 - 200, wpos.1));
+        let mut moved = false;
+        for _ in 0..15 {
+            g1.tick();
+            if let Some(s) = g1.world.gobs.get(id) {
+                if g1.world.gobs.mv[s].is_some() {
+                    moved = true;
+                    break;
+                }
+            }
+        }
+        assert!(moved, "the claimed animal must resume AI on the new owner");
+    }
+
+    /// G5 (player territory): a player entering a foreign cell is
+    /// announced to that cell's owner; returning home retracts.
+    #[tokio::test]
+    async fn player_abroad_publishes_to_cell_owner() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("abroad0", 0, 2);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (fx, fy) = foreign_cell_pos(&g, 0);
+        g.world.gobs.set_pos(pslot, (fx, fy));
+        g.tick();
+        let mut announced = false;
+        while let Ok((peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::GuestAnnounce(st) = msg {
+                if st.id == pgob {
+                    assert_eq!(peer, 1, "announce goes to the foreign owner");
+                    announced = true;
+                }
+            }
+        }
+        assert!(announced, "the owner must learn about the abroad player");
+        assert_eq!(
+            g.cluster.as_ref().unwrap().player_abroad.get(&pgob),
+            Some(&1),
+            "abroad bookkeeping pins the owner"
+        );
+
+        // Back home: the owner is told to retract, bookkeeping clears.
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (hx, hy) = home_cell_pos(&g, 0);
+        g.world.gobs.set_pos(pslot, (hx, hy));
+        g.tick();
+        let mut retracted = false;
+        while let Ok((peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::GuestRetract { id } = msg {
+                if id == pgob && peer == 1 {
+                    retracted = true;
+                }
+            }
+        }
+        assert!(retracted, "returning home must retract from the owner");
+        assert!(!g
+            .cluster
+            .as_ref()
+            .unwrap()
+            .player_abroad
+            .contains_key(&pgob));
+    }
+
+    /// G6: a local chat line broadcasts on the mesh, and a remote line
+    /// delivers to in-radius local sessions (same area-chat semantics).
+    #[tokio::test]
+    async fn chat_relays_across_nodes() {
+        let (mut g, mut rx, _raw, mut mesh_rx) = clustered_game("chat0", 0, 2);
+        // Synthesize the chat window (the real client creates it; the
+        // server only needs a wid to route "log" uimsgs to).
+        let chat_wid = {
+            let out = g.sessions.get_mut(&1).unwrap();
+            let w = out.new_wid("chat");
+            out.chat_wid = w;
+            w
+        };
+
+        // Send path: the line goes out on the mesh (cluster broadcast).
+        g.on_chat_msg(1, "hello mesh");
+        let mut relayed = false;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::Chat { from, text, .. } = msg {
+                assert_eq!(from, "chat0");
+                assert_eq!(text, "hello mesh");
+                relayed = true;
+            }
+        }
+        assert!(relayed, "local chat must broadcast to peers");
+
+        // Receive path: a remote line near the player delivers to the
+        // session's chat window; a far one does not.
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        while rx.try_recv().is_ok() {}
+        g.deliver_remote_chat("peer1", (px + 50, py), "near line");
+        let mut near = false;
+        while let Ok(msg) = rx.try_recv() {
+            if msg.first() == Some(&RMSG_WDGMSG) {
+                let mut m = hnh_proto::MessageBuf::from_slice(&msg[1..]);
+                let wid = m.u16().unwrap();
+                if wid == chat_wid && String::from_utf8_lossy(&msg).contains("near line") {
+                    near = true;
+                }
+            }
+        }
+        assert!(near, "in-radius remote line must reach the session");
+
+        g.deliver_remote_chat("peer1", (px + 100_000, py), "far line");
+        let mut far = false;
+        while let Ok(msg) = rx.try_recv() {
+            if String::from_utf8_lossy(&msg).contains("far line") {
+                far = true;
+            }
+        }
+        assert!(!far, "out-of-radius remote line must be filtered");
     }
 }
