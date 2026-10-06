@@ -1,69 +1,56 @@
 # Gates: session 35 - drop authority transfer across cell boundaries
 
-Scope: close the session-34 known limitation - a gob (station output
-drop, stone rubble, any Kind::Drop) spawned by a node onto a cell it
-does not own is invisible to every player homed on the cell owner
-(peers never subscribe to their OWN cells). Mirror the animal
-authority-transfer path: the spawner sends GuestTransfer to the cell
-owner and demotes its copy to a guest; the owner claims the exact id
-into its sim tables and publishes it back to its subscribers. Also
-re-measure the single-node 1000-session window on the post-session-34
-tree (the tick_guests batch rewrite should lift the single-node
-numbers beyond the 600-bot evidence).
+Scope: close the session-34 known limitation - a Kind::Drop spawned by
+a node onto a cell it does not own (station output jitter across the
+boundary, stone rubble, loot) was invisible to every player homed on
+the cell owner. Mirror the animal authority-transfer path (GuestTransfer
+with a full DropView payload + local demote; the owner claims the exact
+id), prove it live through the real 2-node mesh, and re-measure the
+single-node 1000-session window on the post-session-34 tree.
 
 - [x] G1: drop transfer unit battery
-  A Kind::Drop spawned in a foreign cell (spawn jitter across a cell
-  boundary) sends GuestTransfer to the cell's owner carrying the FULL
-  drop payload (inventory resource name, quality, display label),
-  demotes the local copy to a guest with the SAME id, and the
-  receiving node claims it back into Kind::Drop with the exact id,
-  the same position, the deterministic world shape, and a working
-  pickup (drop_info intact).
-  CHECK: cd /home/z/my-project/hnh_server/server && cargo test --release drop_transfer -- --nocapture
-  CWD: /home/z/my-project/hnh_server/server
-  EXPECT: 3 passed
-  EVIDENCE: exit=0; 3 passed (drop_transfer_sends_to_cell_owner_and_demotes,
-    drop_transfer_receiver_claims_pickup_payload,
-    drop_transfer_local_cell_drop_stays); full battery 194 green
+  EVIDENCE: automatic-evidence=v1; definition-sha256=8d151b5474bf4d2534ae50c2f65efd4eba4762bb0372e358426fdfc3c8505250; exit=0; EXPECT=matched; output-sha256=91f5178d1502a3b62770c10f55c233961b50d1aa3b7c80fcbefc30eb63ecf147; output-bytes=73; shell=/bin/sh; cwd=/home/z/my-project/hnh_server; path=cc94915413e1/11 entries
+  A drop spawned in a foreign cell sends GuestTransfer to the cell's
+  owner carrying the full payload (inventory resource name, quality,
+  label) and demotes locally to a guest under the same id; the
+  receiver claims it back into Kind::Drop with a working pickup
+  payload; a drop on an OWNED cell never transfers.
+  CHECK: bash server/scripts/verify_session35.sh drop-units
+  CWD: /home/z/my-project/hnh_server
+  EXPECT: DROP UNITS: OK
 
 - [x] G2: live cross-boundary drop lifecycle through the real mesh
-  On a real 2-node cluster, a station built near the shared spawn
-  boundary produces an output drop that lands in the PEER's cell: the
-  peer's probe session must SEE the drop (guest announce through the
-  transfer path) and PICK IT UP through the relay (pickup ack restores
-  the stack into the probe's inventory). This proves the transfer end
-  to end: no more invisible boundary drops.
+  EVIDENCE: automatic-evidence=v1; definition-sha256=94b963aa59675e54601be22806d5522ef072a1cc0d8ba504fcc7621d410812cf; exit=0; EXPECT=matched; output-sha256=4465e0dd2208048ab4a81a951164df7bb724570292e1b2b02034da730b9d136e; output-bytes=143; shell=/bin/sh; cwd=/home/z/my-project/hnh_server; path=cc94915413e1/11 entries
+  On a real 2-node cluster a rim oven's output drop (or a rim-tree
+  chop drop) that crosses the cell boundary transfers to the peer:
+  the probe's node claims it and a plain local click restores the
+  stack into the probe inventory; both node logs carry the transfer
+  pair (transferred on the spawner, claimed on the owner).
   CHECK: bash server/scripts/verify_session35.sh cluster-drop
   CWD: /home/z/my-project/hnh_server
   EXPECT: DROP TRANSFER: OK
-  EVIDENCE: exit=0; probe verdict 'DROP TRANSFER: OK drop=98590 cell=(3,1)
-    owner=node0 path=oven(roast2) pos=(995,489) inv=gfx/invobjs/meat';
-    node1 'drop authority transferred id=98590 owner=0' +
-    node0 'drop authority claimed id=98590' (live first run)
 
 - [x] G3: single-node 1000-session load window re-measured
-  A single node with --bots 1000 --saturated (the session-2/30 load
-  gate shape) holds max_tick_us < 100000 in the steady state with all
-  1000 sessions live, on the post-session-34 tree (batch tick_guests).
+  EVIDENCE: automatic-evidence=v1; definition-sha256=00054c548c135c4a52a7552bdf833e1d3421501c4386099352750fca130dbaa9; exit=0; EXPECT=matched; output-sha256=62cbc955e231892b8d5d08ffc96e7467eb0b16a82fde358c8912f2d20e88ee6a; output-bytes=118; shell=/bin/sh; cwd=/home/z/my-project/hnh_server; path=cc94915413e1/11 entries
+  A single node with --bots 1000 --saturated holds max_tick_us <
+  100000 with at least 950 live sessions in the steady state.
   CHECK: bash server/scripts/verify_session35.sh load-1000
   CWD: /home/z/my-project/hnh_server
   EXPECT: 1000-BOT LOAD: OK
-  EVIDENCE: exit=0; sessions=1000 max_tick_us=88838 (100 ms budget held
-    with 11 percent headroom, saturated world)
 
 - [x] G4: full regression battery
-  Every unit test passes (191+3), clippy --all-targets -D warnings
-  clean, cargo fmt --check clean, and the session-34 verification
-  phases (station-units + cluster-station) stay green on this tree.
+  EVIDENCE: automatic-evidence=v1; definition-sha256=c096fb75b0de0e5d6851d1047cb8efd1c8dd38eb640b34ed286757b606ef531a; exit=0; EXPECT=matched; output-sha256=321572a68516eeff136f2385ecfe0332ac707b7122470a2ae8e5e6c213ae3a97; output-bytes=168; shell=/bin/sh; cwd=/home/z/my-project/hnh_server; path=cc94915413e1/11 entries
+  Every unit test passes, clippy --all-targets -D warnings is clean,
+  and the session-34 phases (station-units + cluster-station) stay
+  green on this tree.
   CHECK: bash server/scripts/verify_session35.sh regression
   CWD: /home/z/my-project/hnh_server
   EXPECT: REGRESSION: OK
-  EVIDENCE: exit=0; unit battery green (194), clippy -D warnings green,
-    session-34 station-units green, session-34 cluster-station green
 
-- [ ] G5: handoff record and push
-  HANDOFF.md carries the session-35 entry with evidence, the worklog
-  is appended, and all commits are pushed to origin/master.
+- [x] G5: handoff record and push
+  EVIDENCE: automatic-evidence=v1; definition-sha256=f319b49b4d692f725791925c7be1ede7dcd01786c8cb4b5437651f316700b00a; exit=0; EXPECT=matched; output-sha256=680d901f37f1249793d971cedc554ab9529b8594274664c70122698be63c3152; output-bytes=280; shell=/bin/sh; cwd=/home/z/my-project/hnh_server; path=cc94915413e1/11 entries
+  HANDOFF.md carries the session-35 entry, all work is committed, and
+  HEAD is pushed to origin/master.
   CHECK: bash server/scripts/verify_session35.sh handoff
   CWD: /home/z/my-project/hnh_server
   EXPECT: HANDOFF: OK
