@@ -2615,3 +2615,91 @@ the fightview frv atk/blk uimsg payloads - the frv 'atk'/'blk' uimsgs
 carry resource-id ints, check fight.rs uimsg(w, "blk", &[wb]) against
 the client FightView.java parse). The fightview path is the only other
 place the blk pagina resource is referenced and is session-40 new.
+
+## 2026-10-07 - Session 42: the PaginaException pack bug, vis spawn-churn debounce, cross-node maneuver IP relay
+
+The session-41 addendum blocker (open UiProbe PaginaException) is
+CLOSED with a root cause in the legacy resource pack itself, plus two
+NEXT items landed: the vis spawn-churn debounce and the cross-node
+maneuver IP relay.
+
+WHAT:
+
+- PAGINAE EXCEPTION ROOT CAUSE (the pack, not the server). A temporary
+  diagnostic hook in the client's Resource.load caught the real call
+  site: `Resource$AButton.<init>` - the parent-pagina reference embedded
+  in an action layer. `paginae/atk/dodge.res` (and `blk.res`) ship with
+  the uint16 parent-version field DROPPED at pack-build time inside
+  lib/haven-res.jar: the client parser reads the first two button-name
+  bytes as the version ('D','o' of "Dodge" -> ver 28484). Legacy
+  clients tolerated the resulting "Wrong res version (1 != 28484)"
+  delayed error because nothing else referenced paginae/atk/blk; the
+  session-40 pagina announce (blk at its real file version 1) turned it
+  into a by-name version conflict (the cache entry is replaced by the
+  failed ver=28484 load, per Resource.load's res.ver < ver rule) and
+  MenuGrid.getSubResources threw on the broken entry. Per-entry PAGINAE
+  frames were never the problem.
+
+- PACK REPAIR (server/scripts/fix_gameres_versions.py). Parses every
+  action layer, detects the dropped version (ASCII high byte where a
+  uint16 belongs; name-overlap check), splices in the parent's real
+  file version, extends the layer length. Idempotent; exits 1 when
+  corruption remains. Wired into make-gameres.sh AND
+  windows/make-gameres.ps1 so regenerated packs stay consistent. The
+  repaired blk.res + dodge.res are committed under res/compiled/ -
+  the client source chain resolves HAVEN_RESDIR BEFORE JarSource, and
+  the jar (in the probe's classpath) was the actual broken source
+  feeding the probe. UiProbe run/equip/charlist all green again.
+
+- VIS SPAWN-CHURN DEBOUNCE (game.rs retract_sweep_due). Load
+  attribution first (new `vis_spawns` perf counter): 1000 dueling bots
+  spawn ~420 gobs/tick MEAN into session views (max 3098 in login
+  storms); the spawn phase was the dominant vis cost (p95 36 ms). The
+  old `cell_moved` trigger swept a moving session EVERY tick, so a gob
+  oscillating across the 2x VIEW_RADIUS boundary was retracted and
+  re-spawned on each crossing. The sweep is now gated to once per
+  RETRACT_SWEEP_EVERY (8) ticks per session: a quick boundary return
+  never sees a retract; a departed gob disappears at most 0.8 s late
+  (two view radii off-screen); deaths keep the immediate
+  broadcast_retract path. Measured after: spawns/tick mean 377,
+  vis_spawn_us p95 29 ms, single-node steady tick p95 96 ms (in
+  budget) with 5119 landed PvP hits - the remaining churn is geometry
+  of the dense duel arena (R=300 against a 1000-bot herd), documented
+  as the frontier, not a defect.
+
+- CROSS-NODE MANEUVER IP RELAY (NodeMsg::ManeuverDelta). The maneuver
+  economy's opponent-pool delta was local-only: a foreign victim's
+  authoritative IP pool lived on her home node but never heard about
+  `ip_opp` (HANDOFF NEXT since session 40). The on_maneuver guest
+  branch now ships `ManeuverDelta { attacker, victim, ip_opp }` to the
+  victim's home node, which folds it into her relation row keyed by the
+  attacker's guest gob (clamped at zero) and re-streams her window.
+  The attacker's ip_other mirror stays the between-frames prediction.
+  Roundtrip wire test + fold/clamp/stream/no-op unit test.
+
+EVIDENCE: 241 unit tests green (2 new incl. roundtrip), clippy -D
+warnings clean, fmt clean. UiProbe RUN/EQUIP/CHARLIST: OK.
+probe_walk MOVE PROBE: OK. test_client WORLD ENTRY OK + CATTR ORDER OK
+on the final release binary. Load-1000 re-measured (numbers above).
+Commits: e908bf0 (pack fix), 1de7f28 (spawn debounce), 3a9bbe1
+(maneuver relay) pushed to origin/master.
+
+NOT DONE THIS SESSION (rolled to NEXT):
+- The duel-arena spawn churn is geometry-bound (R=300, 1000 bots on one
+  arena): further work is spawn-cost reduction (encode/unacked path
+  profiling at ~30 us/spawn) or a wider test arena, not more hysteresis.
+- Single-node tick p95 96 ms vs the 100 ms budget on the noisy 2-CPU
+  sandbox; re-measure on a quiet multi-core host (carried).
+- Combat-phase p95 spikes (39 ms observed) - next attribution target.
+- Windows smoke on a pwsh host (make-gameres.ps1 now also runs the
+  pack-repair python step - verify it there); then the GL client e2e
+  (carried since session 34).
+- Unit-count reconciliation vs RoB (sources still behind Cloudflare).
+
+NEXT (handoff):
+- Combat phase attribution at 1000 sessions (the phase_vis p95 is now
+  matched by phase_combat spikes).
+- Spawn-encode cost profiling (vis_spawn_us / vis_spawns ~30 us each;
+  the batched-spawn idea from session 41 is unexplored).
+- Windows smoke + GL client e2e when a display-capable host exists.
+- Re-run load-cluster on a quiet host for the perf table.
