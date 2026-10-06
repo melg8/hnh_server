@@ -827,7 +827,7 @@ pub struct Perf {
     pub spawned_objects: usize,
     /// Per-phase microseconds of the last tick: [movement, ai, combat,
     /// vitals, visibility]. Load-test hot-loop attribution.
-    pub phase_us: [u128; 5],
+    pub phase_us: [u128; 9],
     /// Visibility optimization counters (cumulative): total gob distance
     /// checks issued by scans, session-ticks skipped entirely, and the
     /// live cell count. Log-time proof the index is active.

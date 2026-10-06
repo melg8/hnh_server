@@ -847,6 +847,10 @@ impl Game {
             phase_combat_us = ph[2] as u64,
             phase_vitals_us = ph[3] as u64,
             phase_vis_us = ph[4] as u64,
+            phase_farm_us = ph[5] as u64,
+            phase_station_us = ph[6] as u64,
+            phase_cluster_us = ph[7] as u64,
+            phase_guests_us = ph[8] as u64,
             vis_gob_scans = self.world.perf.vis_gob_scans,
             vis_skipped = self.world.perf.vis_skipped,
             vis_cached = self.world.perf.vis_cached,
@@ -3425,12 +3429,26 @@ impl Game {
     /// (the owner authored the linmove params; progress math is pure), so
     /// no per-tick streaming from the owner is needed — each subscriber
     /// derives LINSTEP locally for its viewing sessions.
+    ///
+    /// Session 34 batch shape (the batch_move_broadcast pattern): blocks
+    /// are encoded once per moving guest, then ONE pass over the sessions
+    /// merges every visible block into ONE datagram per session. The
+    /// per-guest full-session scan this replaces (a viewers Vec built by
+    /// filtering ALL sessions per guest, every tick) measured 56-67
+    /// ms/tick at 600 clustered walking bots - O(guests x sessions)
+    /// HashSet lookups plus one datagram per (guest, viewer) pair.
+    /// LINSTEP progress frames are deliberately NOT recorded in
+    /// `unacked`: each frame is superseded next tick, so a lost datagram
+    /// self-heals within 100 ms.
     fn tick_guests(&mut self) {
         if self.world.guests.is_empty() {
             return;
         }
         let now = self.world.now_ms;
         let ids: Vec<GobId> = self.world.guests.keys().copied().collect();
+        let mut linsteps: Vec<(GobId, u32, Vec<u8>)> = Vec::new();
+        let mut fin_blocks: Vec<(GobId, u32, Vec<u8>)> = Vec::new();
+        let mut finished_ids: Vec<GobId> = Vec::new();
         for id in ids {
             let (mv, finished, pos, frame) = {
                 let Some(g) = self.world.guests.get_mut(&id) else {
@@ -3463,19 +3481,9 @@ impl Game {
                 g.pos = pos;
             }
             self.world.gobs.vis.reposition(id, pos);
-            let mut viewers: Vec<SessionId> = self
-                .sessions
-                .iter()
-                .filter(|(_, o)| o.visible.contains(&id))
-                .map(|(s, _)| *s)
-                .collect();
-            if viewers.is_empty() {
-                continue;
-            }
             if finished {
                 let g = self.world.guests.get_mut(&id).expect("checked above");
                 g.moving = false;
-                let facing = g.facing;
                 let mut m = MessageBuf::new();
                 m.uint8(MSG_OBJDATA)
                     .uint8(0)
@@ -3486,16 +3494,8 @@ impl Game {
                     .uint8(OD_LINSTEP)
                     .int32(0)
                     .uint8(OD_END);
-                let block = m.finish();
-                for sid in viewers.drain(..) {
-                    if let Some(out) = self.sessions.get_mut(&sid) {
-                        out.send_raw(block.clone());
-                        Self::record_unacked(out, id, frame, block.clone());
-                    }
-                    // Rest pose: standing layers of the current facing.
-                    self.stream_guest_pose(sid, id);
-                    let _ = facing;
-                }
+                fin_blocks.push((id, frame, m.finish()));
+                finished_ids.push(id);
             } else if let Some((l, _steps)) = mv {
                 let mut m = MessageBuf::new();
                 m.uint8(MSG_OBJDATA)
@@ -3505,12 +3505,45 @@ impl Game {
                     .uint8(OD_LINSTEP)
                     .int32(l)
                     .uint8(OD_END);
-                let block = m.finish();
-                for sid in viewers.drain(..) {
-                    if let Some(out) = self.sessions.get_mut(&sid) {
-                        out.send_raw(block.clone());
-                    }
+                linsteps.push((id, frame, m.finish()));
+            }
+        }
+        // One pass over the sessions: merge every visible block into one
+        // datagram; finalizers also land in `unacked` (retransmittable).
+        let sids: Vec<SessionId> = self.sessions.keys().copied().collect();
+        for sid in sids {
+            let Some(out) = self.sessions.get_mut(&sid) else {
+                continue;
+            };
+            let mut m = MessageBuf::with_capacity(256);
+            for (id, frame, block) in &fin_blocks {
+                if !out.visible.contains(id) {
+                    continue;
                 }
+                m.bytes(block);
+                Self::record_unacked(out, *id, *frame, block.clone());
+            }
+            for (id, _frame, block) in &linsteps {
+                if !out.visible.contains(id) {
+                    continue;
+                }
+                m.bytes(block);
+            }
+            if !m.is_empty() {
+                out.send_raw(m.finish());
+            }
+        }
+        // Rest pose for finished movers: the standing layer block per
+        // viewer (rare - only on movement finalization; statics skip).
+        for id in finished_ids {
+            let viewers: Vec<SessionId> = self
+                .sessions
+                .iter()
+                .filter(|(_, o)| o.visible.contains(&id))
+                .map(|(s, _)| *s)
+                .collect();
+            for sid in viewers {
+                self.stream_guest_pose(sid, id);
             }
         }
     }
@@ -7036,7 +7069,7 @@ impl Game {
         self.world.now_ms = self.world.tick * TICK_MS;
         // Per-phase attribution keeps the data-oriented hot loops honest:
         // regressions show up in the phase histogram, not just the total.
-        let mut phase_us = [0u128; 5];
+        let mut phase_us = [0u128; 9];
         let t0 = Instant::now();
         self.tick_movement();
         phase_us[0] = t0.elapsed().as_micros();
@@ -7054,13 +7087,21 @@ impl Game {
         phase_us[4] = t4.elapsed().as_micros();
         // Farming scheduler (crop growth, tilth decay) is a cheap scan of
         // the live crop set only; no work with an empty map.
+        let t5 = Instant::now();
         self.tick_farming();
+        phase_us[5] = t5.elapsed().as_micros();
         // Production stations: bounded by the live station set.
+        let t6 = Instant::now();
         self.tick_stations();
+        phase_us[6] = t6.elapsed().as_micros();
         // Cluster maintenance (subs/abroad/transfer/GC) + guest movement
         // interpolation: both no-op without a cluster configuration.
+        let t7 = Instant::now();
         self.tick_cluster();
+        phase_us[7] = t7.elapsed().as_micros();
+        let t8 = Instant::now();
         self.tick_guests();
+        phase_us[8] = t8.elapsed().as_micros();
         // The dirty set served this tick's visibility pass; spawn marks
         // after this point (farming/station drops) dirty the next pass.
         self.world.gobs.vis.clear_dirty();
