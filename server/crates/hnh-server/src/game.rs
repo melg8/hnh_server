@@ -8847,6 +8847,7 @@ impl Game {
                     let knocked = self.hurt_player(vpidx, dmg, pgob);
                     let vname = self.world.players[vpidx].name.clone();
                     let aname = self.world.players[pidx].name.clone();
+                    info!(sid, vsid, target, dmg, knocked, "pvp melee hit");
                     self.chat_line(
                         sid,
                         &format!("You hit {vname} for {dmg} damage."),

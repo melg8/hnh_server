@@ -2367,6 +2367,17 @@ WHAT:
   new_def was compared and dropped); the chip now accumulates across
   bites until the opening, matching the documented openings economy.
 
+- LOAD BOTS FIGHT PLAYERS TOO (bots.rs). The bot cohort now duels:
+  pick_target gained a Player branch (never self, 15-tile radius, two
+  of four roll buckets lead with it), bots parse NEWWDG/DSTWDG to track
+  the flower-menu widget, a click on a player arms a petal-confirm
+  that answers the menu with cl 1 (Fight) through the real widget path,
+  and the bot then HOLDS for 6 s so the duel actually runs (chase +
+  swings) before picking a new target. STAT_DUELS joins the load
+  verdict; an info! line logs every landed PvP hit. 40-bot 70 s smoke:
+  duels=1253, pvp melee hit=419, knockouts=3 (knocked=true), zero
+  errors/warnings - the melee economy runs under cohort load.
+
 - WIRE PROBE (scripts/probe_melee.py). The full client-path chain
   against a live server: two players enter, the attacker gob-clicks
   the victim, the flower menu opens, petal 1 (Fight) arms the duel,
@@ -2404,6 +2415,9 @@ NEXT (handoff):
 - PvP consequences: decide and document the LP/criminal policy for
   player knockouts (a written server policy is acceptable - mark it
   in combat-system.md Open questions when sourced numbers exist).
+- Re-run the 1000-bot load test with the duel behavior at full scale
+  (the 40-bot smoke proves the chain; the 1k cohort number needs a
+  fresh timed run for the perf table).
 - Weapons for melee PvP (the unarmed model covers everyone; weapon
   base-damage table needs legacy item resources - Open question 8).
 - Maneuver selection in the frv window (the give handshake exists;

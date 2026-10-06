@@ -27,6 +27,7 @@ use hnh_proto::{RelReceiver, RelSender};
 
 // Cohort-wide counters; run() logs the final totals as the load verdict.
 static STAT_FIGHTS: AtomicU64 = AtomicU64::new(0);
+static STAT_DUELS: AtomicU64 = AtomicU64::new(0);
 static STAT_HARVESTS: AtomicU64 = AtomicU64::new(0);
 static STAT_PICKUPS: AtomicU64 = AtomicU64::new(0);
 static STAT_WALKS: AtomicU64 = AtomicU64::new(0);
@@ -60,6 +61,7 @@ pub async fn run(count: usize, secs: u64, port: u16) {
         connected = ok,
         total = count,
         fights = STAT_FIGHTS.load(Ordering::Relaxed),
+        duels = STAT_DUELS.load(Ordering::Relaxed),
         harvests = STAT_HARVESTS.load(Ordering::Relaxed),
         pickups = STAT_PICKUPS.load(Ordering::Relaxed),
         bites_taken = STAT_BITES.load(Ordering::Relaxed),
@@ -272,6 +274,9 @@ struct BotView {
     gobs: HashMap<i32, (u16, i32, i32)>,
     /// Gobs whose wire id was not announced yet (reclassify on RESID).
     unnamed: Vec<i32>,
+    /// The open flower-menu widget id ("sm"), when any - a bot that just
+    /// clicked another player confirms the Fight petal through it.
+    sm_wid: Option<u16>,
 }
 
 impl BotView {
@@ -372,18 +377,27 @@ struct Target {
     gob: i32,
     at: (i32, i32),
     stat: fn(),
+    /// True when the target is another PLAYER: the click opens the flower
+    /// menu instead of acting directly, so the caller must arm the
+    /// petal-confirm step.
+    duel: bool,
 }
 
 /// Pick the next action for a bot at (x, y). A weighted roll spreads the
-/// cohort across the master-prompt triangle: ~50% fights, ~30% harvest,
-/// ~20% loot, each branch falling through to the next class so a bot never
-/// idles while any target exists in range.
+/// cohort across the master-prompt triangle - ~40% fights, ~20% player
+/// duels, ~30% harvest, ~10% loot - each branch falling through to the
+/// next class so a bot never idles while any target exists in range.
 fn pick_target(view: &BotView, x: i32, y: i32, roll: u32) -> Option<Target> {
     // Drops land near the harvested target, which the bot may have clicked
     // from up to ~8 tiles away; the pickup click has no server-side reach
     // check, so use a radius that covers the whole harvest zone.
     let drop = view.nearest(GobClass::Drop, x, y, 15 * 11);
     let animal = view.nearest(GobClass::Animal, x, y, 10 * 11);
+    // Another PLAYER within duel range (the click opens the Fight flower
+    // menu; the server-side chase closes the rest). Never target self.
+    let player = view
+        .nearest(GobClass::Player, x, y, 15 * 11)
+        .filter(|(gob, _, _)| Some(*gob) != view.self_gob);
     let harvest = view
         .nearest(GobClass::Tree, x, y, 8 * 11)
         .or_else(|| view.nearest(GobClass::Stone, x, y, 8 * 11));
@@ -391,6 +405,9 @@ fn pick_target(view: &BotView, x: i32, y: i32, roll: u32) -> Option<Target> {
         match cls {
             GobClass::Animal => || {
                 STAT_FIGHTS.fetch_add(1, Ordering::Relaxed);
+            },
+            GobClass::Player => || {
+                STAT_DUELS.fetch_add(1, Ordering::Relaxed);
             },
             GobClass::Tree | GobClass::Stone => || {
                 STAT_HARVESTS.fetch_add(1, Ordering::Relaxed);
@@ -405,6 +422,7 @@ fn pick_target(view: &BotView, x: i32, y: i32, roll: u32) -> Option<Target> {
             gob,
             at: (gx, gy),
             stat: stat_of(cls),
+            duel: cls == GobClass::Player,
         })
     };
     // Ordered candidate chains per roll bucket.
@@ -412,14 +430,37 @@ fn pick_target(view: &BotView, x: i32, y: i32, roll: u32) -> Option<Target> {
     let chain: &[Candidate] = &[
         (GobClass::Drop, drop),
         (GobClass::Animal, animal),
+        (GobClass::Player, player),
         (GobClass::Tree, harvest),
     ];
-    let order: &[GobClass] = if roll < 5 {
-        &[GobClass::Animal, GobClass::Tree, GobClass::Drop]
+    let order: &[GobClass] = if roll < 4 {
+        &[
+            GobClass::Animal,
+            GobClass::Player,
+            GobClass::Tree,
+            GobClass::Drop,
+        ]
+    } else if roll < 6 {
+        &[
+            GobClass::Player,
+            GobClass::Animal,
+            GobClass::Tree,
+            GobClass::Drop,
+        ]
     } else if roll < 8 {
-        &[GobClass::Tree, GobClass::Animal, GobClass::Drop]
+        &[
+            GobClass::Tree,
+            GobClass::Animal,
+            GobClass::Player,
+            GobClass::Drop,
+        ]
     } else {
-        &[GobClass::Drop, GobClass::Animal, GobClass::Tree]
+        &[
+            GobClass::Drop,
+            GobClass::Animal,
+            GobClass::Tree,
+            GobClass::Player,
+        ]
     };
     let by_cls = |cls: GobClass| chain.iter().find(|(c, _)| *c == cls);
     order
@@ -504,11 +545,16 @@ async fn bot_session(idx: usize, secs: u64, port: u16) -> bool {
         }
     }
 
-    // --- behavior loop: walk / fight / harvest / loot for `secs` ---
+    // --- behavior loop: walk / fight / duel / harvest / loot for `secs` ---
     let behavior_end = Instant::now() + Duration::from_secs(secs);
     let mut next_action = Instant::now() + Duration::from_millis(500);
     let mut next_beat = Instant::now() + Duration::from_secs(5);
     let mut next_flush = Instant::now() + Duration::from_millis(20);
+    // Armed when this bot clicked another PLAYER: the next "sm" widget
+    // the server opens is the attacker's own flower menu, and the bot
+    // confirms the Fight petal (index 1 on the [Invite, Fight, Cancel]
+    // layout; no bot ever joins a party, so the layout never shrinks).
+    let mut duel_pending = false;
     let mut alive = true;
     while alive && Instant::now() < behavior_end {
         let mut buf = [0u8; 65536];
@@ -523,6 +569,11 @@ async fn bot_session(idx: usize, secs: u64, port: u16) -> bool {
                         // on_rel payloads carry the rmsg type byte first.
                         if ty == RMSG_RESID {
                             parse_resid(&payload[1..], &mut view);
+                        } else if ty == RMSG_NEWWDG {
+                            on_newwdg(&payload[1..], &mut view);
+                        } else if ty == RMSG_DSTWDG {
+                            // The menu closed (confirmed or cancelled).
+                            view.sm_wid = None;
                         }
                     }
                 }
@@ -538,6 +589,21 @@ async fn bot_session(idx: usize, secs: u64, port: u16) -> bool {
                 _ => {}
             }
         }
+        // A player click armed the duel flag and the flower menu just
+        // landed: confirm the Fight petal through the real widget path,
+        // then HOLD still for a few seconds so the duel actually runs
+        // (the server-side chase closes into reach and the offence bar
+        // needs ~1.6 s per swing; switching targets immediately would
+        // tear every duel down before the first swing).
+        if duel_pending {
+            if let Some(sm) = view.sm_wid {
+                let mut cl = hnh_proto::MessageBuf::new();
+                cl.uint8(RMSG_WDGMSG).uint16(sm).string("cl").lint(1).lend();
+                rel_tx.queue(&cl.finish());
+                duel_pending = false;
+                next_action = Instant::now() + Duration::from_secs(6);
+            }
+        }
         let now = Instant::now();
         if now >= next_action {
             next_action = now + Duration::from_millis(400 + rng.next_bounded(800) as u64);
@@ -546,6 +612,7 @@ async fn bot_session(idx: usize, secs: u64, port: u16) -> bool {
             let (px, py) = view.self_pos.unwrap_or((home_tx * 11, home_ty * 11));
             if let Some(t) = pick_target(&view, px, py, rng.next_bounded(10) as u32) {
                 queue_click(&mut rel_tx, mapview, t.at, Some(t.gob));
+                duel_pending = t.duel;
                 (t.stat)();
             } else {
                 let jx = home_tx * 11 + rng.next_bounded(600) - 300;
@@ -586,6 +653,19 @@ fn parse_resid(payload: &[u8], view: &mut BotView) {
     let mut m = hnh_proto::MessageBuf::from_slice(payload);
     if let (Ok(wire), Ok(name)) = (m.u16(), m.str()) {
         view.on_resid(wire, name);
+    }
+}
+
+/// Decode one RMSG_NEWWDG payload (uint16 wid, string type, args...).
+/// Bots only care about the flower menu ("sm") widget id - the petal
+/// list in the args is not parsed (the duel-confirm step knows the
+/// layout from its own click).
+fn on_newwdg(payload: &[u8], view: &mut BotView) {
+    let mut m = hnh_proto::MessageBuf::from_slice(payload);
+    if let (Ok(wid), Ok(kind)) = (m.u16(), m.str()) {
+        if kind == "sm" {
+            view.sm_wid = Some(wid);
+        }
     }
 }
 
