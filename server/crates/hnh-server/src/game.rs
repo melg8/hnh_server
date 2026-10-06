@@ -3312,20 +3312,22 @@ impl Game {
             Kind::Drop { .. } => {
                 // Pick up: move into inventory. The stack carries the
                 // INVENTORY resource (drop.0), not the gob's terobjs
-                // render shape (see spawn_drop_near).
+                // render shape (see spawn_drop_near). grant_pickup
+                // redirects onto a same-resource cursor stack and merges
+                // into same-resource inventory stacks.
                 if let Some(drop) = self.world.gobs.kind[tslot].drop_info() {
-                    if let Some(p) = self.world.player_mut(sid) {
-                        p.inv.push(InvStack {
+                    self.grant_pickup(
+                        sid,
+                        InvStack {
                             res: drop.0,
                             count: drop.1,
                             ql: drop.2,
                             label: drop.3,
-                        });
-                    }
+                        },
+                    );
                 }
                 self.world.gobs.kill(target);
                 self.broadcast_retract(target);
-                self.refresh_inventory(sid);
             }
             Kind::Animal { species } => {
                 self.start_fight(sid, target, species);
@@ -4316,8 +4318,49 @@ impl Game {
             return;
         };
         self.hide_cursor_widget(sid);
-        if let Some(p) = self.world.player_mut(sid) {
-            p.inv.push(stack);
+        self.grant_pickup(sid, stack);
+    }
+
+    /// Place a picked-up stack (ground-drop click, cursor release onto the
+    /// inventory grid, or a relayed cross-node pickup ack): when the cursor
+    /// already drags the SAME resource, the counts merge onto the cursor
+    /// (redirection - no failed pickup, one drag stack); otherwise the
+    /// stack stores into the inventory, merging into an existing
+    /// same-resource stack when one exists (items-and-quality.md leaves
+    /// stacking policy to the server; count-weighted quality average, see
+    /// InvStack::absorb).
+    fn grant_pickup(&mut self, sid: SessionId, stack: InvStack) {
+        // Cursor redirection: same resource on the cursor absorbs the new
+        // stack; the drag widget's count syncs through sync_cursor_widget.
+        let cursor_same = self
+            .sessions
+            .get(&sid)
+            .and_then(|o| o.cursor.as_ref())
+            .is_some_and(|c| c.res == stack.res);
+        if cursor_same {
+            if let Some(out) = self.sessions.get_mut(&sid) {
+                if let Some(c) = out.cursor.as_mut() {
+                    c.absorb(&stack);
+                }
+            }
+            self.sync_cursor_widget(sid);
+            return;
+        }
+        let Some(pidx) = self.world.by_session.get(&sid).copied() else {
+            // No session player (should not happen for a pickup click):
+            // dropping the stack would lose items; keep it safe instead.
+            debug!(sid, "grant_pickup without session player");
+            return;
+        };
+        // Inventory merge: the first same-resource stack absorbs; a new
+        // resource creates its own stack.
+        let existing = self.world.players[pidx]
+            .inv
+            .iter_mut()
+            .find(|s| s.res == stack.res);
+        match existing {
+            Some(s) => s.absorb(&stack),
+            None => self.world.players[pidx].inv.push(stack),
         }
         self.refresh_inventory(sid);
     }
@@ -4849,16 +4892,16 @@ impl Game {
         );
         for (y, n, q) in drawn {
             let res_idx = self.world.res.intern(y.res);
-            if let Some(p) = self.world.player_mut(sid) {
-                p.inv.push(InvStack {
+            self.grant_pickup(
+                sid,
+                InvStack {
                     res: res_idx,
                     count: n,
                     ql: q,
                     label: y.label,
-                });
-            }
+                },
+            );
         }
-        self.refresh_inventory(sid);
         info!(sid, gob, mature, "crop harvested");
     }
 
@@ -5709,12 +5752,22 @@ impl Game {
         let out_q = q.clamp(1, 255) as u8;
         for (resname, count) in recipe.outputs {
             let gidx = self.world.res.intern(resname);
-            self.world.players[pidx].inv.push(InvStack {
+            let out = InvStack {
                 res: gidx,
                 count: *count,
                 ql: out_q,
                 label: "",
-            });
+            };
+            // Merge into an existing same-resource stack (absorb policy)
+            // so repeat crafts fill one stack, not one slot per craft.
+            match self.world.players[pidx]
+                .inv
+                .iter_mut()
+                .find(|s| s.res == gidx)
+            {
+                Some(s) => s.absorb(&out),
+                None => self.world.players[pidx].inv.push(out),
+            }
         }
         // First-time discoveries grant LP (learning doc); keep it modest.
         self.world.players[pidx].lp += 1;
@@ -5743,12 +5796,22 @@ impl Game {
         if stack.count == 0 {
             self.world.players[pidx].inv.remove(pos);
         }
-        self.world.players[pidx].inv.push(InvStack {
+        // Merge into an existing roasted stack when one exists (absorb
+        // policy) instead of stacking duplicates per roast.
+        let out_stack = InvStack {
             res: self.world.res.intern("gfx/invobjs/meat"),
             count: 1,
             ql: out_ql,
             label: roasted,
-        });
+        };
+        match self.world.players[pidx]
+            .inv
+            .iter_mut()
+            .find(|s| s.res == out_stack.res && s.label == out_stack.label)
+        {
+            Some(s) => s.absorb(&out_stack),
+            None => self.world.players[pidx].inv.push(out_stack),
+        }
         debug!(sid, raw, roasted, "roasted one meat");
         true
     }
@@ -7453,7 +7516,8 @@ impl Game {
         self.pending_joins.remove(&sid);
         if let Some(out) = self.sessions.remove(&sid) {
             // A stack left on the cursor goes back to the inventory so a
-            // log-out mid-plant does not eat the item.
+            // log-out mid-plant does not eat the item; same-resource stacks
+            // merge (InvStack::absorb policy) instead of piling up.
             if let Some(stack) = out.cursor {
                 if let Some(p) = self
                     .world
@@ -7462,7 +7526,10 @@ impl Game {
                     .copied()
                     .and_then(|idx| self.world.players.get_mut(idx))
                 {
-                    p.inv.push(stack);
+                    match p.inv.iter_mut().find(|s| s.res == stack.res) {
+                        Some(s) => s.absorb(&stack),
+                        None => p.inv.push(stack),
+                    }
                 }
             }
             if let Some(gob) = out.player_gob {
@@ -9930,5 +9997,137 @@ mod tests {
             None,
             "bob starts with no snapshot"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Session 30: cursor pickup redirection + stack merging
+    // (items-and-quality.md: stacking policy is server policy)
+    // ------------------------------------------------------------------
+
+    /// Test helper: find the only live ground Drop gob.
+    fn only_drop_gob(g: &Game) -> GobId {
+        let mut found = None;
+        for slot in 0..g.world.gobs.alive.len() {
+            if g.world.gobs.alive[slot] && matches!(g.world.gobs.kind[slot], Kind::Drop { .. }) {
+                found = Some(gob_id_from_slot(slot, g.world.gobs.gen[slot]));
+            }
+        }
+        found.expect("test precondition: exactly one live Drop gob")
+    }
+
+    /// Picking up a ground drop while the cursor drags the SAME resource
+    /// redirects onto the cursor: counts add, quality re-averages, the
+    /// inventory gains nothing, and the drag widget count syncs.
+    #[tokio::test]
+    async fn pickup_merges_onto_same_resource_cursor() {
+        let (mut g, _rx, _raw) = entered_game("cursorpickup");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let wood = g.world.res.intern("gfx/invobjs/wood");
+        // Cursor already drags 2 wood at q10.
+        g.sessions.get_mut(&1).unwrap().cursor = Some(InvStack {
+            res: wood,
+            count: 2,
+            ql: 10,
+            label: "",
+        });
+        // A ground wood drop at q20 lands next to the player.
+        g.spawn_drop_near((px, py), "gfx/invobjs/wood", 20, "");
+        let drop = only_drop_gob(&g);
+        g.player_interact(1, pgob, drop, (0, 0));
+        // The cursor stack absorbed the drop: 3 units, (10*2+20*1)/3 = 13.
+        let cur = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .cursor
+            .expect("cursor keeps the stack");
+        assert_eq!(cur.res, wood);
+        assert_eq!(cur.count, 3, "counts conserved onto the cursor");
+        assert_eq!(cur.ql, 13, "count-weighted quality average");
+        assert!(
+            !g.world.players[pidx].inv.iter().any(|s| s.res == wood),
+            "no parallel inventory stack for a redirected pickup"
+        );
+        assert!(g.world.gobs.get(drop).is_none(), "drop gob removed");
+    }
+
+    /// Releasing the cursor onto the inventory grid merges into an existing
+    /// same-resource stack instead of appending a duplicate slot.
+    #[tokio::test]
+    async fn inv_drop_merges_into_same_resource_stack() {
+        let (mut g, _rx, _raw) = entered_game("invdropmerge");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let wood = g.world.res.intern("gfx/invobjs/wood");
+        // Inventory holds 3 wood at q10; the cursor drags 2 wood at q30.
+        g.world.players[pidx].inv.push(InvStack {
+            res: wood,
+            count: 3,
+            ql: 10,
+            label: "",
+        });
+        g.sessions.get_mut(&1).unwrap().cursor = Some(InvStack {
+            res: wood,
+            count: 2,
+            ql: 30,
+            label: "",
+        });
+        g.inv_drop(1, 0, &[]);
+        // One merged stack: 5 units, (10*3+30*2)/5 = 18.
+        let stacks: Vec<_> = g.world.players[pidx]
+            .inv
+            .iter()
+            .filter(|s| s.res == wood)
+            .collect();
+        assert_eq!(stacks.len(), 1, "exactly one wood stack after the drop");
+        assert_eq!(stacks[0].count, 5, "counts conserved");
+        assert_eq!(stacks[0].ql, 18, "count-weighted quality average");
+        assert!(
+            g.sessions.get(&1).unwrap().cursor.is_none(),
+            "cursor emptied"
+        );
+    }
+
+    /// A pickup of a DIFFERENT resource never merges: the cursor keeps its
+    /// stack, the pickup lands in its own inventory slot.
+    #[tokio::test]
+    async fn different_resource_pickup_keeps_stacks_separate() {
+        let (mut g, _rx, _raw) = entered_game("separatepick");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let stone = g.world.res.intern("gfx/invobjs/stone");
+        let wood = g.world.res.intern("gfx/invobjs/wood");
+        // Cursor drags stone; the ground drop is wood.
+        g.sessions.get_mut(&1).unwrap().cursor = Some(InvStack {
+            res: stone,
+            count: 1,
+            ql: 10,
+            label: "",
+        });
+        g.spawn_drop_near((px, py), "gfx/invobjs/wood", 20, "");
+        let drop = only_drop_gob(&g);
+        g.player_interact(1, pgob, drop, (0, 0));
+        let cur = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .cursor
+            .expect("cursor untouched");
+        assert_eq!(
+            (cur.res, cur.count),
+            (stone, 1),
+            "cursor still drags the stone"
+        );
+        let inv_wood: Vec<_> = g.world.players[pidx]
+            .inv
+            .iter()
+            .filter(|s| s.res == wood)
+            .collect();
+        assert_eq!(inv_wood.len(), 1, "wood stored in its own stack");
+        assert_eq!(inv_wood[0].count, 1);
     }
 }

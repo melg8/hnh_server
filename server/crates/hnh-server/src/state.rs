@@ -515,6 +515,25 @@ pub struct InvStack {
     pub label: &'static str,
 }
 
+impl InvStack {
+    /// Merge `added` into `self` (same resource only, caller checks).
+    /// Counts add; quality re-averages as a count-weighted integer
+    /// average, the same convention as craft output quality
+    /// (crafting-and-building.md, loftar sum(q*w)/sum(w)). The stacking
+    /// policy itself is server policy per items-and-quality.md; this is
+    /// the chosen policy and the counts are conserved exactly.
+    pub fn absorb(&mut self, added: &InvStack) {
+        debug_assert_eq!(self.res, added.res, "absorb requires same resource");
+        let total = self.count + added.count;
+        if total == 0 {
+            return; // nothing to average; keep stacks as-is
+        }
+        let qsum = self.ql as u32 * self.count + added.ql as u32 * added.count;
+        self.ql = ((qsum / total).clamp(1, 255)) as u8;
+        self.count = total;
+    }
+}
+
 /// Character vitals and attributes (docs/mechanics/character/*).
 #[derive(Debug, Clone)]
 pub struct Player {
