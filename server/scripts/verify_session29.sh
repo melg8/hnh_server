@@ -94,7 +94,7 @@ rg -q "save key not local: querying cluster peers" /tmp/server_${TAG}_n1.log \
   || fail "node1 did not issue a CharQuery"
 rg -q "char migration received: entering world" /tmp/server_${TAG}_n1.log \
   || fail "node1 did not receive CharData"
-rg -q "char query: migrating snapshot to peer" /tmp/server_${TAG}_n0.log \
+rg -q "char query: serving snapshot to peer" /tmp/server_${TAG}_n0.log \
   || fail "node0 did not migrate the snapshot"
 echo "PHASE3 VERDICT: OK (cross-node character migration over the mesh)"
 stop_cluster
