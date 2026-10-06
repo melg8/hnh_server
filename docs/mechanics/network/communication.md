@@ -68,18 +68,23 @@ a server decision verified against the client sources.
 
 1. Player A clicks player B's gob (mapview `click` carrying a gob id).
 2. The server opens A a flower menu (`sm`) with options
-   `["Invite to party", "Cancel"]`. Refusals are delivered as chat system
-   lines before any menu opens: self-invite, target already in a party,
-   the clicker is a member but not the leader (`Only the party leader can
-   invite.`), or the clicker's party is full.
-3. A confirms (petal 0). The server opens B a flower menu with
+   `["Invite to party", "Fight", "Cancel"]` when the invite applies
+   (session 39 added the Fight petal, which arms the melee duel - see
+   docs/mechanics/combat/combat-system.md). When the invite does NOT
+   apply (target already in a party, clicker not the leader of a full
+   party) the menu is NOT refused outright anymore: it opens as
+   `["Fight", "Cancel"]`, because the duel is never gated by party
+   state. Self-clicks still never open a menu.
+3. A confirms the invite (petal 0). The server opens B a flower menu with
    `["Join <A>'s party", "Decline"]` and sends B the system line
    `"<A> invites you to join their party."`.
 4. B confirms (petal 0): the party is created (A becomes leader) or
    extended; the state broadcast below fires; B gets `You joined the
    party.` and A gets `"<B> joined your party."`.
 5. Decline/cancel (any other petal or a closed menu) just closes the
-   client menu; no state changes.
+   client menu; no state changes. A click on a CROSS-NODE guest player
+   opens a Fight-only menu (`["Fight", "Cancel"]`) - party membership
+   has no cross-node relay.
 
 A and B must both still be partyless when the accept lands; stale offers
 re-check both sides and refuse with a system line instead of corrupting
