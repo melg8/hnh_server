@@ -277,13 +277,6 @@ pub struct Game {
     ///   player index + 1, first (lowest) player index wins - the same
     ///   "first engaged player" semantics the linear `find` had.
     combat_ix: CombatIndex,
-    /// Cell-indexed viewer candidates (see `ViewerIndex`); rebuilt once
-    /// per tick before the movement phase, read by the LINBEG, pose and
-    /// FX fan-outs instead of a full `sessions` scan per event.
-    viewer_ix: ViewerIndex,
-    /// Scratch session-id list for the viewer fan-outs (taken/restored
-    /// across helper calls; `viewers_of_slot` fills it).
-    viewer_scratch: Vec<SessionId>,
     /// Milliseconds of online time per granted LP (skills.rs accrual;
     /// precomputed once from HNH_LP_RATE, u64::MAX = disabled).
     lp_ms_per_lp: u64,
@@ -339,20 +332,6 @@ struct CombatIndex {
     /// Scratch snapshot of session ids for the 5 Hz fight-bar streaming
     /// pass (rows mutate mid-loop through `sessions.get_mut`).
     bar_sids: Vec<SessionId>,
-}
-
-/// Viewer fan-out index (session 43): session id -> the VisIndex cell of
-/// its player's position. Rebuilt ONCE per tick in a single O(sessions)
-/// pass; a gob's viewer candidates are the sessions in the 5x5 cell
-/// neighborhood of the gob position (VIEW_RADIUS 300 + at most one
-/// tick's 50-subtile drift fit inside two 250-tile cells on each axis),
-/// and the exact `visible.contains` filter stays authoritative per
-/// candidate. Replaces the per-event full `sessions` scan in the
-/// LINBEG / pose / FX fan-outs (measured 600-1100 us per event at the
-/// 1000-bot load scale: cache-miss traversal of every large SessionOut).
-#[derive(Default)]
-struct ViewerIndex {
-    by_cell: HashMap<(i32, i32), Vec<SessionId>>,
 }
 
 /// Movement fan-out square half-width (subtiles): a still-visible mover
@@ -643,8 +622,6 @@ impl Game {
             start_scratch: crate::move_batch::MoveBatch::default(),
             fan_scratch: Vec::new(),
             combat_ix: CombatIndex::default(),
-            viewer_ix: ViewerIndex::default(),
-            viewer_scratch: Vec::new(),
             lp_ms_per_lp: {
                 // HNH_LP_RATE scales the passive accrual (skills.rs);
                 // malformed values disable accrual rather than wedge boot.
@@ -8365,52 +8342,6 @@ impl Game {
     // Simulation tick
     // ------------------------------------------------------------------
 
-    /// Rebuild the cell-indexed viewer candidates (one O(sessions) pass;
-    /// see `ViewerIndex`). Sessions whose player is not in the world see
-    /// nothing and are skipped.
-    fn rebuild_viewer_index(&mut self) {
-        let mut ix = std::mem::take(&mut self.viewer_ix);
-        ix.by_cell.clear();
-        for (&sid, out) in self.sessions.iter() {
-            let Some(pslot) = out.player_gob.and_then(|g| self.world.gobs.get(g)) else {
-                continue;
-            };
-            let (x, y) = self.world.gobs.pos[pslot];
-            ix.by_cell
-                .entry(crate::visidx::cell_of(x, y))
-                .or_default()
-                .push(sid);
-        }
-        self.viewer_ix = ix;
-    }
-
-    /// Collect the exact viewer session ids of the gob at `slot` into
-    /// `out` (scratch reuse; clear + fill). Candidates come from the 5x5
-    /// cell neighborhood of the gob position, the authoritative filter is
-    /// the candidate's own `visible.contains`. `cand_out` accumulates the
-    /// candidate count for the perf diagnostics.
-    fn viewers_of_slot(&self, slot: usize, out: &mut Vec<SessionId>, cand_out: &mut u64) {
-        out.clear();
-        let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
-        let (gx, gy) = self.world.gobs.pos[slot];
-        let (cgx, cgy) = crate::visidx::cell_of(gx, gy);
-        for dx in -2..=2 {
-            for dy in -2..=2 {
-                let Some(sids) = self.viewer_ix.by_cell.get(&(cgx + dx, cgy + dy)) else {
-                    continue;
-                };
-                for &sid in sids {
-                    *cand_out += 1;
-                    if let Some(o) = self.sessions.get(&sid) {
-                        if o.visible.contains(&id) {
-                            out.push(sid);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     fn tick(&mut self) {
         self.world.tick += 1;
         self.world.perf.move_blocks = 0;
@@ -8422,7 +8353,6 @@ impl Game {
         self.world.perf.mv_pose_us = 0;
         self.world.perf.mv_calls = 0;
         self.world.perf.ix_cand_n = 0;
-        self.rebuild_viewer_index();
         // Cluster character migrations: re-broadcast unanswered queries on
         // a fixed cadence (a link still negotiating buffers the retry and
         // answers once the mesh converges); past the deadline, enter with
@@ -8699,30 +8629,35 @@ impl Game {
                         m.uint8(MSG_OBJDATA);
                         m
                     });
-                    if let Some((global, patch_off)) = batch.block_patch(i) {
-                        // Session-local wire id: resolve the name from the
-                        // game-global table, allocate the session wire id
-                        // (first use also queues the RMSG_RESID
-                        // announcement), rewrite the 2 placeholder bytes,
-                        // ship the per-session copy.
-                        if let Some(name) = self.world.res.name(global) {
-                            let w = out.res.wire_named(global, name);
-                            if let Some((rn, rv)) = out.res.pending_announce(w) {
-                                out.send(crate::resources::wdg::resid(w, rn, rv));
-                                out.res.mark_announced(w);
-                            }
+                    match batch.block_patch(i) {
+                        Some(patch) => {
+                            // Session-local wire ids: resolve the name from
+                            // the game-global table, allocate the session
+                            // wire id (first use also queues the RMSG_RESID
+                            // announcement), rewrite the placeholder bytes,
+                            // ship the per-session copy.
                             let mut patched = bytes.to_vec();
-                            let o = patch_off as usize;
-                            patched[o..o + 2].copy_from_slice(&w.to_le_bytes());
+                            for (global, off) in patch.entries() {
+                                if let Some(name) = self.world.res.name(*global) {
+                                    let w = out.res.wire_named(*global, name);
+                                    if let Some((rn, rv)) = out.res.pending_announce(w) {
+                                        out.send(crate::resources::wdg::resid(w, rn, rv));
+                                        out.res.mark_announced(w);
+                                    }
+                                    let o = *off as usize;
+                                    patched[o..o + 2].copy_from_slice(&w.to_le_bytes());
+                                }
+                            }
                             m.bytes(&patched);
                             if fin {
                                 Self::record_unacked(out, id, frame, patched);
                             }
                         }
-                    } else {
-                        m.bytes(bytes);
-                        if fin {
-                            Self::record_unacked(out, id, frame, bytes.to_vec());
+                        None => {
+                            m.bytes(bytes);
+                            if fin {
+                                Self::record_unacked(out, id, frame, bytes.to_vec());
+                            }
                         }
                     }
                 }
@@ -8794,20 +8729,27 @@ impl Game {
             frame,
             crate::visidx::cell_of(px, py),
             true,
-            Some((gi, patch_off)),
+            Some(crate::move_batch::Patch::One {
+                slot: [(gi, patch_off)],
+            }),
             &m.finish(),
         );
         self.world.perf.fx_batch_n += 1;
     }
 
-    /// Resolve and stream one composited-drawable pose (OD_LAYERS) to
-    /// every viewer of the gob at `slot`. The layer set derives from the
-    /// gob kind + current pose state (moving -> walking set of `facing`,
-    /// standing set otherwise; players 6 parts, animals 1 part). No frame
+    /// Resolve and stream one composited-drawable pose (OD_LAYERS) for
+    /// the gob at `slot`. The layer set derives from the gob kind +
+    /// current pose state (moving -> walking set of `facing`, standing
+    /// set otherwise; players 6 parts, animals 1 part). No frame
     /// streaming: each directional resource embeds its own animation, so
-    /// this fires only on pose/direction CHANGES. Resources unseen by a
-    /// session are announced first; the block lands in `unacked` so late
-    /// joiners re-ack it like any other frame-carrying update.
+    /// this fires only on pose/direction CHANGES.
+    ///
+    /// Session 44: the block encodes ONCE with every wire id as a global
+    /// index placeholder (Patch::Many) and fans out through the packed
+    /// start batch at tick end; the fan-out resolves each session's wire
+    /// ids, first-announces unseen resources, and lands the patched
+    /// block in `unacked`. The old per-viewer encode/announce loop was
+    /// the top fan-out cost (840-1370 us/call at the 1000-bot scale).
     fn stream_pose(&mut self, slot: usize) {
         let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
         let kind = self.world.gobs.kind[slot];
@@ -8833,50 +8775,32 @@ impl Game {
         };
         let base_global = self.world.res.intern(base_name);
         let frame_i32 = self.world.gobs.frame[slot] as i32;
-        let mut viewers = std::mem::take(&mut self.viewer_scratch);
-        let mut cand = 0u64;
-        self.viewers_of_slot(slot, &mut viewers, &mut cand);
-        for &v in viewers.iter() {
-            let Some(out) = self.sessions.get_mut(&v) else {
-                continue;
-            };
-            // Announce every pose resource this session has not seen.
-            let mut announces: Vec<Vec<u8>> = Vec::new();
-            let mut wire_ids: Vec<u16> = Vec::with_capacity(layer_names.len() + 1);
-            let bw = out.res.wire_named(base_global, base_name);
-            if let Some((n, ver)) = out.res.pending_announce(bw) {
-                announces.push(wdg::resid(bw, n, ver));
-                out.res.mark_announced(bw);
-            }
-            wire_ids.push(bw);
-            for n in layer_names.iter() {
-                let gi = self.world.res.intern(n);
-                let w = out.res.wire_named(gi, n);
-                if let Some((rn, rv)) = out.res.pending_announce(w) {
-                    announces.push(wdg::resid(w, rn, rv));
-                    out.res.mark_announced(w);
-                }
-                wire_ids.push(w);
-            }
-            for a in announces {
-                out.send(a);
-            }
-            let mut m = MessageBuf::new();
-            m.uint8(MSG_OBJDATA).uint8(0).int32(id).int32(frame_i32);
-            m.uint8(OD_LAYERS).uint16(wire_ids[0]);
-            for w in &wire_ids[1..] {
-                m.uint16(*w);
-            }
-            m.uint16(65535).uint8(OD_END);
-            let block = m.finish();
-            out.send_raw(block.clone());
-            out.unacked
-                .entry(id)
-                .or_default()
-                .insert(self.world.gobs.frame[slot], block);
+        let (px, py) = self.world.gobs.pos[slot];
+        // Headerless block: [fl][id][frame][OD_LAYERS][wire u16 xN][ffff]
+        // [ff]; every wire slot is a global-index placeholder recorded as
+        // a patch entry (offset 9 = fl+id+frame, then +1 for OD_LAYERS).
+        let mut m = MessageBuf::new();
+        m.uint8(0).int32(id).int32(frame_i32).uint8(OD_LAYERS);
+        let mut entries: Vec<(u16, u32)> = Vec::with_capacity(layer_names.len() + 1);
+        entries.push((base_global, m.len() as u32));
+        m.uint16(base_global);
+        for n in layer_names.iter() {
+            let gi = self.world.res.intern(n);
+            entries.push((gi, m.len() as u32));
+            m.uint16(gi);
         }
-        self.viewer_scratch = viewers;
-        self.world.perf.ix_cand_n += cand;
+        m.uint16(65535).uint8(OD_END);
+        let t_p = Instant::now();
+        self.start_scratch.push_patched(
+            id,
+            self.world.gobs.frame[slot],
+            crate::visidx::cell_of(px, py),
+            true,
+            Some(crate::move_batch::Patch::Many { entries }),
+            &m.finish(),
+        );
+        let perf = &mut self.world.perf;
+        perf.mv_pose_us += t_p.elapsed().as_micros() as u64;
     }
 
     /// Stream the Equipment-doll avatar attribute (OD_AVATAR) of the
@@ -11242,6 +11166,9 @@ mod tests {
         let epry = g.epry_window(1).unwrap();
         g.on_wdgmsg(1, epry, "drop", vec![hnh_proto::ListArg::Int(2)]);
         assert!(g.world.players[pidx].equip[2].is_some());
+        // The pose re-stream ships through the packed start batch at tick
+        // end (session 44).
+        g.tick();
 
         // The OD_LAYERS re-stream must carry the pants wire id, and the
         // doll attribute (OD_AVATAR) must be pushed with it too.
@@ -11270,6 +11197,7 @@ mod tests {
         while raw.try_recv().is_ok() {}
         g.on_wdgmsg(1, epry, "take", vec![hnh_proto::ListArg::Int(2)]);
         assert!(g.world.players[pidx].equip[2].is_none());
+        g.tick();
         let mut streamed_after_take = 0;
         while let Ok(block) = raw.try_recv() {
             for (op, _) in objdata_layer_lists(&block) {
@@ -12331,6 +12259,66 @@ mod tests {
             rec.unwrap()[14..16],
             w.to_le_bytes(),
             "unacked copy carries the PATCHED wire id"
+        );
+    }
+
+    /// Session 44: the pose (OD_LAYERS) block encodes once with every
+    /// wire slot as a global-index placeholder (Patch::Many); the fan-out
+    /// rewrites ALL of them to the session's wire ids and lands the
+    /// patched block in `unacked`.
+    #[tokio::test]
+    async fn batch_pose_patches_all_wire_ids() {
+        let (mut g, _rx, mut raw) = entered_game("batchpose");
+        let pgob = g.sessions[&1].player_gob.expect("player gob");
+        let slot = g.world.gobs.get(pgob).expect("slot");
+        g.stream_pose(slot);
+        g.tick();
+        // Drain the datagrams; find the LAYERS block for the player gob.
+        let mut layers: Option<Vec<u16>> = None;
+        while let Ok(p) = raw.try_recv() {
+            assert_eq!(p[0], MSG_OBJDATA);
+            let mut off = 1usize;
+            while off + 11 <= p.len() {
+                let id = i32::from_le_bytes(p[off + 1..off + 5].try_into().unwrap());
+                let od = p[off + 9];
+                if id == pgob && od == hnh_proto::consts::OD_LAYERS {
+                    // Collect the wire ids up to the 65535 terminator.
+                    let mut ids: Vec<u16> = Vec::new();
+                    let mut q = off + 10;
+                    loop {
+                        let w = u16::from_le_bytes(p[q..q + 2].try_into().unwrap());
+                        q += 2;
+                        if w == 65535 {
+                            break;
+                        }
+                        ids.push(w);
+                    }
+                    layers = Some(ids);
+                }
+                off = match p[off..]
+                    .iter()
+                    .position(|&b| b == hnh_proto::consts::OD_END)
+                {
+                    Some(rel) => off + rel + 1,
+                    None => p.len(),
+                };
+            }
+        }
+        let ids = layers.expect("LAYERS block reached the viewer");
+        assert!(!ids.is_empty(), "pose layers present");
+        // Every wire id must be the session's own allocation for its
+        // resource (a placeholder global index would be garbage here).
+        let out = g.sessions.get(&1).unwrap();
+        for w in &ids {
+            assert!(
+                out.res.wire_is_local(*w),
+                "wire id {w} must be session-local"
+            );
+        }
+        // The patched block is retransmittable.
+        assert!(
+            out.unacked.contains_key(&pgob),
+            "pose block recorded for OBJACK"
         );
     }
 

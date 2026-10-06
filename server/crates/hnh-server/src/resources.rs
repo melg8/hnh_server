@@ -145,6 +145,14 @@ impl ResTable {
         self.wire.len()
     }
 
+    /// Whether a wire id was allocated by THIS session (i.e. it indexes
+    /// the session table, not the game-global placeholder space). The
+    /// batch fan-out test asserts every streamed wire id passes this.
+    #[cfg(test)]
+    pub fn wire_is_local(&self, w: u16) -> bool {
+        (w as usize) < self.wire.len()
+    }
+
     /// Allocate (or fetch) the session-local wire id for a game-global
     /// index, remembering the resource name for RMSG_RESID announcements.
     pub fn wire_named(&mut self, global: u16, name: &'static str) -> u16 {

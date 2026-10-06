@@ -38,15 +38,33 @@ pub struct BlockRef {
     /// Progress frames are superseded by the next tick's frame and are
     /// deliberately never recorded.
     pub fin: bool,
-    /// Per-session wire-id patch (session 44): the block embeds a
-    /// session-local resource wire id at `patch_off` (a uint16 LE field),
-    /// encoded from the placeholder global index `patch_global`. Each
-    /// receiving session rewrites those 2 bytes with its own wire id at
-    /// fan-out time (and first-announces the resource there) - this lets
-    /// one FX overlay block serve every viewer even though wire ids are
-    /// session-local. `None` for blocks with no session-local fields
-    /// (movement blocks are pure gob data).
-    pub patch: Option<(u16, u32)>,
+    /// Per-session wire-id patch (session 44): the block embeds
+    /// session-local resource wire ids at fixed byte offsets, encoded
+    /// from game-global index placeholders. Each receiving session
+    /// rewrites those bytes with its own wire ids at fan-out time (and
+    /// first-announces each resource there) - one encoded block serves
+    /// every viewer even though wire ids are session-local. `None` for
+    /// blocks with no session-local fields (movement blocks are pure gob
+    /// data).
+    pub patch: Option<Patch>,
+}
+
+/// The session-local wire id patches of one block: a single overlay wire
+/// (`One`, no allocation) or a multi-slot layer list (`Many`, the pose
+/// blocks' base + every layer wire).
+pub enum Patch {
+    One { slot: [(u16, u32); 1] },
+    Many { entries: Vec<(u16, u32)> },
+}
+
+impl Patch {
+    /// Iterate `(global index, byte offset)` pairs.
+    pub fn entries(&self) -> &[(u16, u32)] {
+        match self {
+            Patch::One { slot } => slot.as_slice(),
+            Patch::Many { entries } => entries.as_slice(),
+        }
+    }
 }
 
 /// Per-tick packed movement blocks + cell index. Reused across ticks:
@@ -82,16 +100,15 @@ impl MoveBatch {
         self.push_patched(id, frame, cell, fin, None, block);
     }
 
-    /// Append a block carrying a session-local wire id (see
-    /// `BlockRef::patch`): `patch` is `(global index, byte offset of the
-    /// uint16 LE wire id inside `block`)`.
+    /// Append a block carrying session-local wire ids (see
+    /// `BlockRef::patch`).
     pub fn push_patched(
         &mut self,
         id: GobId,
         frame: u32,
         cell: (i32, i32),
         fin: bool,
-        patch: Option<(u16, u32)>,
+        patch: Option<Patch>,
         block: &[u8],
     ) {
         let off = self.data.len() as u32;
@@ -127,8 +144,8 @@ impl MoveBatch {
 
     /// The block's session-local wire-id patch, if any.
     #[inline]
-    pub fn block_patch(&self, idx: u32) -> Option<(u16, u32)> {
-        self.blocks[idx as usize].patch
+    pub fn block_patch(&self, idx: u32) -> Option<&Patch> {
+        self.blocks[idx as usize].patch.as_ref()
     }
 
     /// Block bytes by index (borrow from the packed buffer).
