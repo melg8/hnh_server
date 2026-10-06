@@ -192,14 +192,32 @@ All of them share the same server shape: an inventory (per-gob item store), a fu
   `sum(q*w)/sum(w)` with w = units per input, softcapped by the
   crafter's relevant attribute as the skill stand-in (no skill tree
   yet), halving when the attribute is below the average.
-- Recipe data this session: `stone axe` = branch x1 + stone x1 ->
-  axe x1 (pagina ad id "axe"); `roasted meat` is a dynamic recipe keyed
+- Recipe data through session 35: `stone axe` = branch x1 + stone x1 ->
+  axe x1 (pagina ad id "axe"); `hide cloak` = raw cow hide x2 ->
+  cloak x1 (ad "hcloak"); `roasted meat` is a dynamic recipe keyed
   by the raw item's server label through the ROAST_MAP table
   (paginae/craft/roastmeat, ad = ["craft", "roast"]).
+- Session 36 adds the bow chain with RoB-verified quality models:
+  `wooden bow` = branch x4 + string x1 -> bow x1 (ad "woodbow"),
+  quality `(qBranches + qString)/2` type-weighted [1, 1] (RoB
+  Legacy:Bow; the Fandom Marksmanship page repeats the same worked
+  example (50 + 40)/2), softcapped by Marksmanship (`ranged` skill
+  value); `stone arrow` = stone x1 + branch x2 -> arrow-stone x10 (ad
+  "stonearrow") and `bone arrow` = bone x1 + branch x2 -> arrow-bone
+  x10 (ad "bonearrow"), both type-weighted [1, 2] (branch heavier -
+  RoB Legacy:Quality's arrow example) and softcapped by Survival
+  (`survive`). Batch outputs bundle as ONE stack per craft.
+- Session 36 quality engine: `Recipe.q_weights` selects between the
+  pre-36 UNIT-weighted average (w = consumed units, kept for axe and
+  hcloak) and the RoB TYPE-weighted average (each input type first
+  averages its own consumed units, then types combine as
+  `sum(q_t * w_t)/sum(w_t)`).
 - Labels travel with the item: the server tooltip string is the
   fep.conf lookup key end-to-end (inventory widget, ground drop, back).
-- Starter kit policy: fresh characters spawn with branch x2, stone x2,
-  beef x1 so the loop is playable; the legacy server granted nothing.
+- Starter kit policy (session 36): fresh characters spawn with branch
+  x6, stone x4, string x2, beef x1 (plus farming seeds and starter
+  clothing) so the entire bow chain is playable out of the box; the
+  legacy server granted nothing.
 
 ## Server implementation notes (this repo, session 15)
 
@@ -261,6 +279,16 @@ All of them share the same server shape: an inventory (per-gob item store), a fu
   res pack. Remaining unknown: whether the legacy server reserved any
   shared verbs alongside per-object ids.
 - **Per-recipe data.** Ingredient weights `w_i`, tool weights, and softcap attribute pairs per recipe are game data; the wiki documents examples (stone axe, boards, leather, metal products) but not the full legacy table. Extract from legacy resources/wiki object pages as they are digitized.
+- **Bow-chain unit counts and batch size (session 36).** The
+  ingredient TYPES, the per-type quality formulas, and the softcaps
+  (Marksmanship for the bow, Survival for the arrows) are RoB-verified;
+  the UNIT COUNTS (4 branch + 1 string per bow; 1 tip + 2 branch for a
+  10-arrow batch) could NOT be verified - ringofbrodgar.com and the
+  fandom mirrors sit behind a Cloudflare interstitial this session, and
+  archive.org was unreachable from the sandbox. The counts are chosen
+  server policy (isolated in the RECIPES table, one edit away) and must
+  be reconciled against Legacy:Bow / Legacy:Stone Arrow / Legacy:Bone
+  Arrow when a source is reachable.
 - **Legacy smelter/kiln/finery numbers.** Fuel amounts, load sizes, and durations quoted above for the smelter are current-world values; the legacy pages exist (Category:Legacy Structures) but were empty or not yet fetched. Fetch Legacy:Ore Smelter, Legacy:Kiln, Legacy:Finery Forge and reconcile.
 - **Craft All stop reporting.** Whether legacy servers sent an error widget/message when batch crafting stopped early, or stopped silently. Determine from a live capture (watch for `RMSG_NEWWDG` text/error widgets after `make 1`).
 - **Pop refresh semantics.** The makewindow `pop` appears to be sent once per window open; whether ingredient counts ever update dynamically (a second `pop` rebuilding the lists) needs a capture of a long-lived window.

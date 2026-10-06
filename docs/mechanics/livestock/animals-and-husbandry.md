@@ -382,6 +382,14 @@ required; Legacy:Hunting). Rules:
 
 ## Open questions (animals)
 
+- Session 36 bone drops: every species now drops `gfx/invobjs/bone` on
+  death (Deer/Aurochs/Cow/Boar/Wolf x2, Fox/Hare x1) so the Bone Arrow
+  recipe has an in-world source. The legacy butcher table above carries
+  bigger numbers (Bone Material x6 deer/cattle, x4 boar, x2 fox), but
+  this server's death-drop policy scales the whole loot table down
+  (meat x3/x4 against legacy x10) and the bone counts follow the same
+  proportion; reconcile all counts against the Legacy butcher pages
+  when a source is reachable.
 - Exact aggro radii and leash/disengage distances per species; the only numeric hint
   is the union client's 100-unit (about 9-tile) circle for boar/bear
   (`src/haven/MapView.java`). Determine by observation or emulator prior art.

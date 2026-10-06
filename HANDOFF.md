@@ -2000,3 +2000,112 @@ NEXT (handoff):
   foreign cell still spawn a local-only gob on the builder's node (the
   session-35 transfer pass deliberately handles drops only - plans
   mutate through the build flow, not a stateless transfer).
+
+## 2026-10-06 - Session 36: the bow chain - woodbow/stonearrow/bonearrow recipes, bone loot, carrying pose
+The session-34/35 carried deliverable "craft pagina ad->action wiring
+for remaining recipes" advances with the full bow chain, and the
+"carrying-pose state for bows" NEXT item is CLOSED.
+
+WHAT:
+
+- WIKI VERIFICATION FIRST (the "wiki-verified numbers only" rule).
+  ringofbrodgar.com and the fandom mirrors sit behind a Cloudflare
+  interstitial that also defeats the headless browser, and archive.org
+  is unreachable from this sandbox, so numbers were recovered through
+  search-index snippets: RoB Legacy:Bow gives the quality formula
+  "(qBranches + qString)/2, Softcapped by Marksmanship" (the Fandom
+  Marksmanship page repeats the worked example (50 + 40)/2); RoB
+  Legacy:Quality (already cited in crafting-and-building.md) gives the
+  arrow example as a weighted average with a HEAVIER WEIGHT ON BRANCH,
+  Survival softcapping arrows. The legacy forum (havenandhearth.com,
+  phpBB - reachable) confirms string is plant-fiber-derived and bows/
+  bone-arrow quivers existed in the 2011 legacy world. The UNIT COUNTS
+  (4 branch + 1 string per bow; 1 tip + 2 branch per 10-arrow batch)
+  could NOT be verified from any reachable source - they are chosen
+  server policy, isolated in the RECIPES table and recorded in
+  crafting-and-building.md Open questions for reconciliation.
+
+- RECIPE.Q_WEIGHTS (the quality engine change). Recipe gained a
+  per-INPUT-TYPE weight slice. Empty = the pre-36 UNIT-weighted
+  average (w = consumed units; kept for axe and hcloak so their
+  behavior is unchanged). Non-empty = the RoB TYPE-weighted model:
+  each input TYPE first averages its own consumed units
+  (lowest-quality-first consumption is unchanged), then the type
+  averages combine as sum(q_t * w_t)/sum(w_t). This is what makes
+  (qBranches + qString)/2 true for a 4:1 unit mix. craft_once
+  accumulates (qsum, units) per input index alongside the legacy flat
+  unit list; the softcap halving (q + attr)/2 is unchanged and now
+  keys "ranged" (Marksmanship) for the bow and "survive" (Survival)
+  for the arrows - both live in attrs as skill values (skills.rs
+  SKILL_VALUES), so no new attribute plumbing was needed.
+
+- THREE RECIPES (craft.rs RECIPES, resources verified in the served
+  pack: gfx/invobjs/{bow,arrow-stone,arrow-bone,string,branch,stone,
+  bone} + paginae/craft/{woodbow,stonearrow,bonearrow} with ad
+  ["craft", id]): woodbow (branch x4 + string x1 -> bow x1, weights
+  [1,1], softcap ranged), stonearrow (stone x1 + branch x2 ->
+  arrow-stone x10, weights [1,2], softcap survive), bonearrow (bone x1
+  + branch x2 -> arrow-bone x10, weights [1,2], softcap survive).
+  Batch outputs bundle as ONE stack per craft (count 10). Paginae are
+  pushed automatically by the existing `for r in RECIPES` loop at
+  world entry; no MenuGrid changes were needed.
+
+- BONE LOOT (state.rs Species::loot). Every species now drops
+  gfx/invobjs/bone on death (Deer/Aurochs/Cow/Boar/Wolf x2, Fox/Hare
+  x1) so the bone-arrow recipe has an in-world source. Counts follow
+  the server's scaled-down death-drop policy (meat x3/x4 against
+  legacy butcher x10); the legacy butcher numbers are already in
+  animals-and-husbandry.md and the delta is recorded in its Open
+  questions. Species::ALL (#[cfg(test)]) added for the roster sweep.
+
+- CARRYING POSE (equip.rs PIECES, closes the handoff item). The pack
+  ships dedicated two-handed bow layers: gfx/borka/eq-bow/{standing,
+  walking,dead}/arm/carrying/{left,right}-{d}.res. The new
+  piece!("gfx/invobjs/bow", "eq-bow", ...) entry maps both carrying
+  templates for every octant, standing and walking. The templates
+  carry no {hand} (idle/banzai) placeholder, so the existing
+  doll-set derivation keeps the front carrying pair on the paperdoll
+  unchanged - no doll special case needed. Any equipment slot works
+  (slot semantics stay server-side policy).
+
+- STARTER KIT (game.rs, dev policy). Fresh characters now spawn with
+  branch x6, stone x4, string x2 (was branch x2, stone x2) plus the
+  existing meat/seeds/clothing, so one Wooden Bow AND one Stone Arrow
+  batch are craftable out of the box with zero foraging.
+
+EVIDENCE: 200 unit tests green (6 new: woodbow_quality_is_type_weighted
+asserts q17 = softcap((40+10)/2, ranged=10) - the pre-36 unit math
+would give 22, so the assert distinguishes the models;
+stonearrow_bundles_ten_and_branch_weighs_double asserts a 10-batch at
+q20 = softcap((10*1+40*2)/3, survive=10); bow_equip_renders_carrying_
+pose asserts the eq-bow carrying layers for standing, walking, and the
+doll; starter_kit_covers_the_bow_chain asserts kit counts + pagina
+registration; bow_chain_recipes_are_consistent sweeps Species::ALL for
+bone loot and checks weights/softcaps; q_note_marks_type_weighted_
+recipes pins the provenance note). One existing test updated for the
+new starter kit (static_ack branch stack 2 -> 6). clippy -D warnings
+clean (three findings fixed: dead-code q_note/ALL now #[cfg(test)],
+useless u32::from dropped), fmt clean. scripts/verify_session36.sh
+(four phases: bow-units, full, lint, boot - the release binary boots
+with the extended tables): SESSION36 VERIFY: OK.
+
+NOT DONE THIS SESSION (rolled to NEXT):
+- Bow SHOOTING: attack rolls for a bow-equipped player against a
+  target at range (aim time, arrow consumption, damage 75*sqrt(q/10)
+  from the Fandom Bow page) - the crafting/equip side is done, the
+  combat use is not.
+- Quiver container (gfx/invobjs/quiver exists in the pack).
+- Real-client e2e re-run against the biased session driver (carried
+  from sessions 34/35; still unverified on the GL client).
+- Bow-chain unit counts reconciliation against RoB when a source is
+  reachable (see crafting-and-building.md Open questions).
+
+NEXT (handoff):
+- bow shooting mechanics (docs/mechanics/combat/combat-system.md is
+  the entry point; the RoB aim-speed note "a Ranger's Bow aims at half
+  the speed of a Wooden Bow and one-sixth the speed of a Sling" is
+  already recovered in this session's research).
+- real-client e2e re-run (carried).
+- craft pagina ad->action wiring for further recipes beyond the bow
+  chain (straw basket / wooden bowl are the natural next containers -
+  paginae and invobj resources exist in the pack).

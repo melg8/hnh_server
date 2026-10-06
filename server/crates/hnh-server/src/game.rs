@@ -1338,8 +1338,13 @@ impl Game {
         // Labels on food keep the fep.conf identity for the eat flow.
         if self.world.players[player_idx].inv.is_empty() {
             let kit: &[(&str, u32, u8, &'static str)] = &[
-                ("gfx/invobjs/branch", 2, 10, ""),
-                ("gfx/invobjs/stone", 2, 10, ""),
+                // Session 36: 6 branches + 2 stones + 2 string let a fresh
+                // character craft one Wooden Bow (4 branch + 1 string) and
+                // one batch of Stone Arrows (1 stone + 2 branch) out of the
+                // box - the whole bow chain is playable immediately.
+                ("gfx/invobjs/branch", 6, 10, ""),
+                ("gfx/invobjs/stone", 4, 10, ""),
+                ("gfx/invobjs/string", 2, 10, ""),
                 ("gfx/invobjs/meat", 1, 10, "Beef"),
                 // Farming starter seeds: the plow pagina is pushed to
                 // every session, so the full plant-grow-harvest loop is
@@ -6804,8 +6809,12 @@ impl Game {
         }
         // Consume lowest-quality-first so Craft All rolls per-iteration
         // quality from the actually consumed items (crafting doc).
+        // `consumed` keeps the flat unit list (pre-36 unit weighting);
+        // `per_type` additionally accumulates (qsum, units) per input
+        // TYPE for the RoB Legacy:Quality type-weighted formula.
         let mut consumed: Vec<(u8, u32)> = Vec::new(); // (ql, units)
-        for (resname, need) in recipe.inputs {
+        let mut per_type: Vec<(u32, u32)> = vec![(0, 0); recipe.inputs.len()];
+        for (ti, (resname, need)) in recipe.inputs.iter().enumerate() {
             let gidx = self.world.res.intern(resname);
             let mut remaining = *need;
             while remaining > 0 {
@@ -6832,14 +6841,32 @@ impl Game {
                 let take = remaining.min(stack.count);
                 stack.count -= take;
                 consumed.push((stack.ql, take));
+                per_type[ti].0 += u32::from(stack.ql) * take;
+                per_type[ti].1 += take;
                 remaining -= take;
             }
         }
         self.world.players[pidx].inv.retain(|s| s.count > 0);
-        // Weighted-average output quality (loftar: sum(q*w)/sum(w)).
-        let total_w: u32 = consumed.iter().map(|(_, w)| w).sum();
-        let qsum: u32 = consumed.iter().map(|(q, w)| *q as u32 * w).sum();
-        let mut q = (qsum.checked_div(total_w).unwrap_or(10) as i32).max(1);
+        // Output quality. With per-type weights (RoB Legacy:Quality):
+        // each input TYPE first averages its own consumed units, then the
+        // type averages combine as sum(q_t * w_t)/sum(w_t). Empty
+        // q_weights keeps the pre-36 behavior: every consumed UNIT weighs
+        // equally across types.
+        let mut q = if recipe.q_weights.is_empty() {
+            let total_w: u32 = consumed.iter().map(|(_, w)| w).sum();
+            let qsum: u32 = consumed.iter().map(|(q, w)| u32::from(*q) * w).sum();
+            (qsum.checked_div(total_w).unwrap_or(10) as i32).max(1)
+        } else {
+            let mut qs: u32 = 0;
+            let mut ws: u32 = 0;
+            for (ti, (qsum, units)) in per_type.iter().enumerate() {
+                let w = recipe.q_weights.get(ti).copied().unwrap_or(1);
+                let qt = qsum.checked_div((*units).max(1)).unwrap_or(10);
+                qs += qt * w;
+                ws += w;
+            }
+            (qs.checked_div(ws.max(1)).unwrap_or(10) as i32).max(1)
+        };
         // Softcap by the crafter's relevant attribute (skill stand-in):
         // q = (q + attr)/2 when attr < q (crafting-and-building.md).
         let attr_val = self.world.players[pidx]
@@ -11962,14 +11989,15 @@ mod tests {
         let lp_after = g.world.players[pidx].lp;
         assert_eq!(cur.count, 3, "1@q10 + 2@q20 -> 3 units");
         assert_eq!(cur.ql, 16, "(10*1+20*2)/3 = 16");
-        // The starter kit's branch stack (2) must stay UNTOUCHED: the ack
-        // redirected onto the cursor, not into the inventory.
+        // The starter kit's branch stack (6 since session 36) must stay
+        // UNTOUCHED: the ack redirected onto the cursor, not into the
+        // inventory.
         let inv_branch: Vec<_> = g.world.players[pidx]
             .inv
             .iter()
             .filter(|s| s.res == branch)
             .collect();
-        assert_eq!((inv_branch.len(), inv_branch[0].count), (1, 2));
+        assert_eq!((inv_branch.len(), inv_branch[0].count), (1, 6));
         assert_eq!(
             lp_after,
             lp_before + 5,
@@ -13688,5 +13716,154 @@ mod tests {
             !text.contains("oven"),
             "a successful Light stays silent (parity with the local path)"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Session 36: the bow chain (woodbow / stonearrow / bonearrow)
+    // ------------------------------------------------------------------
+
+    /// Helper: replace a player's inventory with a synthetic stack list.
+    fn set_inv(g: &mut Game, stacks: &[(&'static str, u32, u8)]) {
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        g.world.players[pidx].inv = stacks
+            .iter()
+            .map(|(res, count, ql)| InvStack {
+                res: g.world.res.intern(res),
+                count: *count,
+                ql: *ql,
+                label: "",
+            })
+            .collect();
+    }
+
+    /// Wooden Bow quality follows the RoB type-weighted formula
+    /// `(qBranches + qString)/2` INDEPENDENT of the unit counts: 4
+    /// branches at q40 + 1 string at q10 average the TYPES to 25, then
+    /// the Marksmanship (ranged) softcap (10 here) halves it toward 17.
+    /// The pre-36 unit-weighted math would give 34 -> 22, so the assert
+    /// distinguishes the two models.
+    #[tokio::test]
+    async fn woodbow_quality_is_type_weighted() {
+        let (mut g, _rx, _raw) = entered_game("bowq");
+        set_inv(
+            &mut g,
+            &[("gfx/invobjs/branch", 4, 40), ("gfx/invobjs/string", 1, 10)],
+        );
+        assert!(g.craft_once(1, "woodbow"), "craft must succeed");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let bow_gidx = g.world.res.intern("gfx/invobjs/bow");
+        let bow = g.world.players[pidx]
+            .inv
+            .iter()
+            .find(|s| s.res == bow_gidx)
+            .expect("bow produced");
+        assert_eq!(bow.count, 1);
+        // (40 + 10)/2 = 25, softcap ranged=10: (25 + 10)/2 = 17.
+        assert_eq!(bow.ql, 17, "type-weighted quality with ranged softcap");
+        // All inputs consumed.
+        assert!(
+            !g.world.players[pidx]
+                .inv
+                .iter()
+                .any(|s| s.res == g.world.res.intern("gfx/invobjs/branch")),
+            "branches fully consumed"
+        );
+    }
+
+    /// Stone Arrows come out as ONE batch of ten per craft, and the
+    /// branch type weighs double the stone type (RoB Legacy:Quality
+    /// arrow example): stone q10 + branches q40 -> (10*1 + 40*2)/3 = 30,
+    /// softcap survive (unset -> 10): (30 + 10)/2 = 20.
+    #[tokio::test]
+    async fn stonearrow_bundles_ten_and_branch_weighs_double() {
+        let (mut g, _rx, _raw) = entered_game("arrq");
+        set_inv(
+            &mut g,
+            &[("gfx/invobjs/stone", 1, 10), ("gfx/invobjs/branch", 2, 40)],
+        );
+        assert!(g.craft_once(1, "stonearrow"), "craft must succeed");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let arr_gidx = g.world.res.intern("gfx/invobjs/arrow-stone");
+        let arrows = g.world.players[pidx]
+            .inv
+            .iter()
+            .find(|s| s.res == arr_gidx)
+            .expect("stone arrows produced");
+        assert_eq!(arrows.count, 10, "one craft yields a bundle of ten");
+        // (10*1 + 40*2)/3 = 30, softcap survive=10: (30+10)/2 = 20.
+        assert_eq!(arrows.ql, 20);
+    }
+
+    /// A Wooden Bow dropped into any equipment slot renders the dedicated
+    /// carrying layers (gfx/borka/eq-bow/.../arm/carrying/...) on the
+    /// world drawable AND on the paperdoll doll set.
+    #[tokio::test]
+    async fn bow_equip_renders_carrying_pose() {
+        let (mut g, _rx, _raw) = entered_game("bowpose");
+        set_inv(&mut g, &[("gfx/invobjs/bow", 1, 10)]);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        // Equip via the same slot the epry flow uses (slot 0).
+        let stack = g.world.players[pidx].inv.pop().unwrap();
+        g.world.players[pidx].equip[0] = Some(stack);
+        let names: Vec<&'static str> = g.world.players[pidx]
+            .equip
+            .iter()
+            .flatten()
+            .filter_map(|s| g.world.res.name(s.res))
+            .collect();
+        let world = crate::equip::world_layers(names.iter(), false, 1);
+        assert_eq!(world.len(), 2, "standing front: left + right carrying");
+        assert!(world
+            .iter()
+            .all(|l| l.contains("eq-bow/standing/arm/carrying/")));
+        let doll = crate::equip::doll_layers(names.iter());
+        assert_eq!(doll.len(), 2, "doll renders the front carrying pair");
+        assert!(
+            doll.iter()
+                .all(|l| l.contains("eq-bow/standing/arm/carrying/")),
+            "doll layers: {doll:?}"
+        );
+        let walking = crate::equip::world_layers(names.iter(), true, 1);
+        assert!(
+            walking
+                .iter()
+                .all(|l| l.contains("eq-bow/walking/arm/carrying/")),
+            "walking pose carries too"
+        );
+    }
+
+    /// The bow chain must be craftable straight out of the starter kit
+    /// (the kit composition is the server policy that keeps the chain
+    /// playable with zero foraging).
+    #[tokio::test]
+    async fn starter_kit_covers_the_bow_chain() {
+        let (mut g, _rx, _raw) = entered_game("bowkit");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        fn count(g: &mut Game, pidx: usize, res: &'static str) -> u32 {
+            let gidx = g.world.res.intern(res);
+            g.world.players[pidx]
+                .inv
+                .iter()
+                .filter(|s| s.res == gidx)
+                .map(|s| s.count)
+                .sum()
+        }
+        assert!(
+            count(&mut g, pidx, "gfx/invobjs/branch") >= 4 + 2,
+            "bow + arrow branches"
+        );
+        assert!(count(&mut g, pidx, "gfx/invobjs/string") >= 1, "bow string");
+        assert!(count(&mut g, pidx, "gfx/invobjs/stone") >= 1, "arrow stone");
+        // The menu must announce every new pagina (rendered MenuGrid).
+        for page in [
+            "paginae/craft/woodbow",
+            "paginae/craft/stonearrow",
+            "paginae/craft/bonearrow",
+        ] {
+            assert!(
+                crate::craft::RECIPES.iter().any(|r| r.pagina == page),
+                "{page} in RECIPES"
+            );
+        }
     }
 }

@@ -159,6 +159,26 @@ pub struct Recipe {
     /// Attribute used as the quality softcap skill (loftar rule: if the
     /// "skill" quality is below the ingredient average, the two are averaged).
     pub softcap_attr: &'static str,
+    /// Per-INPUT-TYPE quality weights (RoB Legacy:Quality: `q = sum(q_i * w_i)
+    /// / sum(w_i)` over ingredient TYPES). Empty = weight by consumed UNIT
+    /// count (the pre-session-36 behavior). Per-type weights decouple the
+    /// quality math from the ingredient counts: RoB's Wooden Bow formula
+    /// `(qBranches + qString) / 2` averages the two types equally even
+    /// though the recipe takes several branches and one string.
+    pub q_weights: &'static [u32],
+}
+
+impl Recipe {
+    /// One-line provenance note for docs and tests: where the quality
+    /// model comes from.
+    #[cfg(test)]
+    pub fn q_note(&self) -> &'static str {
+        if self.q_weights.is_empty() {
+            "unit-weighted average (pre-36 behavior)"
+        } else {
+            "type-weighted average (RoB Legacy:Quality)"
+        }
+    }
 }
 
 /// Recipes implemented this session. Ingredient/output resources must exist
@@ -171,6 +191,7 @@ pub const RECIPES: &[Recipe] = &[
         outputs: &[("gfx/invobjs/axe", 1)],
         pagina: "paginae/craft/axe",
         softcap_attr: "str",
+        q_weights: &[],
     },
     // First armor entry into the economy: two cow hides sew into a hide
     // cloak (gfx/invobjs/cloak-hide, armor::PIECES). Gives the armor
@@ -182,6 +203,50 @@ pub const RECIPES: &[Recipe] = &[
         outputs: &[("gfx/invobjs/cloak-hide", 1)],
         pagina: "paginae/craft/hcloak",
         softcap_attr: "dex",
+        q_weights: &[],
+    },
+    // Session 36: the bow chain. RoB Legacy:Bow verifies the ingredient
+    // TYPES (branches + string) and the quality formula
+    // `(qBranches + qString) / 2, softcapped by Marksmanship` (the
+    // Fandom Marksmanship page carries the same worked example,
+    // (50 + 40) / 2). The per-type weights [1, 1] implement that average
+    // independent of the consumed unit counts. The unit counts
+    // (4 branches, 1 string) are a chosen server policy pending legacy
+    // verification - recorded in crafting-and-building.md Open questions.
+    Recipe {
+        id: "woodbow",
+        name: "Wooden Bow",
+        inputs: &[("gfx/invobjs/branch", 4), ("gfx/invobjs/string", 1)],
+        outputs: &[("gfx/invobjs/bow", 1)],
+        pagina: "paginae/craft/woodbow",
+        softcap_attr: "ranged",
+        q_weights: &[1, 1],
+    },
+    // Stone arrows: RoB Legacy:Quality documents the arrow example as a
+    // weighted average with a HEAVIER WEIGHT ON BRANCH than the tip
+    // material; Survival softcaps arrows. Batch of 10 per craft (chosen
+    // server policy, documented as an open question). Weights [1, 2]
+    // give the branch the heavier share.
+    Recipe {
+        id: "stonearrow",
+        name: "Stone Arrow",
+        inputs: &[("gfx/invobjs/stone", 1), ("gfx/invobjs/branch", 2)],
+        outputs: &[("gfx/invobjs/arrow-stone", 10)],
+        pagina: "paginae/craft/stonearrow",
+        softcap_attr: "survive",
+        q_weights: &[1, 2],
+    },
+    // Bone arrows: same weighted model as stone arrows (RoB Legacy:Quality
+    // cites the bone-arrow example for the branch-heavier rule). Bones
+    // enter the economy through animal loot (state.rs Species::loot).
+    Recipe {
+        id: "bonearrow",
+        name: "Bone Arrow",
+        inputs: &[("gfx/invobjs/bone", 1), ("gfx/invobjs/branch", 2)],
+        outputs: &[("gfx/invobjs/arrow-bone", 10)],
+        pagina: "paginae/craft/bonearrow",
+        softcap_attr: "survive",
+        q_weights: &[1, 2],
     },
 ];
 
@@ -344,5 +409,48 @@ Peapod=STR:0.1 PER:0.9
         assert_eq!(roast_result("beef"), Some("Roasted Beef"));
         assert_eq!(roast_result("Raw Deer Meat"), Some("Roasted Deer Meat"));
         assert_eq!(roast_result("Stone"), None);
+    }
+
+    /// Session 36: the three new recipes resolve, carry RoB-verified
+    /// per-type quality weights, and the bone-arrow ingredient is fed by
+    /// the animal loot table (state.rs Species::loot drops bones for
+    /// every species).
+    #[test]
+    fn bow_chain_recipes_are_consistent() {
+        for (id, weights, softcap) in [
+            ("woodbow", &[1, 1][..], "ranged"),
+            ("stonearrow", &[1, 2][..], "survive"),
+            ("bonearrow", &[1, 2][..], "survive"),
+        ] {
+            let r = RECIPES.iter().find(|r| r.id == id).unwrap_or_else(|| {
+                panic!("{id} must be registered");
+            });
+            assert_eq!(r.q_weights, weights, "{id} per-type weights");
+            assert_eq!(r.softcap_attr, softcap, "{id} softcap attribute");
+            // Inputs and outputs must be distinct resources with at
+            // least one input (a no-input recipe would be a free item
+            // fountain).
+            assert!(!r.inputs.is_empty(), "{id} has inputs");
+            assert!(!r.outputs.is_empty(), "{id} has outputs");
+        }
+        // Every animal species drops bones so the bone-arrow recipe has
+        // an in-world source (state.rs Session 36 loot extension).
+        for sp in crate::state::Species::ALL {
+            let loot = sp.loot();
+            assert!(
+                loot.iter().any(|(res, _, _)| *res == "gfx/invobjs/bone"),
+                "{sp:?} must drop bones for the bone-arrow economy"
+            );
+        }
+    }
+
+    /// The provenance note distinguishes the two quality models so docs
+    /// and future sessions can tell them apart at a glance.
+    #[test]
+    fn q_note_marks_type_weighted_recipes() {
+        let bow = RECIPES.iter().find(|r| r.id == "woodbow").unwrap();
+        assert!(bow.q_note().starts_with("type-weighted"));
+        let axe = RECIPES.iter().find(|r| r.id == "axe").unwrap();
+        assert!(axe.q_note().starts_with("unit-weighted"));
     }
 }

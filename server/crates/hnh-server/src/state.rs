@@ -60,6 +60,20 @@ pub enum Species {
 }
 
 impl Species {
+    /// Every species variant, for tests that need to sweep the whole
+    /// roster (e.g. the session-36 bone-loot consistency check in
+    /// craft.rs).
+    #[cfg(test)]
+    pub const ALL: [Species; 7] = [
+        Species::Deer,
+        Species::Fox,
+        Species::Wolf,
+        Species::Boar,
+        Species::Cow,
+        Species::Hare,
+        Species::Aurochs,
+    ];
+
     /// Stable discriminant carried on the node link (GuestKind::Animal);
     /// the subscriber resolves it back with `from_index`.
     pub fn index(self) -> u8 {
@@ -130,23 +144,39 @@ impl Species {
     }
 
     /// Loot dropped on death: (resource name, count, display label).
+    /// Session 36: every species also drops bones - the Bone Arrow recipe
+    /// (craft.rs) needs gfx/invobjs/bone, and in legacy every butchered
+    /// carcass yielded bones; counts are a chosen server policy recorded
+    /// in animals-and-husbandry.md.
     pub fn loot(self) -> Vec<(&'static str, u32, &'static str)> {
         match self {
             Species::Deer | Species::Aurochs => vec![
                 ("gfx/invobjs/meat", 3, self.meat_label()),
                 ("gfx/invobjs/hide-raw-fox", 2, ""),
+                ("gfx/invobjs/bone", 2, ""),
             ],
             Species::Cow => vec![
                 ("gfx/invobjs/meat", 4, self.meat_label()),
                 ("gfx/invobjs/hide-raw-cow", 3, ""),
+                ("gfx/invobjs/bone", 2, ""),
             ],
-            Species::Boar => vec![("gfx/invobjs/meat", 3, self.meat_label())],
+            Species::Boar => vec![
+                ("gfx/invobjs/meat", 3, self.meat_label()),
+                ("gfx/invobjs/bone", 2, ""),
+            ],
             Species::Fox => vec![
                 ("gfx/invobjs/meat", 1, self.meat_label()),
                 ("gfx/invobjs/hide-raw-fox", 1, ""),
+                ("gfx/invobjs/bone", 1, ""),
             ],
-            Species::Wolf => vec![("gfx/invobjs/meat", 2, self.meat_label())],
-            Species::Hare => vec![("gfx/invobjs/meat", 1, self.meat_label())],
+            Species::Wolf => vec![
+                ("gfx/invobjs/meat", 2, self.meat_label()),
+                ("gfx/invobjs/bone", 2, ""),
+            ],
+            Species::Hare => vec![
+                ("gfx/invobjs/meat", 1, self.meat_label()),
+                ("gfx/invobjs/bone", 1, ""),
+            ],
         }
     }
 

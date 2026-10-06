@@ -471,6 +471,19 @@ static PIECES: &[PieceDef] = &[
         ["arm/{hand}/left-{d}"],
         false
     ),
+    // Session 36: the Wooden Bow is TWO-HANDED and rides on the back -
+    // the pack ships dedicated carrying layers (gfx/borka/eq-bow/
+    // {standing,walking,dead}/arm/carrying/{left,right}-{d}), one per
+    // side per octant, with NO {hand} (idle/banzai) variant. Carrying
+    // templates carry no {hand} placeholder so they survive on the doll
+    // too (the doll renders the front carrying pair).
+    piece!(
+        "gfx/invobjs/bow",
+        "eq-bow",
+        ["arm/carrying/left-{d}", "arm/carrying/right-{d}"],
+        ["arm/carrying/left-{d}", "arm/carrying/right-{d}"],
+        false
+    ),
 ];
 
 /// Materialized layer lists for one piece. Indexing mirrors PoseTable:
