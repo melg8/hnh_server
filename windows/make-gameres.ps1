@@ -46,3 +46,10 @@ if (Test-Path $compiled) {
 Remove-Item -Recurse -Force $tmp
 $count = (Get-ChildItem -Recurse -File $out | Measure-Object).Count
 Write-Host "gameres ready: $count files in $out"
+
+# The legacy jar pack ships a few AButton layers with a dropped
+# parent-version field (the client reads name bytes as the version -
+# "Wrong res version (1 != 28484)" -> MenuGrid PaginaException on world
+# entry). Repair them in place; idempotent, no-op when the pack is
+# already consistent.
+python (Join-Path $root "server\scripts\fix_gameres_versions.py") $out
