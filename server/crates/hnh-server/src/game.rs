@@ -11402,7 +11402,7 @@ mod tests {
             label: "Wheat grain",
         };
         if let Some(out) = g.sessions.get_mut(&1) {
-            out.cursor = Some(seed.clone());
+            out.cursor = Some(seed);
         }
         // A plowed tile far outside node 0's cells: derive the tile from
         // a foreign-cell position and keep it only if its tile-center gob
@@ -11420,7 +11420,7 @@ mod tests {
             }
         }
         g.world.tilth.insert((tx, ty), u64::MAX);
-        g.plant_seed(1, 1, (tx, ty), seed.clone());
+        g.plant_seed(1, 1, (tx, ty), seed);
         // The act shipped with the cursor's spec + seed quality...
         let mut relayed = false;
         while let Ok((_peer, msg)) = mesh_rx.try_recv() {
