@@ -243,6 +243,24 @@ pub enum NodeMsg {
         stack: Option<StaticStack>,
         lp: i32,
     },
+    /// Cross-node planting (session 31), home -> authority. The player
+    /// clicked a plowed tile whose cell is owned by the receiver; tilth
+    /// and occupancy are authoritative THERE. `seed_ql` rides the act
+    /// because the seed physically lives on the home node's cursor. The
+    /// receiver spawns the crop and answers PlantAck (ok = true) on
+    /// success; on any refusal it stays silent - the home node keeps the
+    /// seed on the cursor, exactly like a local refusal keeps it.
+    RelayPlantAct {
+        player: i32,
+        tx: i32,
+        ty: i32,
+        spec: u8,
+        seed_ql: u8,
+    },
+    /// Authority -> home: the crop was planted. The home node now
+    /// consumes one seed unit from the cursor (never before the ack -
+    /// a rejected or lost relay must not destroy the seed).
+    PlantAck { player: i32, ok: bool },
     /// Cluster character migration (session 29). A node about to enter a
     /// player whose save key it does not hold broadcasts this query. A
     /// peer holding the snapshot offline answers CharData (re-serving it
@@ -621,6 +639,8 @@ fn msg_name(msg: &NodeMsg) -> &'static str {
         NodeMsg::RelayAttack { .. } => "relay_attack",
         NodeMsg::RelayStaticAct { .. } => "relay_static_act",
         NodeMsg::StaticAck { .. } => "static_ack",
+        NodeMsg::RelayPlantAct { .. } => "relay_plant_act",
+        NodeMsg::PlantAck { .. } => "plant_ack",
         NodeMsg::FightBars { .. } => "fight_bars",
         NodeMsg::CharQuery { .. } => "char_query",
         NodeMsg::CharData { .. } => "char_data",

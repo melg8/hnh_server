@@ -2287,6 +2287,39 @@ impl Game {
                     }
                 }
             }
+            NodeMsg::RelayPlantAct {
+                player,
+                tx,
+                ty,
+                spec,
+                seed_ql,
+            } => {
+                self.relay_plant(player, tx, ty, spec, seed_ql);
+            }
+            NodeMsg::PlantAck { player, ok } => {
+                // The authority planted the crop: NOW the seed leaves the
+                // cursor. A failure ack (or silence from a downed peer)
+                // keeps the seed - the player can retry.
+                if !ok {
+                    return;
+                }
+                if let Some(pidx) = self.world.players.iter().position(|p| p.gob == player) {
+                    let sid = self.world.players[pidx].session;
+                    if let Some(cursor) = self.sessions.get(&sid).and_then(|o| o.cursor) {
+                        let mut cursor = cursor;
+                        cursor.count = cursor.count.saturating_sub(1);
+                        if let Some(out) = self.sessions.get_mut(&sid) {
+                            out.cursor = if cursor.count == 0 {
+                                None
+                            } else {
+                                Some(cursor)
+                            };
+                        }
+                        self.refresh_inventory(sid);
+                        self.sync_cursor_widget(sid);
+                    }
+                }
+            }
             NodeMsg::CharQuery { from, name } => {
                 // Cluster character migration, two-phase (query -> data ->
                 // ack). A peer holding the snapshot OFFLINE re-serves it on
@@ -5036,6 +5069,38 @@ impl Game {
             );
             return;
         }
+        // Cluster (session 31): a furrow outside my cells lives on another
+        // node - tilth and occupancy are authoritative THERE. Two-phase:
+        // relay the act, the ack consumes the seed (never lose a seed to
+        // a rejected or lost relay hop).
+        let tile_gob_pos = (tx * 11 + 5, ty * 11 + 5);
+        if self.is_cluster()
+            && self.cell_owner(crate::visidx::cell_of(tile_gob_pos.0, tile_gob_pos.1))
+                != self.cluster_me()
+        {
+            let player_gob = self
+                .world
+                .players
+                .iter()
+                .find(|p| p.session == sid)
+                .map(|p| p.gob);
+            if let (Some(player_gob), Some(c)) = (player_gob, self.cluster.as_ref()) {
+                let authority =
+                    self.cell_owner(crate::visidx::cell_of(tile_gob_pos.0, tile_gob_pos.1));
+                c.mesh.send(
+                    authority,
+                    crate::nodes::NodeMsg::RelayPlantAct {
+                        player: player_gob,
+                        tx,
+                        ty,
+                        spec: spec as u8,
+                        seed_ql: cursor.ql,
+                    },
+                );
+                debug!(sid, tx, ty, authority, "relay plant act sent");
+            }
+            return;
+        }
         if !self.world.tilth.contains_key(&(tx, ty)) {
             debug!(sid, tx, ty, "plant refused: tile not plowed");
             return;
@@ -7533,6 +7598,58 @@ impl Game {
             self.fight_del(sid, target);
             info!(target, ?species, "animal killed");
         }
+    }
+
+    /// Authority-side application of a relayed planting act (session 31).
+    /// The seed physically lives on the home node's cursor (its quality
+    /// rides the act); the TILE state (tilth, occupancy) is authoritative
+    /// HERE. Same validation order as the local plant_seed path, minus
+    /// the skill gate (session state stays on the home node) - reach
+    /// parity note: the local path also has no explicit reach check, the
+    /// client can only aim inside its own view. Refusals stay silent:
+    /// the home node's cursor keeps the seed, matching a local refusal.
+    fn relay_plant(&mut self, player: GobId, tx: i32, ty: i32, spec: u8, seed_ql: u8) {
+        if spec as usize >= farm::CROPS.len() {
+            debug!(tx, ty, spec, "relay plant refused: unknown spec");
+            return;
+        }
+        if !self.world.tilth.contains_key(&(tx, ty)) {
+            debug!(tx, ty, "relay plant refused: tile not plowed");
+            return;
+        }
+        if self.world.crop_at.contains_key(&(tx, ty)) {
+            debug!(tx, ty, "relay plant refused: tile occupied");
+            return;
+        }
+        let spec_data = &farm::CROPS[spec as usize];
+        let res_idx = self.world.res.intern(spec_data.gob_res);
+        let now = unix_ms();
+        let state = crate::farm::CropState {
+            spec,
+            stage: 0,
+            seed_ql,
+            soil_ql: crate::farm::soil_quality(tx, ty),
+            next_stage_at: now + farm::stage_duration_ms(spec_data).as_millis() as u64,
+        };
+        let gob = self.world.gobs.spawn(
+            Kind::Crop { spec, stage: 0 },
+            (tx * 11 + 5, ty * 11 + 5),
+            res_idx,
+            1,
+            0,
+        );
+        self.world.crops.insert(gob, state);
+        self.world.crop_at.insert((tx, ty), gob);
+        // Planting clears the tilth decay timer (legacy quirk, same as
+        // the local path).
+        self.world.tilth.insert((tx, ty), 0);
+        self.broadcast_spawn(gob);
+        if let Some(c) = self.cluster.as_ref() {
+            let home = self.node_of_gob(player);
+            c.mesh
+                .send(home, crate::nodes::NodeMsg::PlantAck { player, ok: true });
+        }
+        info!(gob, tx, ty, spec = spec_data.gob_res, "relay plant applied");
     }
 
     /// Authority-side application of a relayed static interaction
@@ -11272,5 +11389,140 @@ mod tests {
             .inv
             .len();
         assert_eq!(after, before + 2, "each yield ack grants its stack");
+    }
+
+    #[tokio::test]
+    async fn foreign_plant_ships_relay_act_and_keeps_seed() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("plantrelay", 0, 2);
+        g.world.players[0].attrs.insert("farming".to_owned(), 1);
+        let seed = InvStack {
+            res: g.world.res.intern("gfx/invobjs/seed-wheat"),
+            count: 3,
+            ql: 11,
+            label: "Wheat grain",
+        };
+        if let Some(out) = g.sessions.get_mut(&1) {
+            out.cursor = Some(seed.clone());
+        }
+        // A plowed tile far outside node 0's cells: derive the tile from
+        // a foreign-cell position and keep it only if its tile-center gob
+        // position still lands on a foreign cell (tiles are 11 subtiles,
+        // vis cells 250 - straddling is possible, so probe a few).
+        let base = foreign_cell_pos(&g, 0);
+        let (mut tx, mut ty) = (base.0.div_euclid(11), base.1.div_euclid(11));
+        for d in 0..40 {
+            let cand = (base.0.div_euclid(11) + d, base.1.div_euclid(11));
+            let c = crate::visidx::cell_of(cand.0 * 11 + 5, cand.1 * 11 + 5);
+            if crate::grid_owner::owner_of(c, std::num::NonZeroUsize::new(2).unwrap()) != 0 {
+                tx = cand.0;
+                ty = cand.1;
+                break;
+            }
+        }
+        g.world.tilth.insert((tx, ty), u64::MAX);
+        g.plant_seed(1, 1, (tx, ty), seed.clone());
+        // The act shipped with the cursor's spec + seed quality...
+        let mut relayed = false;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::RelayPlantAct { spec, seed_ql, .. } = msg {
+                assert_eq!(spec, 1);
+                assert_eq!(seed_ql, 11);
+                relayed = true;
+            }
+        }
+        assert!(relayed, "a foreign furrow click relays the plant act");
+        // ...and the seed stayed on the cursor (consumed only on ack).
+        assert_eq!(
+            g.sessions.get(&1).unwrap().cursor.as_ref().map(|c| c.count),
+            Some(3),
+            "the seed must not be consumed before the PlantAck"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_plant_spawns_crop_acks_and_rejects_double() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("relayplant", 0, 2);
+        let clicker = foreign_node_gob_id(0, 2, 61);
+        // A plowed, empty tile on THIS node's cells.
+        let pslot = g.world.gobs.get(pgob_of(&g)).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let (tx, ty) = (px.div_euclid(11), py.div_euclid(11) + 2);
+        g.world.tilth.insert((tx, ty), u64::MAX);
+        g.on_node_msg(crate::nodes::NodeMsg::RelayPlantAct {
+            player: clicker,
+            tx,
+            ty,
+            spec: 1,
+            seed_ql: 9,
+        });
+        // The crop exists at the tile center with the relayed seed quality.
+        let gob = g
+            .world
+            .crop_at
+            .get(&(tx, ty))
+            .copied()
+            .expect("the relayed plant creates the crop");
+        let slot = g.world.gobs.get(gob).unwrap();
+        match g.world.gobs.kind[slot] {
+            Kind::Crop { spec, stage } => {
+                assert_eq!((spec, stage), (1, 0));
+            }
+            other => panic!("expected a crop, got {other:?}"),
+        }
+        assert_eq!(g.world.crops.get(&gob).unwrap().seed_ql, 9);
+        // First ack arrives; a second act on the same tile stays silent.
+        let mut acks = 0;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if matches!(msg, crate::nodes::NodeMsg::PlantAck { ok: true, .. }) {
+                acks += 1;
+            }
+        }
+        assert_eq!(acks, 1, "exactly one PlantAck for the planted tile");
+        g.on_node_msg(crate::nodes::NodeMsg::RelayPlantAct {
+            player: clicker,
+            tx,
+            ty,
+            spec: 1,
+            seed_ql: 9,
+        });
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            assert!(
+                !matches!(msg, crate::nodes::NodeMsg::PlantAck { ok: true, .. }),
+                "an occupied tile never acks a second plant"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn plant_ack_consumes_cursor_seed() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("plantack", 0, 2);
+        let pgob = pgob_of(&g);
+        let seed = InvStack {
+            res: g.world.res.intern("gfx/invobjs/seed-wheat"),
+            count: 3,
+            ql: 11,
+            label: "Wheat grain",
+        };
+        if let Some(out) = g.sessions.get_mut(&1) {
+            out.cursor = Some(seed);
+        }
+        g.on_node_msg(crate::nodes::NodeMsg::PlantAck {
+            player: pgob,
+            ok: true,
+        });
+        assert_eq!(
+            g.sessions.get(&1).unwrap().cursor.as_ref().map(|c| c.count),
+            Some(2),
+            "one ack consumes one seed unit"
+        );
+        // A failure ack keeps the cursor untouched.
+        g.on_node_msg(crate::nodes::NodeMsg::PlantAck {
+            player: pgob,
+            ok: false,
+        });
+        assert_eq!(
+            g.sessions.get(&1).unwrap().cursor.as_ref().map(|c| c.count),
+            Some(2)
+        );
     }
 }
