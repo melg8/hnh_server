@@ -714,6 +714,12 @@ pub struct SessionOut {
     /// Last tick's player cell (dirty-cell skip decision; None = first
     /// tick, which always scans).
     pub vis_cell: Option<(i32, i32)>,
+    /// Tick of the session's last retract sweep (session 42 spawn-debounce:
+    /// a gob oscillating across the 2x-VIEW_RADIUS boundary must not be
+    /// retracted and re-spawned every tick of a moving session; the sweep
+    /// runs at most every RETRACT_SWEEP_EVERY ticks regardless of cell
+    /// crossings, so a quick boundary return never sees a retract).
+    pub last_retract_tick: u64,
 }
 
 impl SessionOut {
@@ -897,6 +903,9 @@ pub struct Perf {
     /// Load-test hot-loop attribution inside the visibility phase.
     pub vis_scan_us: u64,
     pub vis_spawn_us: u64,
+    /// Gobs spawned into session views this tick (spawn-cost attribution:
+    /// `vis_spawn_us / max(vis_spawns, 1)` is the per-spawn price).
+    pub vis_spawns: u64,
     pub vis_retract_us: u64,
     /// Last-tick guest-phase sub-attribution (microseconds): guest row
     /// progress + block encode, per-session fan-out, rest-pose streaming.

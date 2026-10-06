@@ -293,6 +293,10 @@ const CHAR_QUERY_DEADLINE_MS: u64 = 6_000;
 /// exact `visible.contains` filter stays authoritative per block.
 const FANOUT_SPAN: i32 = 2 * VIEW_RADIUS + 8 * 50;
 
+/// Minimum tick gap between retract sweeps of one session (session 42
+/// spawn-debounce: see `Game::retract_sweep_due`). 8 ticks = 0.8 s.
+const RETRACT_SWEEP_EVERY: u64 = 8;
+
 /// LINSTEP progress frames ship every Nth tick (session 41): the client
 /// interpolates the linmove locally from LINBEG (deterministic timing
 /// model), so the per-tick server push is only a counter re-sync. At 2
@@ -883,6 +887,7 @@ impl Game {
             guest_ingests = self.world.perf.guest_ingests,
             vis_scan_us = self.world.perf.vis_scan_us,
             vis_spawn_us = self.world.perf.vis_spawn_us,
+            vis_spawns = self.world.perf.vis_spawns,
             vis_retract_us = self.world.perf.vis_retract_us,
             guests_encode_us = self.world.perf.guests_encode_us,
             guests_fanout_us = self.world.perf.guests_fanout_us,
@@ -938,6 +943,7 @@ impl Game {
             vis_cell: None,
             vis_cache: None,
             vis_cache_pos: None,
+            last_retract_tick: 0,
         };
         // Character selection UI (session-lifecycle.md 3.1).
         let w_bg = out.new_wid("img");
@@ -1966,7 +1972,7 @@ impl Game {
                     out.vis_cell = Some(cell);
                 }
                 if cell_moved || self.world.tick.is_multiple_of(8) {
-                    self.retract_sweep(sid, px, py);
+                    self.retract_sweep_due(sid, px, py);
                 }
                 self.world.perf.visible_total += self.sessions[&sid].visible.len();
             } else {
@@ -2020,6 +2026,7 @@ impl Game {
         // that was the dominant vis-phase cost.
         let mut spawn_us: u128 = 0;
         let mut retract_us: u128 = 0;
+        let mut spawn_count: u64 = 0;
         for ((sid, (px, py), cell_moved, _kind), cand) in to_scan.into_iter().zip(in_range) {
             let spawn_t = Instant::now();
             for id in &cand {
@@ -2029,18 +2036,20 @@ impl Game {
                 // bug: the client never received its own gob).
                 let is_new = !self.sessions[&sid].visible.contains(id);
                 if is_new {
+                    spawn_count += 1;
                     self.stream_spawn(sid, *id);
                 }
             }
             // Retractions use a 2x VIEW_RADIUS hysteresis (a gob between
             // R and 2R stays spawned but off-screen), so a per-tick sweep
-            // is wasted work: run it every 8th tick and whenever the
-            // session crossed a vis cell. Deaths retract immediately via
+            // is wasted work: the sweep itself is debounced to once every
+            // RETRACT_SWEEP_EVERY ticks regardless of cell crossings
+            // (session 42 spawn churn fix). Deaths retract immediately via
             // broadcast_retract.
             spawn_us += spawn_t.elapsed().as_micros();
             let retract_t = Instant::now();
             if cell_moved || self.world.tick.is_multiple_of(8) {
-                self.retract_sweep(sid, px, py);
+                self.retract_sweep_due(sid, px, py);
             }
             // The result list becomes the session's cache (moved into
             // the session, no clone). Stored in scan order; the patch
@@ -2053,6 +2062,7 @@ impl Game {
             self.world.perf.visible_total += self.sessions[&sid].visible.len();
         }
         self.world.perf.vis_spawn_us = spawn_us as u64;
+        self.world.perf.vis_spawns = spawn_count;
         self.world.perf.vis_retract_us = retract_us as u64;
     }
 
@@ -2120,6 +2130,33 @@ impl Game {
         out.sort_unstable();
         out.dedup();
         out
+    }
+
+    /// Spawn-churn debounce (session 42): gate the retract sweep to at
+    /// most one run per RETRACT_SWEEP_EVERY ticks per session. The old
+    /// `cell_moved` trigger swept a fast-moving session EVERY tick, so a
+    /// gob oscillating across the 2x VIEW_RADIUS boundary was retracted
+    /// and re-spawned on every crossing - the duel cohort at 1000 bots
+    /// produced ~420 spawns/tick (mean) and made the spawn phase the
+    /// dominant vis cost. With the 0.8 s grace a quick boundary return
+    /// never sees a retract at all, while a genuinely departed gob still
+    /// disappears well under a second late (it is 2 view radii off-screen
+    /// by then). Deaths bypass this gate via broadcast_retract.
+    fn retract_sweep_due(&mut self, sid: SessionId, px: i32, py: i32) {
+        let tick = self.world.tick;
+        let due = {
+            let Some(out) = self.sessions.get(&sid) else {
+                return;
+            };
+            tick.saturating_sub(out.last_retract_tick) >= RETRACT_SWEEP_EVERY
+        };
+        if !due {
+            return;
+        }
+        self.retract_sweep(sid, px, py);
+        if let Some(out) = self.sessions.get_mut(&sid) {
+            out.last_retract_tick = tick;
+        }
     }
 
     /// The retract sweep for one session (2x VIEW_RADIUS hysteresis; dead
