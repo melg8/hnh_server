@@ -2205,3 +2205,24 @@ NEXT (handoff):
 - Windows launcher smoke: make-gameres.ps1 + run scripts against the
   session-37 binary (verify_windows_launch.sh exists; re-run after
   the next resource regeneration).
+
+### Session 37 addendum: cross-node archery (guest animals)
+
+The "ranged fire over the cluster relay" NEXT item landed the same
+session. `tick_aim`/`shoot_arrow` now resolve guest targets from the
+guest table (position, species via GuestKind::Animal, liveness via
+guests.contains_key); the shot's hit roll stays on the shooter's node
+(session state) and a hit ships `RelayAttack { chip: 0, dmg }` to the
+animal's authority. `relay_swing` gained the marker semantics:
+chip == 0 is RANGED (damage applied straight through a full defence
+bar - arrows bypass the openings economy; no bar mutation, no
+FightBars answer), chip > 0 is the melee swing path unchanged. Guest
+animal clicks with an equipped bow open the aim instead of the relay
+duel (player_interact guest branch). Two new tests:
+relay_arrow_shot_ships_ranged_relayattack (meter fill -> one chip-0
+RelayAttack at Fandom damage, arrow spent on the shooter's node) and
+relay_swing_chip0_bypasses_openings_and_kills (authority side: 200
+damage through a full bar kills a 60 HP wolf). 195 tests green,
+clippy/fmt clean, SESSION37 VERIFY: OK (engagement battery now 15).
+Remaining from the NEXT list: player-vs-player archery, unit-count
+reconciliation vs RoB, Windows launcher smoke after resource regen.

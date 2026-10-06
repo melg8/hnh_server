@@ -248,7 +248,8 @@ The Shoot action is live for bow-equipped players against local animals (`server
 - **Hit chance** (server policy - the legacy formula is not recoverable, see Open questions): `95 - 55 * (dist / 132) + min(20, Marksmanship/5)` percent, clamped 15..99 - point-blank 95%, 40% at max range for an unskilled archer.
 - **Damage**: `75 * sqrt(q_bow / 10)` (Fandom Bow page - the same k*sqrt(x/10) shape as the unarmed maneuvers). A q10 Wooden Bow hits for 75 (a one-shot on Deer/Fox), q40 for 150. Arrows bypass the openings economy entirely (no defence-bar chip): the hit roll IS the resolution, per the accuracy-meter rule.
 - **Aftermath**: the aim re-arms automatically while the target lives and arrows remain; a kill runs the standard death flow (loot drop, +10 LP, fight teardown).
-- **Not yet ranged**: guest animals on other nodes (the cluster relay is melee-only for now) and player-vs-player archery.
+- **Cross-node**: guest animals on other nodes are fully shootable - the aim/meter state stays on the shooter's node (session state), the hit roll happens there, and a `RelayAttack` with `chip = 0` carries the damage to the animal's authority, whose `relay_swing` applies it WITHOUT the openings gate (the marker semantics: chip > 0 = melee swing through the defence bar, chip = 0 = ranged, openings bypassed). Death runs the owner's relayed death flow (GuestRetract tears the aim down on the shooter's node).
+- **Not yet ranged**: player-vs-player archery (the melee relay fight between players exists; ranged needs the same authority split).
 
 ## How moves beat moves: the counterplay system
 

@@ -4001,6 +4001,11 @@ impl Game {
                 match &g.kind {
                     crate::nodes::GuestKind::Animal { species } => {
                         if let Some(sp) = crate::state::Species::from_index(*species) {
+                            // Bow carriers take the ranged path against
+                            // guests too (the shot relays to the owner).
+                            if self.start_aim(sid, target) {
+                                return;
+                            }
                             self.start_fight(sid, target, sp);
                             return;
                         }
@@ -4803,7 +4808,9 @@ impl Game {
 
     /// One combat tick of an active aim: chase an out-of-range target,
     /// fill the accuracy meter (chat progress lines), auto-release at a
-    /// full meter.
+    /// full meter. Works for local animals AND cross-node guests (the
+    /// guest table feeds the same range checks; the shot relays to the
+    /// animal's authority node).
     fn tick_aim(
         &mut self,
         pidx: usize,
@@ -4816,20 +4823,22 @@ impl Game {
             self.world.players[pidx].aim = None;
             return;
         };
-        // Local animals only: guest animals route through the static
-        // relay and stay melee-only for now.
-        let Some(tslot) = self.world.gobs.get(aim.target) else {
+        // Guest targets (foreign authority): position from the guest
+        // table; local targets from the gob store.
+        let guest_pos = self.world.guests.get(&aim.target).map(|g| g.pos);
+        if guest_pos.is_none() && self.world.gobs.get(aim.target).is_none() {
             self.world.players[pidx].aim = None;
             self.chat_line(sid, "Your target is gone.", Some((255, 200, 128)));
             return;
-        };
-        if self.world.guests.contains_key(&aim.target) {
-            self.world.players[pidx].aim = None;
-            self.chat_line(sid, "You cannot aim at that.", Some((255, 200, 128)));
-            return;
         }
         let (px, py) = self.world.gobs.pos[pslot];
-        let (tx, ty) = self.world.gobs.pos[tslot];
+        let (tx, ty) = match guest_pos {
+            Some(p) => p,
+            None => {
+                let tslot = self.world.gobs.get(aim.target).expect("checked above");
+                self.world.gobs.pos[tslot]
+            }
+        };
         let dist = (px - tx).abs().max((py - ty).abs());
         if dist > CHASE_DROP {
             self.world.players[pidx].aim = None;
@@ -4904,16 +4913,47 @@ impl Game {
         }
         self.world.players[pidx].stamina = (self.world.players[pidx].stamina - 2).max(0);
         let target = aim.target;
-        let Some(tslot) = self.world.gobs.get(target) else {
-            self.world.players[pidx].aim = None;
-            return;
-        };
-        let species = match self.world.gobs.kind[tslot] {
-            crate::state::Kind::Animal { species } => species,
-            _ => {
-                self.world.players[pidx].aim = None;
-                return;
+        // Guest target (foreign authority): position, species and
+        // liveness come from the guest table; the damage rides a
+        // RelayAttack (chip 0 = ranged, bypasses the openings gate on
+        // the authority side) instead of the local damage path.
+        let guest = self.world.guests.get(&target).cloned();
+        let (species, tpos, tslot) = match &guest {
+            Some(g) => {
+                let species = match g.kind {
+                    crate::nodes::GuestKind::Animal { species } => {
+                        match Species::from_index(species) {
+                            Some(sp) => sp,
+                            None => {
+                                self.world.players[pidx].aim = None;
+                                return;
+                            }
+                        }
+                    }
+                    _ => {
+                        self.world.players[pidx].aim = None;
+                        return;
+                    }
+                };
+                (species, g.pos, None)
             }
+            None => match self.world.gobs.get(target) {
+                Some(s) => (
+                    match self.world.gobs.kind[s] {
+                        crate::state::Kind::Animal { species } => species,
+                        _ => {
+                            self.world.players[pidx].aim = None;
+                            return;
+                        }
+                    },
+                    self.world.gobs.pos[s],
+                    Some(s),
+                ),
+                None => {
+                    self.world.players[pidx].aim = None;
+                    return;
+                }
+            },
         };
         let (px, py) = self
             .world
@@ -4921,8 +4961,7 @@ impl Game {
             .get(self.world.players[pidx].gob)
             .map(|s| self.world.gobs.pos[s])
             .unwrap_or((0, 0));
-        let (tx, ty) = self.world.gobs.pos[tslot];
-        let dist = (px - tx).abs().max((py - ty).abs());
+        let dist = (px - tpos.0).abs().max((py - tpos.1).abs());
         let marks = self.world.players[pidx]
             .attrs
             .get("marks")
@@ -4936,12 +4975,38 @@ impl Game {
                 &format!("Your arrow hits the {} for {dmg} damage.", species.name()),
                 Some((192, 255, 192)),
             );
-            self.damage_animal(pidx, sid, target, tslot, dmg);
+            match (guest.is_some(), tslot) {
+                (true, _) => {
+                    // Cross-node shot: the authority applies the damage
+                    // (chip 0 marks the ranged bypass).
+                    if let Some(c) = self.cluster.as_ref() {
+                        let authority = self.cell_owner(crate::visidx::cell_of(tpos.0, tpos.1));
+                        c.mesh.send(
+                            authority,
+                            crate::nodes::NodeMsg::RelayAttack {
+                                attacker: self.world.players[pidx].gob,
+                                target,
+                                chip: 0,
+                                dmg,
+                            },
+                        );
+                    }
+                }
+                (false, Some(ts)) => {
+                    self.damage_animal(pidx, sid, target, ts, dmg);
+                }
+                (false, None) => {}
+            }
         } else {
             self.chat_line(sid, "Your arrow misses.", Some((255, 200, 128)));
         }
-        // Keep aiming while the target lives and arrows remain.
-        let alive = self.world.gobs.get(target).is_some();
+        // Keep aiming while the target lives and arrows remain. Guest
+        // liveness comes from the guest table (a kill arrives as a
+        // GuestRetract from the authority).
+        let alive = match &guest {
+            Some(_) => self.world.guests.contains_key(&target),
+            None => self.world.gobs.get(target).is_some(),
+        };
         let more_arrows = self.world.players[pidx]
             .inv
             .iter()
@@ -9027,6 +9092,15 @@ impl Game {
             return;
         }
         tracing::debug!(attacker, target, chip, dmg, "relay swing applied");
+        // chip == 0 marks a RANGED relay (archery.rs): arrows bypass the
+        // openings economy entirely (the hit roll already happened on
+        // the shooter's node), so the damage lands without any defence
+        // gate. chip > 0 is the melee swing path below.
+        if chip == 0 {
+            self.world.guest_attackers.insert(target, attacker);
+            self.damage_animal_relayed(target, tslot, dmg);
+            return;
+        }
         let landed = {
             let af = self.world.animal_fights.entry(target).or_insert_with(|| {
                 crate::state::AnimalFight {
@@ -14385,5 +14459,78 @@ mod tests {
             loot.contains(&meat_gidx) || loot.contains(&bone_gidx),
             "meat or bone dropped near the kill"
         );
+    }
+    /// Cross-node archery: aiming at a GUEST animal fills the meter,
+    /// and the auto-release ships one RelayAttack with chip=0 (the
+    /// ranged bypass marker) carrying the Fandom damage to the
+    /// animal's authority node. The arrow is spent on the shooter's
+    /// node regardless of the hit roll.
+    #[tokio::test]
+    async fn relay_arrow_shot_ships_ranged_relayattack() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("bowrelay", 0, 2);
+        let gid = relay_wolf_guest(&mut g, 66, 200);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        arm_bow(&mut g, pidx, 10, 10);
+        let pgob = g.world.players[pidx].gob;
+        g.player_interact(1, pgob, gid, (0, 0));
+        assert_eq!(
+            g.world.players[pidx].aim.map(|a| a.target),
+            Some(gid),
+            "aim opens against a guest animal"
+        );
+        // Fill the meter: 40 ticks at 250/tick.
+        for _ in 0..40 {
+            let aim = g.world.players[pidx].aim.expect("aim kept");
+            g.tick_aim(pidx, 1, pgob, aim);
+        }
+        assert_eq!(arrow_count(&mut g, pidx), 9, "one arrow spent on release");
+        let mut saw_ranged_relay = false;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::RelayAttack { chip, dmg, .. } = msg {
+                assert_eq!(chip, 0, "ranged relay carries the chip-0 marker");
+                assert_eq!(dmg, crate::archery::bow_damage(10));
+                saw_ranged_relay = true;
+            }
+        }
+        assert!(
+            saw_ranged_relay,
+            "the release must relay one ranged RelayAttack"
+        );
+    }
+
+    /// The authority side applies a chip-0 RelayAttack without the
+    /// openings gate: HP drops by the full damage even at a full
+    /// defence bar, and death runs the relayed death flow.
+    #[tokio::test]
+    async fn relay_swing_chip0_bypasses_openings_and_kills() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("arrowauth", 0, 2);
+        // A LOCAL wolf as the authority-side target (the animal this
+        // node owns); the relay path is exercised directly.
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let res = g.world.res.intern(Species::Wolf.resname());
+        let wolf = g.world.gobs.spawn(
+            Kind::Animal {
+                species: Species::Wolf,
+            },
+            (px + 66, py),
+            res,
+            Species::Wolf.max_hp(),
+            33,
+        );
+        g.world.animal_gobs.push(wolf);
+        let wslot = g.world.gobs.get(wolf).unwrap();
+        let hp0 = g.world.gobs.hp[wslot];
+        // chip 0, damage 200 (> wolf 60 HP): full defence bar, no gate.
+        g.relay_swing(pgob, wolf, 0, 200);
+        assert!(
+            g.world.gobs.get(wolf).is_none(),
+            "a chip-0 relay kills through a full defence bar"
+        );
+        let _ = hp0;
+        // The kill cleared the fight teardown state.
+        assert_eq!(g.world.players[pidx].fight_target, None);
     }
 }
