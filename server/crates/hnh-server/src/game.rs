@@ -2337,6 +2337,71 @@ impl Game {
             NodeMsg::TileMutation { tx, ty, tile } => {
                 self.apply_remote_tile_mutation(tx, ty, tile);
             }
+            NodeMsg::RelayStationAct {
+                player,
+                target,
+                act,
+            } => {
+                self.relay_station_act(player, target, act);
+            }
+            NodeMsg::StationAck { player, result } => {
+                // Authority outcome for MY session player's station menu
+                // choice. Refusals render the SAME system lines the local
+                // path emits; success and stale views stay silent.
+                let Some(pidx) = self.world.players.iter().position(|p| p.gob == player) else {
+                    return;
+                };
+                let sid = self.world.players[pidx].session;
+                match result {
+                    crate::nodes::StationResult::Lit
+                    | crate::nodes::StationResult::Extinguished
+                    | crate::nodes::StationResult::Stale => {}
+                    crate::nodes::StationResult::NeedsFuel => {
+                        self.system_line(sid, "The oven needs fuel first.");
+                    }
+                    crate::nodes::StationResult::NeedsInput => {
+                        self.system_line(sid, "The oven needs an input before lighting.");
+                    }
+                }
+            }
+            NodeMsg::RelayStationItem {
+                player,
+                target,
+                stack,
+            } => {
+                self.relay_station_item(player, target, stack);
+            }
+            NodeMsg::StationItemAck { player, result } => {
+                // Authority outcome for MY session player's fuel/input
+                // delivery. FuelAdded/InputLoaded consume ONE cursor unit
+                // NOW (never before the ack - a refused or lost relay
+                // must not destroy the item, the seed-safe pattern).
+                use crate::nodes::StationItemResult;
+                let Some(pidx) = self.world.players.iter().position(|p| p.gob == player) else {
+                    return;
+                };
+                let sid = self.world.players[pidx].session;
+                match result {
+                    StationItemResult::FuelAdded => {
+                        self.consume_cursor_unit(sid);
+                        self.system_line(sid, "Fuel added to the oven.");
+                    }
+                    StationItemResult::InputLoaded => {
+                        self.consume_cursor_unit(sid);
+                        self.system_line(sid, "Input loaded; right-click the oven to light it.");
+                    }
+                    StationItemResult::BusyLit => {
+                        self.system_line(sid, "The fire is burning; wait for it to finish.");
+                    }
+                    StationItemResult::InputFull => {
+                        self.system_line(sid, "The oven already holds an input.");
+                    }
+                    StationItemResult::NotProcessable => {
+                        self.system_line(sid, "The oven cannot process that.");
+                    }
+                    StationItemResult::Gone => {}
+                }
+            }
             NodeMsg::CharQuery { from, name } => {
                 // Cluster character migration, two-phase (query -> data ->
                 // ack). A peer holding the snapshot OFFLINE re-serves it on
@@ -2510,34 +2575,65 @@ impl Game {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Drop,
                 crop: None,
+                station: None,
             },
             Kind::Tree { .. } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Tree,
                 crop: None,
+                station: None,
             },
             Kind::Stone => GuestKind::Static {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Stone,
                 crop: None,
+                station: None,
             },
-            // Plans/stations/structures: renderable but no relay act
-            // today (their menus are session UI on the authority side).
+            // Plans/structures: renderable but no relay act today (their
+            // menus are session UI on the authority side).
+            // Stations (session 33): publish with the Station class + a
+            // state snapshot (spec, lit, fuel, has_input) piggybacked on
+            // the payload - the home node opens the Light/Extinguish
+            // menu locally from it, and every state change re-publishes
+            // so subscribers re-render the lit sprite from the sdt byte.
             // Crops (session 31): publish with the Crop class + the
             // (spec, stage) payload - the home node opens the harvest
             // menu locally and the stage re-renders on the subscriber
             // through the sdt byte in the guest spawn/update blocks.
-            Kind::Plan { .. } | Kind::Station { .. } | Kind::Structure { .. } => {
+            Kind::Station { spec, lit } => {
+                let view = self
+                    .world
+                    .stations
+                    .get(&id)
+                    .map(|st| crate::nodes::StationView {
+                        spec: st.spec,
+                        lit: st.lit,
+                        fuel: st.fuel,
+                        has_input: st.input.is_some(),
+                    });
                 GuestKind::Static {
                     res_name: self.static_res_name(slot),
-                    class: crate::nodes::StaticClass::Structure,
+                    class: crate::nodes::StaticClass::Station,
                     crop: None,
+                    station: view.or(Some(crate::nodes::StationView {
+                        spec,
+                        lit,
+                        fuel: 0,
+                        has_input: false,
+                    })),
                 }
             }
+            Kind::Plan { .. } | Kind::Structure { .. } => GuestKind::Static {
+                res_name: self.static_res_name(slot),
+                class: crate::nodes::StaticClass::Structure,
+                crop: None,
+                station: None,
+            },
             Kind::Crop { spec, stage } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Crop,
                 crop: Some((spec, stage)),
+                station: None,
             },
         };
         Some(GuestState {
@@ -3287,20 +3383,33 @@ impl Game {
             .uint8(0)
             .int32(id)
             .int32(g.frame as i32);
-        if let GuestKind::Static { res_name, crop, .. } = &g.kind {
+        if let GuestKind::Static {
+            res_name,
+            crop,
+            station,
+            ..
+        } = &g.kind
+        {
             let name = leak_static(self.world.res.name(g.res_idx).unwrap_or(res_name.as_str()));
             let w = out.res.wire_named(g.res_idx, name);
             // Crops carry their growth stage as the sprite sdt byte -
             // the same wire shape the local path emits for plants
             // (wire id | 0x8000, then len + bytes; OCache rebuilds the
-            // sprite on a stage change).
-            match crop {
-                Some((_spec, stage)) => {
-                    m.uint8(OD_RES).uint16(w | 0x8000);
-                    m.uint8(1).uint8(*stage);
-                }
-                None => {
-                    m.uint8(OD_RES).uint16(w);
+            // sprite on a stage change). Stations (session 33) carry
+            // their lit byte the same way, so a lit oven re-renders on
+            // every re-published GuestUpdate without a new OD kind.
+            if let Some(view) = station {
+                m.uint8(OD_RES).uint16(w | 0x8000);
+                m.uint8(1).uint8(view.lit as u8);
+            } else {
+                match crop {
+                    Some((_spec, stage)) => {
+                        m.uint8(OD_RES).uint16(w | 0x8000);
+                        m.uint8(1).uint8(*stage);
+                    }
+                    None => {
+                        m.uint8(OD_RES).uint16(w);
+                    }
                 }
             }
         }
@@ -3570,7 +3679,12 @@ impl Game {
                     // authority through the relay; the act is picked from
                     // the STABLE class tag, the authority re-validates it
                     // against its own Kind.
-                    crate::nodes::GuestKind::Static { class, crop, .. } => {
+                    crate::nodes::GuestKind::Static {
+                        class,
+                        crop,
+                        station,
+                        ..
+                    } => {
                         // Crops (session 31): the harvest menu is session UI
                         // and lives on the HOME node - open it locally from
                         // the guest view's (spec, stage); the chosen act is
@@ -3587,6 +3701,18 @@ impl Game {
                             }
                             return;
                         }
+                        // Stations (session 33): the Light/Extinguish menu is
+                        // session UI too - open it locally from the
+                        // piggybacked snapshot; the chosen act relays to the
+                        // authority, which re-validates against its own state.
+                        if *class == crate::nodes::StaticClass::Station {
+                            if let Some(view) = station {
+                                self.show_station_menu(sid, target, view.lit);
+                            } else {
+                                debug!(sid, "guest station without a snapshot");
+                            }
+                            return;
+                        }
                         let act = match class {
                             crate::nodes::StaticClass::Drop => {
                                 Some(crate::nodes::StaticAct::Pickup)
@@ -3594,6 +3720,7 @@ impl Game {
                             crate::nodes::StaticClass::Tree => Some(crate::nodes::StaticAct::Chop),
                             crate::nodes::StaticClass::Stone => Some(crate::nodes::StaticAct::Mine),
                             crate::nodes::StaticClass::Crop
+                            | crate::nodes::StaticClass::Station
                             | crate::nodes::StaticClass::Structure => None,
                         };
                         if let Some(act) = act {
@@ -4941,6 +5068,46 @@ impl Game {
                 self.sync_cursor_widget(sid);
                 return;
             }
+            // Guest station (session 33): fuel/input delivery relays the
+            // held stack to the station's authority. The cursor stack is
+            // NOT consumed before the ack (seed-safe): the authority
+            // answers StationItemAck and the home node consumes exactly
+            // one unit on FuelAdded/InputLoaded, keeping the whole stack
+            // on every refusal - parity with the local refusal paths.
+            if let Some(crate::nodes::GuestKind::Static {
+                class: crate::nodes::StaticClass::Station,
+                ..
+            }) = self.world.guests.get(&gob).map(|g| &g.kind)
+            {
+                let res_name = self
+                    .world
+                    .res
+                    .name(cursor.res)
+                    .unwrap_or("gfx/invobjs/stone")
+                    .to_owned();
+                let player_gob = self.world.player(sid).map(|p| p.gob);
+                let pos = self.world.guests.get(&gob).map(|g| g.pos);
+                if let (Some(player_gob), Some(pos), Some(c)) =
+                    (player_gob, pos, self.cluster.as_ref())
+                {
+                    let authority = self.cell_owner(crate::visidx::cell_of(pos.0, pos.1));
+                    c.mesh.send(
+                        authority,
+                        crate::nodes::NodeMsg::RelayStationItem {
+                            player: player_gob,
+                            target: gob,
+                            stack: crate::nodes::StaticStack {
+                                res: res_name,
+                                count: 1,
+                                ql: cursor.ql,
+                                label: cursor.label.to_owned(),
+                            },
+                        },
+                    );
+                    debug!(sid, gob, authority, "relay station item sent");
+                }
+                return;
+            }
             // Fall through to the map-space behaviors below for other
             // gob kinds (legacy iteminteract semantics).
         }
@@ -5010,6 +5177,22 @@ impl Game {
     /// callers own the drag-widget sync).
     fn take_cursor_stack(&mut self, sid: SessionId) -> Option<InvStack> {
         self.sessions.get_mut(&sid).and_then(|o| o.cursor.take())
+    }
+
+    /// Consume ONE unit from the cursor stack (relay ack path): a
+    /// multi-unit stack keeps the rest, an exhausted stack clears the
+    /// cursor. Inventory refresh + drag-widget sync match the local
+    /// itemact path so the client UI never sees a stale cursor.
+    fn consume_cursor_unit(&mut self, sid: SessionId) {
+        if let Some(cursor) = self.sessions.get_mut(&sid).and_then(|o| o.cursor.as_mut()) {
+            cursor.count = cursor.count.saturating_sub(1);
+            let rest = cursor.count;
+            if rest == 0 {
+                self.sessions.get_mut(&sid).expect("cursor above").cursor = None;
+            }
+        }
+        self.refresh_inventory(sid);
+        self.sync_cursor_widget(sid);
     }
 
     /// Map units -> tile coordinates (11x11 map units per tile).
@@ -5839,6 +6022,9 @@ impl Game {
             }
             self.refresh_inventory(sid);
             self.system_line(sid, "Fuel added to the oven.");
+            // Cluster: the readiness snapshot (fuel) rides the next
+            // GuestUpdate (session 33).
+            self.publish(gob, GuestEv::Update);
             info!(sid, gob, "station fueled");
             return;
         }
@@ -5872,15 +6058,45 @@ impl Game {
         }
         self.refresh_inventory(sid);
         self.system_line(sid, "Input loaded; right-click the oven to light it.");
+        // Cluster: the readiness snapshot (has_input) rides the next
+        // GuestUpdate (session 33).
+        self.publish(gob, GuestEv::Update);
         info!(sid, gob, label = cursor.label, "station input loaded");
     }
 
     /// Click on a station gob: open the Light/Extinguish flower menu.
+    /// Local wrapper: the option label resolves against the
+    /// authoritative local state (act intent None - the choice below
+    /// resolves against the same state).
     fn open_station_menu(&mut self, sid: SessionId, target: GobId) {
-        let Some(station) = self.world.stations.get(&target).cloned() else {
-            return;
+        let lit = self
+            .world
+            .stations
+            .get(&target)
+            .map(|st| st.lit)
+            .unwrap_or(false);
+        self.show_station_menu_with(sid, target, lit, None);
+    }
+
+    /// Shared flower-menu body for local and GUEST stations (session 33).
+    /// A guest station passes the act intent picked from the piggybacked
+    /// snapshot: Light when the view says unlit, Extinguish when lit.
+    fn show_station_menu(&mut self, sid: SessionId, target: GobId, lit: bool) {
+        let act = if lit {
+            crate::nodes::StationAct::Extinguish
+        } else {
+            crate::nodes::StationAct::Light
         };
-        let buildable = &crate::build::BUILDABLES[station.spec as usize];
+        self.show_station_menu_with(sid, target, lit, Some(act));
+    }
+
+    fn show_station_menu_with(
+        &mut self,
+        sid: SessionId,
+        target: GobId,
+        lit: bool,
+        guest_act: Option<crate::nodes::StationAct>,
+    ) {
         let Some(out) = self.sessions.get_mut(&sid) else {
             return;
         };
@@ -5894,7 +6110,7 @@ impl Game {
             out.player_menu = None;
         }
         let w = out.new_wid("sm");
-        let option = if station.lit { "Extinguish" } else { "Light" };
+        let option = if lit { "Extinguish" } else { "Light" };
         out.send(wdg::new_wdg(
             w,
             "sm",
@@ -5903,19 +6119,21 @@ impl Game {
             0,
             &[ListVal::S(option.to_owned())],
         ));
-        out.station_menu = Some((w, target));
-        let _ = buildable;
+        out.station_menu = Some((w, target, guest_act));
     }
 
     /// Flower menu choice on a station: Light starts a job (fuel +
-    /// input required), Extinguish cancels the lit state.
+    /// input required), Extinguish cancels the lit state. A GUEST
+    /// station's choice relays to the authority (session 33) - the home
+    /// node never mutates a foreign station's state, it only renders the
+    /// ack's outcome (refusal lines match the local path verbatim).
     fn apply_station_choice(&mut self, sid: SessionId, wid: u16, choice: i32) {
         let pending = self
             .sessions
             .get(&sid)
             .and_then(|o| o.station_menu)
-            .filter(|(w, _)| *w == wid);
-        let Some((_, gob)) = pending else {
+            .filter(|(w, _, _)| *w == wid);
+        let Some((_, gob, guest_act)) = pending else {
             return;
         };
         let Some(out) = self.sessions.get_mut(&sid) else {
@@ -5928,6 +6146,32 @@ impl Game {
             return;
         }
         out.send(wdg::wdgmsg(wid, "act", &[ListVal::I(0)]));
+        // Guest station: relay the snapshot-picked act; the authority
+        // re-validates against its own state and answers StationAck.
+        if let Some(act) = guest_act {
+            let Some(player_gob) = self.world.player(sid).map(|p| p.gob) else {
+                return;
+            };
+            if let Some(c) = self.cluster.as_ref() {
+                let authority = self
+                    .world
+                    .guests
+                    .get(&gob)
+                    .map_or(self.cluster.as_ref().map_or(0, |c| c.me), |g| {
+                        self.cell_owner(crate::visidx::cell_of(g.pos.0, g.pos.1))
+                    });
+                c.mesh.send(
+                    authority,
+                    crate::nodes::NodeMsg::RelayStationAct {
+                        player: player_gob,
+                        target: gob,
+                        act,
+                    },
+                );
+                debug!(sid, gob, ?act, authority, "relay station act sent");
+            }
+            return;
+        }
         let Some(station) = self.world.stations.get(&gob).cloned() else {
             return;
         };
@@ -5975,6 +6219,9 @@ impl Game {
             }
         }
         self.restage_gob(gob);
+        // Cluster: subscribers re-render the lit sprite from the sdt
+        // byte in the re-published guest block (session 33).
+        self.publish(gob, GuestEv::Update);
     }
 
     /// Per-tick station pass: advance lit jobs, burn fuel, and emit the
@@ -6408,7 +6655,7 @@ impl Game {
             .sessions
             .get(&sid)
             .and_then(|o| o.station_menu)
-            .map(|(w, _)| w);
+            .map(|(w, _, _)| w);
         if station_menu == Some(wid) {
             self.apply_station_choice(sid, wid, choice);
             return;
@@ -7811,6 +8058,152 @@ impl Game {
             let home = self.node_of_gob(player);
             c.mesh
                 .send(home, crate::nodes::NodeMsg::PlowAck { player, ok });
+        }
+    }
+
+    /// Unicast StationAck to the acting player's home node (session 33;
+    /// no-op without a cluster - the local menu path never relays).
+    fn answer_station(&mut self, player: GobId, result: crate::nodes::StationResult) {
+        if let Some(c) = self.cluster.as_ref() {
+            let home = self.node_of_gob(player);
+            c.mesh
+                .send(home, crate::nodes::NodeMsg::StationAck { player, result });
+        }
+    }
+
+    /// Authority side of the station menu relay (session 33): the player
+    /// homed on the sender chose Light/Extinguish from the snapshot the
+    /// HOME node rendered. The station's fuel/input/lit state is
+    /// authoritative HERE: validate the act against the local
+    /// StationState (a stale act changes nothing and answers Stale),
+    /// apply the same transitions as the local menu path, re-render the
+    /// lit sprite and re-publish to subscribers.
+    fn relay_station_act(&mut self, player: GobId, target: GobId, act: crate::nodes::StationAct) {
+        let Some(station) = self.world.stations.get(&target).cloned() else {
+            debug!(target, ?act, "relay station act: target gone");
+            self.answer_station(player, crate::nodes::StationResult::Stale);
+            return;
+        };
+        match act {
+            crate::nodes::StationAct::Extinguish => {
+                if !station.lit {
+                    // The view said lit but the job already ended (or was
+                    // never lit): nothing to extinguish, silent parity.
+                    debug!(target, "relay extinguish on an unlit station: stale");
+                    self.answer_station(player, crate::nodes::StationResult::Stale);
+                    return;
+                }
+                let st = self
+                    .world
+                    .stations
+                    .get_mut(&target)
+                    .expect("BUG: station checked above");
+                st.lit = false;
+                st.progress = 0;
+                self.set_station_lit(target, false);
+                self.answer_station(player, crate::nodes::StationResult::Extinguished);
+                info!(target, "relay station extinguished");
+            }
+            crate::nodes::StationAct::Light => {
+                if station.lit {
+                    debug!(target, "relay light on a lit station: stale");
+                    self.answer_station(player, crate::nodes::StationResult::Stale);
+                    return;
+                }
+                if station.fuel < crate::build::FUEL_PER_JOB {
+                    self.answer_station(player, crate::nodes::StationResult::NeedsFuel);
+                    return;
+                }
+                if station.input.is_none() {
+                    self.answer_station(player, crate::nodes::StationResult::NeedsInput);
+                    return;
+                }
+                let st = self
+                    .world
+                    .stations
+                    .get_mut(&target)
+                    .expect("BUG: station checked above");
+                st.lit = true;
+                st.progress = 0;
+                self.set_station_lit(target, true);
+                self.answer_station(player, crate::nodes::StationResult::Lit);
+                info!(target, "relay station lit");
+            }
+        }
+    }
+
+    /// Authority side of the fuel/input relay (session 33): the player
+    /// homed on the sender clicked the station with a held stack. The
+    /// stack physically lives on the HOME node's cursor - HERE we only
+    /// validate against the local StationState and mutate the station
+    /// counters/slot; the home node consumes one cursor unit on the ok
+    /// ack. Refusals answer with the same lines the local path emits.
+    fn relay_station_item(
+        &mut self,
+        player: GobId,
+        target: GobId,
+        stack: crate::nodes::StaticStack,
+    ) {
+        use crate::nodes::StationItemResult;
+        let Some(station) = self.world.stations.get(&target).cloned() else {
+            debug!(target, "relay station item: target gone");
+            self.answer_station_item(player, StationItemResult::Gone);
+            return;
+        };
+        let buildable = &crate::build::BUILDABLES[station.spec as usize];
+        let Some(station_spec) = buildable.station.as_ref() else {
+            self.answer_station_item(player, StationItemResult::Gone);
+            return;
+        };
+        // Fuel deliveries load while lit too (local path order: fuel
+        // check first, then the lit/input gates for the roast slot).
+        if station_spec.fuel.contains(&stack.res.as_str()) {
+            let st = self
+                .world
+                .stations
+                .get_mut(&target)
+                .expect("BUG: station checked above");
+            st.fuel += 1;
+            st.fuel_ql_sum += stack.ql as u64;
+            st.fuel_seen += 1;
+            self.publish(target, GuestEv::Update);
+            self.answer_station_item(player, StationItemResult::FuelAdded);
+            info!(target, "relay station fueled");
+            return;
+        }
+        if station.lit {
+            self.answer_station_item(player, StationItemResult::BusyLit);
+            return;
+        }
+        if station.input.is_some() {
+            self.answer_station_item(player, StationItemResult::InputFull);
+            return;
+        }
+        if crate::craft::roast_result(leak_static(stack.label.as_str())).is_none() {
+            self.answer_station_item(player, StationItemResult::NotProcessable);
+            return;
+        }
+        let res_name = leak_static(stack.res.as_str());
+        let res_idx = self.world.res.intern(res_name);
+        let st = self
+            .world
+            .stations
+            .get_mut(&target)
+            .expect("BUG: station checked above");
+        st.input = Some((res_idx, stack.ql, leak_static(stack.label.as_str())));
+        self.publish(target, GuestEv::Update);
+        self.answer_station_item(player, StationItemResult::InputLoaded);
+        info!(target, label = stack.label, "relay station input loaded");
+    }
+
+    /// Unicast StationItemAck to the acting player's home node.
+    fn answer_station_item(&mut self, player: GobId, result: crate::nodes::StationItemResult) {
+        if let Some(c) = self.cluster.as_ref() {
+            let home = self.node_of_gob(player);
+            c.mesh.send(
+                home,
+                crate::nodes::NodeMsg::StationItemAck { player, result },
+            );
         }
     }
 
@@ -10965,6 +11358,7 @@ mod tests {
                     res_name: "gfx/terobjs/items/wood".into(),
                     class: crate::nodes::StaticClass::Drop,
                     crop: None,
+                    station: None,
                 },
                 hp: 1,
                 max_hp: 1,
@@ -11959,5 +12353,443 @@ mod tests {
         g.plow_tile(1, (tx, ty));
         assert_eq!(g.world.grids.grid(gc).tile(lx, ly), tile::PLOWED);
         assert!(g.world.tilth.contains_key(&(tx, ty)));
+    }
+
+    // ------------------------------------------------------------------
+    // Session 33: cross-node station menus (relay + piggybacked snapshot)
+    // ------------------------------------------------------------------
+
+    /// A finished oven beside the player: the exact rows place_buildable
+    /// would have produced (Kind::Station + StationState), so tests read
+    /// like the real world state.
+    fn built_oven(g: &mut Game, fuel: u32, input: Option<(&'static str, u8)>) -> GobId {
+        let pslot = g.world.gobs.get(pgob_of(g)).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let res = g.world.res.intern("gfx/terobjs/oven");
+        let gob = g.world.gobs.spawn(
+            Kind::Station {
+                spec: 0,
+                lit: false,
+            },
+            (px + 30, py),
+            res,
+            1,
+            0,
+        );
+        let input_row = input.map(|(label, ql)| {
+            let idx = g.world.res.intern("gfx/invobjs/meat");
+            (idx, ql, label)
+        });
+        g.world.stations.insert(
+            gob,
+            crate::build::StationState {
+                spec: 0,
+                fuel,
+                fuel_ql_sum: 10 * fuel as u64,
+                fuel_seen: fuel as u64,
+                input: input_row,
+                lit: false,
+                progress: 0,
+                quality: 10,
+            },
+        );
+        gob
+    }
+
+    /// The publish path carries the Station class and the full readiness
+    /// snapshot (lit, fuel, has_input) - everything the home node needs
+    /// to open the menu without a round trip.
+    #[tokio::test]
+    async fn station_publishes_class_and_snapshot() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("stpub", 0, 2);
+        let gob = built_oven(&mut g, 2, Some(("Raw Deer Meat", 10)));
+        let slot = g.world.gobs.get(gob).unwrap();
+        let st = g.guest_state_from_slot(gob, slot).unwrap();
+        match st.kind {
+            crate::nodes::GuestKind::Static { class, station, .. } => {
+                assert_eq!(class, crate::nodes::StaticClass::Station);
+                let view = station.expect("station payload rides the publish");
+                assert_eq!(view.spec, 0);
+                assert!(!view.lit);
+                assert_eq!(view.fuel, 2);
+                assert!(view.has_input);
+            }
+            other => panic!("a station publishes as a static, got {other:?}"),
+        }
+    }
+
+    /// A guest oven click opens the Light menu LOCALLY (session UI) from
+    /// the piggybacked snapshot, armed with the guest act intent.
+    #[tokio::test]
+    async fn guest_station_click_opens_menu_and_relays_choice() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("stclick", 0, 2);
+        let pgob = pgob_of(&g);
+        let gob = built_oven(&mut g, 0, None);
+        let slot = g.world.gobs.get(gob).unwrap();
+        let st = g.guest_state_from_slot(gob, slot).unwrap();
+        let (fx, fy) = st.pos;
+        // The real subscriber path: the local row dies, the guest row
+        // arrives through GuestAnnounce exactly like on a live mesh.
+        g.world.gobs.kill(gob);
+        g.world.stations.remove(&gob);
+        g.on_node_msg(crate::nodes::NodeMsg::GuestAnnounce(st));
+        g.player_interact(1, pgob, gob, (fx, fy));
+        let menu = g
+            .sessions
+            .get(&1)
+            .and_then(|o| o.station_menu)
+            .expect("the guest oven click opens the flower menu");
+        assert_eq!(menu.1, gob);
+        assert_eq!(
+            menu.2,
+            Some(crate::nodes::StationAct::Light),
+            "the act intent comes from the snapshot (unlit -> Light)"
+        );
+        // Acting on the menu relays the act; the home node mutates
+        // nothing (no local station row exists here at all).
+        g.apply_station_choice(1, menu.0, 0);
+        let mut relays = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::RelayStationAct {
+                player,
+                target,
+                act,
+            } = msg
+            {
+                relays.push((player, target, act));
+            }
+        }
+        assert_eq!(
+            relays,
+            vec![(pgob, gob, crate::nodes::StationAct::Light)],
+            "the choice relays to the station's authority"
+        );
+    }
+
+    /// Authority side of the menu relay: full validation order (stale ->
+    /// fuel -> input), the same transitions as the local menu path, and
+    /// one StationAck per act with the exact result.
+    #[tokio::test]
+    async fn relay_station_act_validates_and_applies() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("stact", 0, 2);
+        let clicker = foreign_node_gob_id(0, 2, 71);
+        let empty = built_oven(&mut g, 0, None);
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStationAct {
+            player: clicker,
+            target: empty,
+            act: crate::nodes::StationAct::Light,
+        });
+        let mut acks = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::StationAck { player, result } = msg {
+                assert_eq!(player, clicker);
+                acks.push(result);
+            }
+        }
+        assert_eq!(
+            acks,
+            vec![crate::nodes::StationResult::NeedsFuel],
+            "no fuel -> NeedsFuel, nothing mutated"
+        );
+        assert!(!g.world.stations.get(&empty).unwrap().lit);
+
+        // Fuel but no input.
+        let fueled = built_oven(&mut g, 1, None);
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStationAct {
+            player: clicker,
+            target: fueled,
+            act: crate::nodes::StationAct::Light,
+        });
+        let mut acks = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::StationAck { result, .. } = msg {
+                acks.push(result);
+            }
+        }
+        assert_eq!(acks, vec![crate::nodes::StationResult::NeedsInput]);
+
+        // Ready: the job starts, the lit Kind byte moves with the state.
+        let ready = built_oven(&mut g, 1, Some(("Raw Deer Meat", 10)));
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStationAct {
+            player: clicker,
+            target: ready,
+            act: crate::nodes::StationAct::Light,
+        });
+        let mut acks = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::StationAck { result, .. } = msg {
+                acks.push(result);
+            }
+            if let crate::nodes::NodeMsg::GuestUpdate(st) = msg {
+                if st.id == ready {
+                    if let crate::nodes::GuestKind::Static { station, .. } = &st.kind {
+                        assert!(station.unwrap().lit, "the update re-publishes lit=true");
+                    }
+                }
+            }
+        }
+        assert_eq!(acks, vec![crate::nodes::StationResult::Lit]);
+        assert!(g.world.stations.get(&ready).unwrap().lit);
+
+        // Stale: lighting an already-lit oven changes nothing.
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStationAct {
+            player: clicker,
+            target: ready,
+            act: crate::nodes::StationAct::Light,
+        });
+        let mut acks = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::StationAck { result, .. } = msg {
+                acks.push(result);
+            }
+        }
+        assert_eq!(acks, vec![crate::nodes::StationResult::Stale]);
+
+        // Extinguish resets the progress and preserves the input.
+        g.world.stations.get_mut(&ready).unwrap().progress = 5;
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStationAct {
+            player: clicker,
+            target: ready,
+            act: crate::nodes::StationAct::Extinguish,
+        });
+        let st = g.world.stations.get(&ready).unwrap().clone();
+        assert!(!st.lit);
+        assert_eq!(st.progress, 0);
+        assert!(st.input.is_some(), "extinguish preserves the input");
+        let mut acks = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::StationAck { result, .. } = msg {
+                acks.push(result);
+            }
+        }
+        assert_eq!(acks, vec![crate::nodes::StationResult::Extinguished]);
+    }
+
+    /// A lit oven relights only after the job ends: the relay answers
+    /// Stale for an extinguish on an unlit oven too (view lag).
+    #[tokio::test]
+    async fn relay_station_extinguish_unlit_is_stale() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("stext", 0, 2);
+        let clicker = foreign_node_gob_id(0, 2, 72);
+        let gob = built_oven(&mut g, 1, Some(("Raw Deer Meat", 10)));
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStationAct {
+            player: clicker,
+            target: gob,
+            act: crate::nodes::StationAct::Extinguish,
+        });
+        let mut acks = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::StationAck { result, .. } = msg {
+                acks.push(result);
+            }
+        }
+        assert_eq!(
+            acks,
+            vec![crate::nodes::StationResult::Stale],
+            "extinguishing an unlit oven is a stale-view no-op"
+        );
+    }
+
+    /// Home side of the item relay: the click with a held stack ships
+    /// RelayStationItem (one unit described by name/ql/label) and the
+    /// cursor stays intact until the ack decides.
+    #[tokio::test]
+    async fn guest_station_itemact_ships_relay_and_keeps_cursor() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("stitem", 0, 2);
+        let gob = built_oven(&mut g, 0, None);
+        let slot = g.world.gobs.get(gob).unwrap();
+        let st = g.guest_state_from_slot(gob, slot).unwrap();
+        let (fx, fy) = st.pos;
+        g.world.gobs.kill(gob);
+        g.world.stations.remove(&gob);
+        g.on_node_msg(crate::nodes::NodeMsg::GuestAnnounce(st));
+        // Put a branch stack (oven fuel) on the cursor.
+        let branch = g.world.res.intern("gfx/invobjs/branch");
+        g.sessions.get_mut(&1).unwrap().cursor = Some(InvStack {
+            res: branch,
+            count: 3,
+            ql: 10,
+            label: "Branch",
+        });
+        let args = vec![
+            hnh_proto::ListArg::Coord(0, 0),
+            hnh_proto::ListArg::Coord(fx, fy),
+            hnh_proto::ListArg::Int(0),
+            hnh_proto::ListArg::Int(gob),
+            hnh_proto::ListArg::Int(0),
+        ];
+        g.on_map_itemact(1, &args);
+        let mut relays = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::RelayStationItem {
+                player,
+                target,
+                stack,
+            } = msg
+            {
+                relays.push((player, target, stack.res.clone(), stack.ql, stack.count));
+            }
+        }
+        assert_eq!(relays.len(), 1, "one item relay per click");
+        assert_eq!(relays[0].1, gob);
+        assert_eq!(relays[0].2, "gfx/invobjs/branch");
+        assert_eq!(
+            g.sessions.get(&1).and_then(|o| o.cursor).map(|c| c.count),
+            Some(3),
+            "the cursor stack is untouched before the ack (seed-safe)"
+        );
+    }
+
+    /// Authority side of the item relay: every branch of the local
+    /// station_itemact validation order answers with its exact result.
+    #[tokio::test]
+    async fn relay_station_item_full_validation_order() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("stitemauth", 0, 2);
+        let clicker = foreign_node_gob_id(0, 2, 73);
+        let fuel_stack = |res: &str, label: &str| crate::nodes::StaticStack {
+            res: res.to_owned(),
+            count: 1,
+            ql: 10,
+            label: label.to_owned(),
+        };
+        // Fuel loads on an empty oven.
+        let gob = built_oven(&mut g, 0, None);
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStationItem {
+            player: clicker,
+            target: gob,
+            stack: fuel_stack("gfx/invobjs/branch", "Branch"),
+        });
+        let st = g.world.stations.get(&gob).unwrap().clone();
+        assert_eq!(st.fuel, 1);
+        assert_eq!(st.fuel_seen, 1);
+        // Input loads when unlit + empty.
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStationItem {
+            player: clicker,
+            target: gob,
+            stack: fuel_stack("gfx/invobjs/meat", "Raw Deer Meat"),
+        });
+        let st = g.world.stations.get(&gob).unwrap().clone();
+        assert!(st.input.is_some(), "the roast input slot loads");
+        // A second input refuses with InputFull.
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStationItem {
+            player: clicker,
+            target: gob,
+            stack: fuel_stack("gfx/invobjs/meat", "Raw Deer Meat"),
+        });
+        // A non-fuel non-roastable refuses with NotProcessable.
+        let other = built_oven(&mut g, 1, None);
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStationItem {
+            player: clicker,
+            target: other,
+            stack: fuel_stack("gfx/invobjs/stone", "Stone"),
+        });
+        // A lit oven refuses the input with BusyLit (fuel still loads).
+        let lit = built_oven(&mut g, 0, None);
+        g.world.stations.get_mut(&lit).unwrap().lit = true;
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStationItem {
+            player: clicker,
+            target: lit,
+            stack: fuel_stack("gfx/invobjs/meat", "Raw Deer Meat"),
+        });
+        let mut acks = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::StationItemAck { player, result } = msg {
+                assert_eq!(player, clicker);
+                acks.push(result);
+            }
+        }
+        assert_eq!(
+            acks,
+            vec![
+                crate::nodes::StationItemResult::FuelAdded,
+                crate::nodes::StationItemResult::InputLoaded,
+                crate::nodes::StationItemResult::InputFull,
+                crate::nodes::StationItemResult::NotProcessable,
+                crate::nodes::StationItemResult::BusyLit,
+            ]
+        );
+        assert_eq!(g.world.stations.get(&lit).unwrap().input, None);
+    }
+
+    /// Home side of the item ack: FuelAdded/InputLoaded consume exactly
+    /// one cursor unit; refusals keep the whole stack.
+    #[tokio::test]
+    async fn station_itemack_consumes_one_unit_or_keeps_stack() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("stack", 0, 2);
+        let pgob = pgob_of(&g);
+        let branch = g.world.res.intern("gfx/invobjs/branch");
+        let put_cursor = |g: &mut Game, n: u32| {
+            g.sessions.get_mut(&1).unwrap().cursor = Some(InvStack {
+                res: branch,
+                count: n,
+                ql: 10,
+                label: "Branch",
+            });
+        };
+        put_cursor(&mut g, 3);
+        g.on_node_msg(crate::nodes::NodeMsg::StationItemAck {
+            player: pgob,
+            result: crate::nodes::StationItemResult::FuelAdded,
+        });
+        assert_eq!(
+            g.sessions.get(&1).and_then(|o| o.cursor).map(|c| c.count),
+            Some(2),
+            "a multi-unit stack keeps the rest"
+        );
+        put_cursor(&mut g, 1);
+        g.on_node_msg(crate::nodes::NodeMsg::StationItemAck {
+            player: pgob,
+            result: crate::nodes::StationItemResult::FuelAdded,
+        });
+        assert!(
+            g.sessions.get(&1).and_then(|o| o.cursor).is_none(),
+            "an exhausted stack clears the cursor"
+        );
+        put_cursor(&mut g, 2);
+        g.on_node_msg(crate::nodes::NodeMsg::StationItemAck {
+            player: pgob,
+            result: crate::nodes::StationItemResult::NotProcessable,
+        });
+        assert_eq!(
+            g.sessions.get(&1).and_then(|o| o.cursor).map(|c| c.count),
+            Some(2),
+            "a refusal keeps the whole stack"
+        );
+    }
+
+    /// Home side of the act ack: the refusal results render the exact
+    /// system lines the local menu path emits (UX parity).
+    #[tokio::test]
+    async fn station_ack_refusals_render_system_lines() {
+        let (mut g, mut rx, _raw, _mesh) = clustered_game("stline", 0, 2);
+        let pgob = pgob_of(&g);
+        fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> String {
+            let mut text = String::new();
+            while let Ok(buf) = rx.try_recv() {
+                // System lines are wdgmsg("sysmsg"...)-shaped chat frames;
+                // a byte scan is enough to assert the wording crossed.
+                text.push_str(&String::from_utf8_lossy(&buf));
+            }
+            text
+        }
+        let _ = drain(&mut rx);
+        g.on_node_msg(crate::nodes::NodeMsg::StationAck {
+            player: pgob,
+            result: crate::nodes::StationResult::NeedsFuel,
+        });
+        let text = drain(&mut rx);
+        assert!(
+            text.contains("oven needs fuel"),
+            "NeedsFuel renders: {text}"
+        );
+        g.on_node_msg(crate::nodes::NodeMsg::StationAck {
+            player: pgob,
+            result: crate::nodes::StationResult::Lit,
+        });
+        let text = drain(&mut rx);
+        assert!(
+            !text.contains("oven"),
+            "a successful Light stays silent (parity with the local path)"
+        );
     }
 }

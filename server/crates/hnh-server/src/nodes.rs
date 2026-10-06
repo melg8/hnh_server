@@ -118,7 +118,27 @@ pub enum GuestKind {
         class: StaticClass,
         #[serde(default)]
         crop: Option<(u8, u8)>,
+        #[serde(default)]
+        station: Option<StationView>,
     },
+}
+
+/// Snapshot of a production station's authority state, piggybacked on
+/// the guest static payload (session 33). The home node opens the
+/// Light/Extinguish flower menu from `lit` without a round trip, and
+/// the subscriber re-renders the lit sprite from the sdt byte on every
+/// re-published GuestUpdate. `fuel`/`has_input` ride along so future
+/// widgets can render readiness without extra messages.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StationView {
+    /// Index into `build::BUILDABLES` (which station this is).
+    pub spec: u8,
+    /// Whether a job is running (authority state at publish time).
+    pub lit: bool,
+    /// Stored fuel units.
+    pub fuel: u32,
+    /// Whether the single input slot is loaded.
+    pub has_input: bool,
 }
 
 /// Stable interaction class carried by GuestKind::Static (session 30).
@@ -134,7 +154,12 @@ pub enum StaticClass {
     /// menu locally; the chosen act (HarvestCrop) is re-validated by the
     /// authority against its own crop state (session 31).
     Crop,
-    /// Plans/stations/structures: no relay act today (flavor only).
+    /// Production station (oven): the home node opens the
+    /// Light/Extinguish menu locally from the piggybacked StationView;
+    /// the chosen act is relayed and re-validated by the authority
+    /// (session 33). Fuel/input deliveries relay the held stack.
+    Station,
+    /// Plans/structures: no relay act today (flavor only).
     Structure,
 }
 
@@ -164,6 +189,55 @@ pub enum StaticAct {
     /// mature vs unripe from ITS crop state, rolls the yield table and
     /// answers one StaticAck per yielded stack (crops never grant LP).
     HarvestCrop,
+}
+
+/// Player-side station menu choice (session 33). The home node picks
+/// the act from the piggybacked StationView snapshot (`lit` decides
+/// which option the flower menu shows); the authority re-validates it
+/// against its own StationState - a stale act changes nothing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StationAct {
+    /// Start a job (fuel + input required, station must be unlit).
+    Light,
+    /// Cancel the lit state (progress resets; the input is preserved -
+    /// this server's documented policy).
+    Extinguish,
+}
+
+/// Outcome of a relayed station act, authority -> home (session 33).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StationResult {
+    /// The job started; the authority re-published the lit sprite.
+    Lit,
+    /// The job was cancelled; progress reset, input preserved.
+    Extinguished,
+    /// Refusal: no fuel stored (same system line as the local path).
+    NeedsFuel,
+    /// Refusal: the input slot is empty (same system line as the local
+    /// path).
+    NeedsInput,
+    /// The view was stale (act did not match the authority's lit
+    /// state) or the station vanished. Silent on the home side.
+    Stale,
+}
+
+/// Outcome of a relayed fuel/input delivery, authority -> home
+/// (session 33). `FuelAdded`/`InputLoaded` consume ONE unit from the
+/// cursor stack on the home node; every refusal keeps the whole stack
+/// and maps to the exact system line the local refusal emits.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StationItemResult {
+    FuelAdded,
+    InputLoaded,
+    /// Refusal: the station is lit (input refused only; fuel still
+    /// loads while lit, matching the local path's order).
+    BusyLit,
+    /// Refusal: the input slot is already loaded.
+    InputFull,
+    /// Refusal: the station cannot process this label.
+    NotProcessable,
+    /// The station vanished mid-flight. Silent, stack kept.
+    Gone,
 }
 
 /// One node-link message. Sub/Unsub flow viewer -> owner; guest messages
@@ -282,6 +356,42 @@ pub enum NodeMsg {
     /// replays it. Non-resident grids only record the override (no
     /// materialization just to shadow a mutation nobody looks at).
     TileMutation { tx: i32, ty: i32, tile: u8 },
+    /// Cross-node station act (session 33), home -> authority. The
+    /// player chose Light/Extinguish in the flower menu the HOME node
+    /// opened from the piggybacked StationView; the station's fuel,
+    /// input and lit state are authoritative on the receiver, which
+    /// validates the act against its own StationState and answers
+    /// StationAck. A stale act (the view said unlit but the authority
+    /// already lit it, or vice versa) answers Stale and changes nothing.
+    RelayStationAct {
+        player: i32,
+        target: i32,
+        act: StationAct,
+    },
+    /// Authority -> home: the outcome of a RelayStationAct. Refusals map
+    /// to the exact system lines the LOCAL refusal path emits, so the
+    /// cross-node UX matches; Stale/Gone stay silent (parity with the
+    /// crop relay's stale-view drop).
+    StationAck { player: i32, result: StationResult },
+    /// Cross-node fuel/input delivery (session 33), home -> authority.
+    /// The stack physically lives on the home node's cursor - it is NOT
+    /// consumed until StationItemAck ok (the seed-safe pattern from the
+    /// plant relay). The receiver validates against its own StationState
+    /// (fuel list, lit, input slot, roastable label) and answers with
+    /// the same refusal lines the local path emits.
+    RelayStationItem {
+        player: i32,
+        target: i32,
+        stack: StaticStack,
+    },
+    /// Authority -> home: the outcome of a RelayStationItem. `ok = true`
+    /// consumes ONE unit from the cursor stack on the home node (a
+    /// multi-unit stack keeps the rest, exactly like the local path);
+    /// refusals keep the whole stack (parity with a local refusal).
+    StationItemAck {
+        player: i32,
+        result: StationItemResult,
+    },
     /// Cluster character migration (session 29). A node about to enter a
     /// player whose save key it does not hold broadcasts this query. A
     /// peer holding the snapshot offline answers CharData (re-serving it
@@ -665,6 +775,10 @@ fn msg_name(msg: &NodeMsg) -> &'static str {
         NodeMsg::RelayPlowAct { .. } => "relay_plow_act",
         NodeMsg::PlowAck { .. } => "plow_ack",
         NodeMsg::TileMutation { .. } => "tile_mutation",
+        NodeMsg::RelayStationAct { .. } => "relay_station_act",
+        NodeMsg::StationAck { .. } => "station_ack",
+        NodeMsg::RelayStationItem { .. } => "relay_station_item",
+        NodeMsg::StationItemAck { .. } => "station_item_ack",
         NodeMsg::FightBars { .. } => "fight_bars",
         NodeMsg::CharQuery { .. } => "char_query",
         NodeMsg::CharData { .. } => "char_data",
@@ -762,6 +876,7 @@ mod tests {
                 res_name: "gfx/terobjs/items/branch".into(),
                 class: StaticClass::Drop,
                 crop: None,
+                station: None,
             },
             hp: 1,
             max_hp: 1,

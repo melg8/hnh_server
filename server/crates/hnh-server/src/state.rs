@@ -638,8 +638,13 @@ pub struct SessionOut {
     /// Build pagina armed (`build::BUILDABLES` index): the mapview ghost
     /// is up and the next mapview `place` wdgmsg commits it.
     pub pending_build: Option<usize>,
-    /// Open station flower menu: `sm` widget id -> target station gob.
-    pub station_menu: Option<(u16, GobId)>,
+    /// Open station flower menu: `sm` widget id + target station gob.
+    /// The third element carries the GUEST act intent (session 33):
+    /// `None` for a local station (the choice resolves against the
+    /// authoritative local state), `Some(Light/Extinguish)` for a guest
+    /// station (the act was picked from the piggybacked snapshot and is
+    /// relayed to the authority, which re-validates it).
+    pub station_menu: Option<(u16, GobId, Option<crate::nodes::StationAct>)>,
     /// Item stack currently held on the cursor (take -> itemact flow).
     pub cursor: Option<InvStack>,
     /// Widget id of the drag Item widget following the mouse (the
