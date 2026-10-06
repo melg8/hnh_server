@@ -113,6 +113,13 @@ pub enum GuestKind {
     /// every node in a cluster runs the SAME binary, so additive struct
     /// changes are safe (rolling upgrades are not supported anywhere
     /// else either, see SavedPlayer in persist.rs).
+    ///
+    /// `stage` is `Some(stage)` for construction plans only (session
+    /// 34): a peer watching a build re-renders the plan sprite as the
+    /// credited materials advance the stage, exactly like the local
+    /// restage path. Plans and structures publish the Structure class
+    /// (no relay act); on completion the gob re-publishes as its real
+    /// class (Station/Structure) and the plan stage drops away.
     Static {
         res_name: String,
         class: StaticClass,
@@ -120,6 +127,8 @@ pub enum GuestKind {
         crop: Option<(u8, u8)>,
         #[serde(default)]
         station: Option<StationView>,
+        #[serde(default)]
+        stage: Option<u8>,
     },
 }
 
@@ -877,6 +886,7 @@ mod tests {
                 class: StaticClass::Drop,
                 crop: None,
                 station: None,
+                stage: None,
             },
             hp: 1,
             max_hp: 1,

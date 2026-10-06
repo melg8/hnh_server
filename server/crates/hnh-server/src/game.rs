@@ -2590,18 +2590,21 @@ impl Game {
                 class: crate::nodes::StaticClass::Drop,
                 crop: None,
                 station: None,
+                stage: None,
             },
             Kind::Tree { .. } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Tree,
                 crop: None,
                 station: None,
+                stage: None,
             },
             Kind::Stone => GuestKind::Static {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Stone,
                 crop: None,
                 station: None,
+                stage: None,
             },
             // Plans/structures: renderable but no relay act today (their
             // menus are session UI on the authority side).
@@ -2635,19 +2638,35 @@ impl Game {
                         fuel: 0,
                         has_input: false,
                     })),
+                    stage: None,
                 }
             }
-            Kind::Plan { .. } | Kind::Structure { .. } => GuestKind::Static {
+            // Plans publish their construction stage (session 34) so a
+            // peer watching a build re-renders the plan sprite on every
+            // credited material. Structures carry no stage: their final
+            // form is the plain sprite. Both publish the Structure class
+            // - no relay act - until completion re-publishes the real
+            // kind (a finished oven becomes a Station with its snapshot).
+            Kind::Plan { stage, .. } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Structure,
                 crop: None,
                 station: None,
+                stage: Some(stage),
+            },
+            Kind::Structure { .. } => GuestKind::Static {
+                res_name: self.static_res_name(slot),
+                class: crate::nodes::StaticClass::Structure,
+                crop: None,
+                station: None,
+                stage: None,
             },
             Kind::Crop { spec, stage } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Crop,
                 crop: Some((spec, stage)),
                 station: None,
+                stage: None,
             },
         };
         Some(GuestState {
@@ -3129,6 +3148,21 @@ impl Game {
             .get(&id)
             .map(|g| g.hp != st.hp)
             .unwrap_or(false);
+        // Kind payload flip (session 34): Structure -> Station on plan
+        // completion, a construction stage advance, a station's lit byte,
+        // a crop's stage. The row is replaced wholesale below, so compare
+        // the OLD row against the incoming kind BEFORE the insert. A flip
+        // re-renders every viewer's sprite (OD_RES + fresh sdt byte) -
+        // the wire mirror of the owner's local restage_gob path. Before
+        // session 34 the existing-guest path only streamed pose, move and
+        // hp deltas, so a guest oven's lit byte and a guest plan's stage
+        // NEVER re-rendered for players already watching the gob.
+        let kind_changed = self
+            .world
+            .guests
+            .get(&id)
+            .map(|g| g.kind != kind)
+            .unwrap_or(false);
         self.world.guests.insert(
             id,
             crate::state::GuestGob {
@@ -3208,6 +3242,26 @@ impl Game {
                 if let Some(out) = self.sessions.get_mut(sid) {
                     out.send_raw(block.clone());
                     Self::record_unacked(out, id, frame, block.clone());
+                }
+            }
+        }
+        if kind_changed {
+            // Full-block re-render (OD_RES with the fresh sdt byte, pose,
+            // layers, health): the same wire shape as a fresh guest
+            // spawn, so OCache rebuilds the sprite exactly like the
+            // owner's local restage_gob path does for its own viewers.
+            // Every viewer here is by construction already rendering the
+            // gob (the visible set was snapshotted above).
+            if let Some(g) = self.world.guests.get_mut(&id) {
+                g.frame += 1;
+            }
+            let frame = self.world.guests.get(&id).map(|g| g.frame).unwrap_or(0);
+            for sid in &viewers {
+                if let Some(block) = self.encode_guest_block(*sid, id, true) {
+                    if let Some(out) = self.sessions.get_mut(sid) {
+                        out.send_raw(block.clone());
+                        Self::record_unacked(out, id, frame, block);
+                    }
                 }
             }
         }
@@ -3452,11 +3506,13 @@ impl Game {
 
     /// Spawn block for a guest (mirrors `encode_gob_block`'s player/animal
     /// branches reading the GuestGob row instead of the SoA columns).
-    fn encode_guest_block(&mut self, sid: SessionId, id: GobId) -> Option<Vec<u8>> {
+    fn encode_guest_block(&mut self, sid: SessionId, id: GobId, restage: bool) -> Option<Vec<u8>> {
         use crate::nodes::GuestKind;
         let g = self.world.guests.get(&id)?.clone();
         let out = self.sessions.get_mut(&sid)?;
-        if !out.visible.insert(id) {
+        // A restage block re-renders a gob the session ALREADY sees (kind
+        // flip / sdt byte change); a fresh spawn only fires once.
+        if !restage && !out.visible.insert(id) {
             return None;
         }
         let mut m = MessageBuf::new();
@@ -3468,6 +3524,7 @@ impl Game {
             res_name,
             crop,
             station,
+            stage,
             ..
         } = &g.kind
         {
@@ -3479,16 +3536,23 @@ impl Game {
             // sprite on a stage change). Stations (session 33) carry
             // their lit byte the same way, so a lit oven re-renders on
             // every re-published GuestUpdate without a new OD kind.
+            // Construction plans (session 34) carry their build stage
+            // the same way, so a peer watching a build sees the same
+            // stage sprite the local restage path emits.
             if let Some(view) = station {
                 m.uint8(OD_RES).uint16(w | 0x8000);
                 m.uint8(1).uint8(view.lit as u8);
             } else {
-                match crop {
-                    Some((_spec, stage)) => {
+                match (crop, stage) {
+                    (Some((_spec, cstage)), _) => {
                         m.uint8(OD_RES).uint16(w | 0x8000);
-                        m.uint8(1).uint8(*stage);
+                        m.uint8(1).uint8(*cstage);
                     }
-                    None => {
+                    (None, Some(pstage)) => {
+                        m.uint8(OD_RES).uint16(w | 0x8000);
+                        m.uint8(1).uint8(*pstage);
+                    }
+                    (None, None) => {
                         m.uint8(OD_RES).uint16(w);
                     }
                 }
@@ -3621,7 +3685,7 @@ impl Game {
                 out.res.mark_announced(w);
             }
         }
-        if let Some(block) = self.encode_guest_block(sid, id) {
+        if let Some(block) = self.encode_guest_block(sid, id, false) {
             let frame = self.world.guests.get(&id).map(|g| g.frame).unwrap_or(0);
             if let Some(out) = self.sessions.get_mut(&sid) {
                 out.send_raw(block.clone());
@@ -5997,6 +6061,11 @@ impl Game {
                 self.world.gobs.frame[slot] += 1;
             }
             self.restage_gob(gob);
+            // Cluster (session 34): a stage advance re-renders for LOCAL
+            // viewers through restage_gob; peers watching the build get
+            // the same sdt byte through a GuestUpdate re-publish. Without
+            // this a foreign player's plan sprite never leaves stage 0.
+            self.publish(gob, GuestEv::Update);
         }
         info!(sid, id = buildable.id, n, res = resname, "material sunk");
     }
@@ -6044,6 +6113,14 @@ impl Game {
             self.world.structure_at.insert(plan.tile, gob);
         }
         self.restage_gob(gob);
+        // Cluster (session 34): completion flips the guest row's class
+        // Structure -> Station and attaches the StationView snapshot.
+        // Every guest interaction (fuel, input, Light menu, relay acts)
+        // keys off the Station class, so without this re-publish a peer
+        // watching the build keeps a dead Structure guest forever - the
+        // session-33 handoff gap, now driven end to end by
+        // probe_station.py.
+        self.publish(gob, GuestEv::Update);
         info!(id = buildable.id, gob, quality, "structure completed");
     }
 
@@ -11440,6 +11517,7 @@ mod tests {
                     class: crate::nodes::StaticClass::Drop,
                     crop: None,
                     station: None,
+                    stage: None,
                 },
                 hp: 1,
                 max_hp: 1,
@@ -12497,6 +12575,252 @@ mod tests {
             }
             other => panic!("a station publishes as a static, got {other:?}"),
         }
+    }
+
+    /// Session 34: a plan's stage advance (a credited material crossing
+    /// the stage boundary) re-publishes the guest state to every
+    /// subscribed peer, carrying the new construction stage so the
+    /// peer's plan sprite re-renders exactly like the local restage
+    /// path. Before session 34 the stage byte never left the node.
+    #[tokio::test]
+    async fn plan_stage_advance_republishes_stage() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("planstage", 0, 2);
+        // A fresh oven plan on a PEER-owned cell: exactly what
+        // build_plan places and sink_material credits.
+        let (fx, fy) = foreign_cell_pos(&g, 0);
+        let tile = (fx.div_euclid(11), fy.div_euclid(11));
+        let pos = (tile.0 * 11 + 5, tile.1 * 11 + 5);
+        let res = g.world.res.intern("gfx/terobjs/oven");
+        let gob = g
+            .world
+            .gobs
+            .spawn(Kind::Plan { spec: 0, stage: 0 }, pos, res, 1, 0);
+        g.world.plans.insert(
+            gob,
+            crate::build::PlanState {
+                spec: 0,
+                tile,
+                credited: Vec::new(),
+            },
+        );
+        g.world.plan_at.insert(tile, gob);
+        // A subscribed peer: its subscription covers the plan's cell.
+        let cell = crate::visidx::cell_of(pos.0, pos.1);
+        g.cluster
+            .as_mut()
+            .unwrap()
+            .peer_subs
+            .insert(1, std::iter::once(cell).collect());
+        while let Ok((_, _)) = mesh_rx.try_recv() {}
+        // Sink the stone stack through the REAL material path: the oven
+        // demand is stone x2 + branch x1 over 2 stages, so a two-stone
+        // stack crosses the 2/3 boundary and advances stage 0 -> 1.
+        let stone = g.world.res.intern("gfx/invobjs/stone");
+        let stack = crate::state::InvStack {
+            res: stone,
+            count: 2,
+            ql: 10,
+            label: "",
+        };
+        g.sink_material(1, gob, stack);
+        let mut saw_stage = false;
+        while let Ok((_, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::GuestUpdate(st) = msg {
+                if st.id == gob {
+                    match st.kind {
+                        crate::nodes::GuestKind::Static {
+                            class,
+                            stage: Some(stage),
+                            ..
+                        } => {
+                            assert_eq!(class, crate::nodes::StaticClass::Structure);
+                            assert_eq!(stage, 1, "two stones advance the plan to stage 1");
+                            saw_stage = true;
+                        }
+                        other => panic!("expected a staged plan static update, got {other:?}"),
+                    }
+                }
+            }
+        }
+        assert!(saw_stage, "stage advance publishes a GuestUpdate");
+    }
+
+    /// Session 34: completing a plan re-publishes the guest state with
+    /// the REAL kind - a finished oven publishes as the Station class
+    /// with its readiness snapshot, so a subscribed peer's flower menu,
+    /// fuel, input and light relay all come alive the moment the build
+    /// completes. Before this re-publish the peer kept a dead Structure
+    /// guest forever (every station interaction keys off the Station
+    /// class).
+    #[tokio::test]
+    async fn plan_completion_republishes_station_class() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("plancomp", 0, 2);
+        let (fx, fy) = foreign_cell_pos(&g, 0);
+        let tile = (fx.div_euclid(11), fy.div_euclid(11));
+        let pos = (tile.0 * 11 + 5, tile.1 * 11 + 5);
+        let res = g.world.res.intern("gfx/terobjs/oven");
+        let gob = g
+            .world
+            .gobs
+            .spawn(Kind::Plan { spec: 0, stage: 1 }, pos, res, 1, 0);
+        // Fully credited: stone x2 + branch x1 completes the oven.
+        g.world.plans.insert(
+            gob,
+            crate::build::PlanState {
+                spec: 0,
+                tile,
+                credited: vec![
+                    crate::build::Credited {
+                        res: "gfx/invobjs/stone",
+                        count: 2,
+                        ql_sum: 20,
+                    },
+                    crate::build::Credited {
+                        res: "gfx/invobjs/branch",
+                        count: 1,
+                        ql_sum: 10,
+                    },
+                ],
+            },
+        );
+        g.world.plan_at.insert(tile, gob);
+        let cell = crate::visidx::cell_of(pos.0, pos.1);
+        g.cluster
+            .as_mut()
+            .unwrap()
+            .peer_subs
+            .insert(1, std::iter::once(cell).collect());
+        while let Ok((_, _)) = mesh_rx.try_recv() {}
+        g.complete_plan(gob);
+        let mut saw_station = false;
+        while let Ok((_, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::GuestUpdate(st) = msg {
+                if st.id == gob {
+                    match st.kind {
+                        crate::nodes::GuestKind::Static {
+                            class,
+                            station: Some(view),
+                            ..
+                        } => {
+                            assert_eq!(class, crate::nodes::StaticClass::Station);
+                            assert_eq!(view.spec, 0);
+                            assert!(!view.lit, "a fresh oven is unlit");
+                            assert_eq!(view.fuel, 0);
+                            assert!(!view.has_input);
+                            saw_station = true;
+                        }
+                        other => panic!("expected a station static update, got {other:?}"),
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_station,
+            "completion publishes the Station class to peers"
+        );
+    }
+
+    /// Session 34: a GuestUpdate whose kind payload CHANGED (class flip,
+    /// stage advance, lit byte) re-renders the sprite for every session
+    /// already rendering the gob - the wire mirror of restage_gob.
+    /// Before this the existing-guest path only streamed pose, move and
+    /// hp deltas, so a lit guest oven never re-rendered for the players
+    /// watching it (the session-33 comment claimed it did).
+    #[tokio::test]
+    async fn guest_kind_flip_re_renders_existing_viewer() {
+        let (mut g, _rx, mut raw, _mesh) = clustered_game("kindflip", 0, 2);
+        // A guest oven the player ALREADY sees: announce it through the
+        // real path, tick the vis scan so it spawns for session 1, then
+        // flip the lit byte through a GuestUpdate.
+        let gob = built_oven(&mut g, 1, None);
+        let slot = g.world.gobs.get(gob).unwrap();
+        let mut st = g.guest_state_from_slot(gob, slot).unwrap();
+        g.world.gobs.kill(gob);
+        g.world.stations.remove(&gob);
+        g.on_node_msg(crate::nodes::NodeMsg::GuestAnnounce(st.clone()));
+        g.tick();
+        assert!(
+            g.sessions[&1].visible.contains(&gob),
+            "the guest oven must be visible before the flip"
+        );
+        while raw.try_recv().is_ok() {}
+        // The authority lights it: the re-published GuestUpdate carries
+        // the flipped lit byte in its snapshot.
+        st.kind = crate::nodes::GuestKind::Static {
+            res_name: "gfx/terobjs/oven".into(),
+            class: crate::nodes::StaticClass::Station,
+            crop: None,
+            station: Some(crate::nodes::StationView {
+                spec: 0,
+                lit: true,
+                fuel: 3,
+                has_input: true,
+            }),
+            stage: None,
+        };
+        g.on_node_msg(crate::nodes::NodeMsg::GuestUpdate(st));
+        // Wire proof: the raw stream carries an OD_RES re-render with
+        // the fresh sdt byte for the flipped gob (wire id | 0x8000,
+        // len 1, byte 1 - the same shape encode_guest_block emits for
+        // a fresh spawn).
+        let mut saw_lit_restage = false;
+        while let Ok(block) = raw.try_recv() {
+            if block.first() != Some(&MSG_OBJDATA) {
+                continue;
+            }
+            if block.len() < 14 {
+                continue;
+            }
+            let id = i32::from_le_bytes([block[2], block[3], block[4], block[5]]);
+            if id != gob {
+                continue;
+            }
+            // Skip the frame, then read the OD sequence: OD_RES with the
+            // sdt extension must carry byte 1 (lit).
+            let mut off = 10;
+            while off < block.len() {
+                match block[off] {
+                    OD_END => break,
+                    OD_RES => {
+                        let wire = u16::from_le_bytes([block[off + 1], block[off + 2]]);
+                        if wire & 0x8000 != 0 {
+                            let len = block[off + 3] as usize;
+                            assert!(len >= 1, "lit sdt payload missing");
+                            assert_eq!(
+                                block[off + 4],
+                                1,
+                                "the re-render must carry the lit sdt byte"
+                            );
+                            saw_lit_restage = true;
+                        }
+                        off += 3 + if wire & 0x8000 != 0 {
+                            1 + block[off + 3] as usize
+                        } else {
+                            0
+                        };
+                    }
+                    OD_MOVE => off += 9,
+                    OD_LINBEG => off += 21,
+                    OD_LINSTEP => off += 5,
+                    OD_HEALTH => off += 2,
+                    OD_LAYERS => {
+                        off += 3;
+                        while off + 1 < block.len() {
+                            let l = u16::from_le_bytes([block[off], block[off + 1]]);
+                            off += 2;
+                            if l == 0xFFFF {
+                                break;
+                            }
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        }
+        assert!(
+            saw_lit_restage,
+            "a kind flip must re-render OD_RES with the fresh sdt byte"
+        );
     }
 
     /// A guest oven click opens the Light menu LOCALLY (session UI) from
