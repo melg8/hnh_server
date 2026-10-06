@@ -1724,3 +1724,86 @@ NEXT (handoff):
   boundary depends on BOTH nodes having populated the same grid. The
   clean fix is owner-filtered populate + a Sub-driven populate/announce
   on the authority; design it with the station relay above.
+
+## 2026-10-06 - Session 33: station menus relay, owner-filtered populate
+Both NEXT items from session 32 landed: the LAST session-UI surface
+(station Light/Extinguish + fuel/input delivery) now crosses nodes, and
+the shadow-statics defect is fixed at the root.
+
+WHAT (commit f4f6f89 + fd06ce7):
+- STATIONS RELAY. Stations publish as StaticClass::Station with a
+  StationView snapshot {spec, lit, fuel, has_input} piggybacked on the
+  guest payload (additive field, bincode-positional like every node-link
+  change). A guest oven click opens the flower menu LOCALLY from the
+  snapshot (session UI lives on the home node - the crop-menu pattern);
+  the menu arms with the act intent picked from `lit`. The choice relays
+  RelayStationAct{Light/Extinguish}; the authority re-validates against
+  its own StationState in the SAME order as the local menu path
+  (stale-lit -> Stale silent, fuel -> NeedsFuel, input -> NeedsInput),
+  applies the transitions, re-renders through set_station_lit and
+  answers StationAck. Refusal acks render the EXACT system lines the
+  local path emits ("The oven needs fuel first." etc) - cross-node UX
+  parity. Fuel/input delivery: a held-stack click on a guest oven ships
+  RelayStationItem with the stack described by NAME (res/ql/label);
+  the cursor stack is consumed ONE unit only on the FuelAdded/
+  InputLoaded ack (the session-31 seed-safe pattern - a refused or lost
+  relay never destroys an item); every refusal maps to its local
+  system line. set_station_lit / station_itemact re-publish
+  GuestUpdate so subscribers re-render lit/fuel/input changes from the
+  sdt byte (same OD_RES|0x8000 shape as crop stages).
+- OWNER-FILTERED POPULATE (the session-32 DISCOVERED defect).
+  populate_grid/populate_animals take an owner filter in cluster mode:
+  a node spawns only content whose VisIndex cell it owns. Before: every
+  node populated every grid it looked at, so each carried shadow
+  statics for foreign cells, and populate_animals' per-node rng placed
+  DIFFERENT animals than the owner's roll (two desynced copies near
+  every boundary). Now on_mapreq materializes only the TILES (seed-
+  deterministic, identical everywhere) and the CELL OWNER materializes
+  the content: a peer's Sub runs populate_for_subscriber, which
+  materializes the authority's part of every grid the subscribed cells
+  touch (grids_touching_cell: a 250-subtile cell touches 1-2 grids per
+  axis, at most 4) and announces EVERY gob held in the subscribed cells
+  - freshly spawned AND pre-existing (stations, structures, earlier
+  statics) - so the subscriber's view starts from the single
+  authoritative copy.
+
+EVIDENCE: 187 unit tests green (11 new: station publish snapshot,
+guest click -> menu + relay, authority act validation order incl.
+stale/extinguish-preserves-input, item relay ships + cursor untouched
+before ack, authority item validation order, ack cursor consumption,
+refusal system lines, owner-filtered spawn, Sub-driven populate
+announce, grids_touching_cell coverage), clippy -D warnings clean, fmt
+clean. verify_session33.sh (station/populate/wire/cluster phases).
+SESSION30 E2E green ON THIS TREE: 600-bot window p50 10.8ms max
+50.7ms, cluster 60+60 cohorts max tick 9.7/9.0ms, shard persist +
+restart restore 60+60. Session-32 wire + relay-plow + decay-revert
+phases re-run green.
+
+DESIGN NOTE for the station relay: the flower menu is one-shot session
+UI, so StationAck refusals re-render through system lines instead of a
+widget state push; if station fuel/progress WIDGETS ever land (the
+legacy oven had four slots + a gauge), the snapshot already carries
+fuel/has_input and the natural next step is a widget-state snapshot on
+the ack instead - no protocol change needed, the payload is there.
+
+VERIFICATION GAP (deliberate, timeboxed): the station relay is proven
+by unit tests on both sides of the mesh channel (home: click->menu->
+relay->ack handling; authority: validation/apply/ack) and the cluster
+story re-run green, but there is NO real-cluster probe driving a live
+client through a guest oven light+fuel yet (needs an oven built or
+spawned on the peer's side of a boundary - the probe_plow.py pattern
+with a built_oven fixture). That is the first candidate for the next
+session's cluster probe.
+
+NEXT (handoff):
+- real-cluster station probe (probe_station.py): drive a live client to
+  fuel + light a guest oven through the real mesh; the unit coverage
+  above defines the assertions.
+- craft pagina ad->action wiring for remaining recipes (wiki-verified
+  numbers only - do not invent).
+- carrying-pose state for bows (depends on a bow being craftable).
+- load-test story for the sharded save at 300+ bot cohorts per node
+  (today's evidence is 60/node; the 600-bot window is single-node).
+- populate_for_subscriber announces by scanning gobs_in_view per cell -
+  fine at 60-bot cohorts, revisit if the announce burst shows up in the
+  perf counters at 300+.
