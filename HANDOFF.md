@@ -1562,5 +1562,10 @@ menus); vis-cache: cheapen the Full path (bucket pos storage instead of
 per-id lookups) if 10k sessions on one node becomes a real target -
 today the cluster split carries that goal.
 
-Real-client e2e: attempted after re-provisioning; see the session-30
-commit trail for the verdict recorded below.
+Real-client e2e after sandbox re-provisioning (deploy-agent-env.sh +
+ant jar with JDK8): FULL regression green on the final tree -
+MOVEMENT: MOVED, all five WALKDIR legs ARRIVED, SPEED 3.43 tiles/s OK,
+NO TELEPORT OK, RAPID CLICKS: GLIDING, PORTRAIT layers present, EQUIPVIS
+OK (doll recomposites linenpants), CURSOR OK (drag + ground drop +
+pickup restored through the REAL widget chain - covers the session-30
+pickup-merge changes), GROUNDDROP OK.
