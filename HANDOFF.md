@@ -2316,3 +2316,98 @@ NEXT (handoff):
   in this pack, verified session 37).
 - re-run scripts/jogl/run-real-client-e2e.sh on a display-capable
   host when one is available (carried since session 34).
+
+## 2026-10-07 - Session 39: melee PvP between players (local openings duel + cross-node PvpSwing relay)
+
+The session-38 NEXT item "melee PvP between players" is CLOSED end to
+end. The LP/murder-consequences item stays open (legacy policy still
+undocumented); unit-count reconciliation vs RoB stays blocked.
+
+WHAT:
+
+- ENGAGEMENT (game.rs). Clicking another player with no bow opens the
+  party flower menu, which now carries a Fight petal: petal 0 invites,
+  petal 1 duels. Party refusals no longer block the menu - when the
+  invite does not apply (target partied / clicker's party full) the
+  menu opens as ["Fight", "Cancel"], because the duel is never gated
+  by party state. Cross-node guest players get the same Fight-only
+  menu (party membership has no cross-node relay). Confirming Fight
+  arms the attacker (fight_target), drops any live ranged aim, opens
+  the frv fight window on BOTH sides (the victim can answer
+  immediately through the frv select - the legacy two-sided duel),
+  and chats both lines ("You attack <name>!" / "<name> attacks you!").
+
+- LOCAL DUEL (tick_combat, new Kind::Player branch). The openings
+  economy runs against the VICTIM'S SESSION defence bar
+  (FightState::own_def) instead of an animal_fights row: swings spend
+  half the attacker's offence, respect atkc, chip SWING_DEF_DMG *
+  weight (weight 0.5..2.0 off the relation balance), and only an
+  opening (<= OPENING_THRESHOLD) passes (5*str/10).max(1) through
+  hurt_player (armor absorption, HP, knockout); the bar resets on the
+  break, both relations accrue IP, stamina -2 per swing. A lethal
+  swing knocks the victim out (50 HP floor, energy -10, full fight
+  reset) and the attacker's chat reports the defeat.
+
+- CROSS-NODE SPLIT (nodes.rs + game.rs). Every swing ships one
+  PvpSwing { attacker, victim, chip, dmg } to the VICTIM'S home node
+  (node_of_gob - the same authority split as PvpArrow); the guest
+  branch of tick_combat routes GuestKind::Player targets there while
+  guest animals keep the cell-owner RelayAttack. The victim's home
+  node chips the authoritative own_def, lands damage through
+  hurt_player + victim chat + gfx/fx/hit, and answers PvpSwingResult
+  { attacker, victim, def, landed, killed }; the attacker's node
+  re-syncs its guest_fights mirror + relation view from the answer
+  and closes the duel on a knockout. GuestRetract still tears the
+  duel down when the victim walks out of view (common teardown path).
+
+- LATENT BUGS FOUND AND FIXED. (1) FightState::new() now starts the
+  defence bar FULL - derive-Default left own_def at 0, which opened
+  every fresh session to instant damage from the first bite/swing.
+  (2) Animal bites never wrote the chipped defence back (the local
+  new_def was compared and dropped); the chip now accumulates across
+  bites until the opening, matching the documented openings economy.
+
+- WIRE PROBE (scripts/probe_melee.py). The full client-path chain
+  against a live server: two players enter, the attacker gob-clicks
+  the victim, the flower menu opens, petal 1 (Fight) arms the duel,
+  both sides get their attack line + frv window, the attacker chases
+  into reach and swings until the opening, and the probe observes
+  "You hit meleevic-... for 5 damage.", the victim's "hits you" line,
+  and the victim's OD_HEALTH quarters dropping to 3/4. MELEE WIRE:
+  OK (found the stale-server trap on the way: ensure_server reuses a
+  listening binary from a previous session - kill it first when the
+  probe's flower menu opens but no Fight petal lands).
+
+- DOCS. combat-system.md gained the "Implemented melee PvP model"
+  section and lost the stale "melee PvP between players is NOT
+  implemented" claim; communication.md documents the Fight petal and
+  the no-refusal-on-party-state behavior.
+
+EVIDENCE: 207 unit tests green (7 new: duel-open through the real
+menu path, chip-until-opening with stamina, lethal knockout teardown,
+mutual duel swinging both ways, relay ship exactly one PvpSwing,
+authority apply + answer non-lethal and lethal, result resync +
+knockout close). clippy -D warnings clean, fmt clean.
+scripts/verify_session39.sh (melee-units/full/lint/boot):
+SESSION39 VERIFY: OK. probe_melee.py against a live server:
+MELEE WIRE: OK.
+
+NOT DONE THIS SESSION (rolled to NEXT):
+- LP/murder consequences for PvP knockouts (criminal state, scents) -
+  legacy policy undocumented; needs a source or a written server
+  policy decision.
+- Unit-count reconciliation of the bow chain vs RoB (sources still
+  behind Cloudflare).
+- GL-client run on a display-capable host (carried since session 34).
+
+NEXT (handoff):
+- PvP consequences: decide and document the LP/criminal policy for
+  player knockouts (a written server policy is acceptable - mark it
+  in combat-system.md Open questions when sourced numbers exist).
+- Weapons for melee PvP (the unarmed model covers everyone; weapon
+  base-damage table needs legacy item resources - Open question 8).
+- Maneuver selection in the frv window (the give handshake exists;
+  the maneuver/IP move economy is still animal-vs-player only).
+- Re-run the Windows launcher smoke against the session-39 binary
+  (verify_windows_gameres.sh should be unchanged, but re-run after
+  any resource regeneration).
