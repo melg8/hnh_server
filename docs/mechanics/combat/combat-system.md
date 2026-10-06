@@ -261,6 +261,32 @@ The unarmed openings duel is live between two players, locally and across nodes 
 - **Knockout**: a lethal swing drops the victim to the 50 HP floor, energy -10, clears their fight state (relations, bars, fight_target), tears down the attacker's duel, and chats "You have defeated your target!" on the attacker's side. Players never die as gobs.
 - **Cross-node authority split** (the same split as PvpArrow): the attacker's node owns the aim bars, the frv window and the swing pacing; each swing ships one `PvpSwing { attacker, victim, chip, dmg }` to the VICTIM'S home node (`node_of_gob`), which owns the authoritative defence bar, armor, HP and the knockout path. The home node answers `PvpSwingResult { attacker, victim, def, landed, killed }`, and the attacker's node re-syncs its `guest_fights` mirror and the frv relation view from the answer (a lost frame self-heals on the next swing, exactly like the animal FightBars loop). The mirror also chips locally with the same arithmetic for UI prediction. Guest retraction (the victim walks out of view) closes the duel through the common guest-fight teardown path.
 
+### Melee weapons (server, session 40)
+
+`fight.rs` carries the weapon base-damage table and every swing path reads it through `Game::melee_dmg` (local PvP, animal fights, and the cross-node relays - the chip-0/cross-node swings ship the weapon number the same way):
+
+- **Formula (server policy)**: `dmg = base * sqrt(q/10) * (str/10)` - the same QM sqrt scaling the armor and bow systems already use. The RoB linear formula `basedamage * ql * str / 10` does not reproduce its own worked example (see items-and-quality.md Open questions), so the pack-consistent sqrt model was chosen and is marked as policy.
+- **Table**: the stone axe (`gfx/invobjs/axe`, the pack's craftable melee weapon) sits at base 15 - three unarmed blows at q10/str10, still far under the bow's 75. New weapons are one table row each.
+- **Unarmed fallback**: no weapon in any of the 16 equipment slots keeps the legacy strength-only `(5 * str / 10).max(1)` (Punch family).
+- **Slot policy**: the FIRST weapon found scanning the equipment slots wins (hand items live at slots 3/4; slot addressing is server-side policy per items-and-quality.md).
+
+### PvP knockout consequences (server, session 40)
+
+Legacy documents only the DEATH penalties (25-75% through the Tradition/Change slider); the knockout share was an open question. This server's written policy (all paths - local melee, arrows, and the relay authority split):
+
+- **The loser** forfeits **10% of unused LP** (floor 0), applied on the victim's home node; a chat line reports the loss.
+- **The winner** is flagged **CRIMINAL (assault) for 30 real minutes** (`CRIMINAL_MS`), refreshed by every new knockout. The flag is a live buff on the reliable stream: `RMSG_BUFF set` id 1 (real ids start at 1; the client's pseudo-buffs own -1..-3), icon `gfx/hud/buffs/thorn`, tooltip "Criminal (assault)", a countdown (`cmeter`/`cticks` in legacy 1/60 s ticks), and it re-streams on world entry (the client Glob is rebuilt per login). Expiry sweeps in the tick: `RMSG_BUFF rm` plus a chat line. The flag persists through the v5 save format (`criminal_until_ms`).
+
+### Maneuver economy (server, session 40)
+
+The `paginae/atk/*` buttons are live: world entry announces the root page plus every table entry, and MenuGrid sends `act("atk", id)` (verified against the pack's action layers - every ad pair is `["atk", <id>]`). `fight.rs` `MANEUVERS` (28 entries) and `game.rs` `on_maneuver`:
+
+- **Attack selections** fill the two-slot queue the client renders (frv `atk [cur, next]`: the previous current slides into `next`, the selection becomes `cur`; -1 renders an empty slot). **Dodge** sets the stance slot (frv `blk [res]`). **Boosts** are pure IP/advantage plays.
+- **IP economy** runs on the relation: cost from `ip_self`, gains to `ip_self`, and opponent deltas (`Throw Sand` -2, `Float Like A Butterfly` +1, `Valorous Strike` +2) apply to a LOCAL victim's own pool and stream both windows; a GUEST's authoritative pool stays on their home node (the attacker's `ip_other` mirror carries the prediction - a cross-node relay of maneuver deltas is a documented NEXT).
+- **Advantage** accumulates in TENTHS on the relation (`adv`, -50..+50) - fractional legacy gains like Seize The Day! +0.3 need the sub-integer source - and `sync_balance` rounds/clamps it to the wire dial (-5..+5). Advantage feeds the existing attack weight (x0.5..x2.0).
+- **Gating** (documented RoB numbers): Cleave needs >= 3 advantage; Battle Cry needs >= 14 IP; Invocation of Skuld needs >= 10 IP; every cost is checked against the current relation before anything mutates. Refusals chat the reason and change nothing.
+- All 28 IP costs/gains/advantage values with a legacy source carry it in the table comments (Sting 2, Chop 4, Sidestep 4/+1, Opportunity Knocks 5, Knock His Teeth Out! 6, Valorous Strike 6/+2 opp, Battle Cry 7/+2/needs 14, Cleave 8/needs 3 adv, Skuld 3/+1/needs 10, Charge! +1, Feign Flight +2, Throw Sand -2 opp, Butterfly +1 opp, Seize +0.3); the rest are this server's policy (see Open questions).
+
 ## How moves beat moves: the counterplay system
 
 The task of describing legacy combat as "rock-paper-scissors" resolves, in the documented sources, into a *weight contest plus advantage feedback loop* rather than a directional high/low or slash/chain/blunt triangle:

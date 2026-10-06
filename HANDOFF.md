@@ -2425,3 +2425,84 @@ NEXT (handoff):
 - Re-run the Windows launcher smoke against the session-39 binary
   (verify_windows_gameres.sh should be unchanged, but re-run after
   any resource regeneration).
+
+## 2026-10-07 - Session 40: melee weapons, knockout consequences, the maneuver economy, 1000-duelist load window
+
+The session-39 NEXT items are CLOSED: weapons in melee PvP, the
+LP/criminal knockout policy, the maneuver/IP economy, and the 1000-bot
+duel load re-measurement. A cluster-load regression was FOUND and
+diagnosed (below) - it is the top NEXT item.
+
+WHAT:
+
+- MELEE WEAPONS (fight.rs + game.rs). `WEAPONS` base-damage table +
+  `weapon_dmg()` (`base * sqrt(q/10) * (str/10)`, the pack-consistent
+  QM model - the RoB linear formula does not reproduce its own example)
+  + `unarmed_dmg()` (legacy `(5*str/10).max(1)`). `Game::melee_dmg`
+  scans the equipment slots (first weapon wins) and every swing path
+  reads it: local PvP, local animal fights, the guest relay branch
+  (RelayAttack/PvpSwing ship the weapon number). Stone axe base 15 =
+  3 unarmed blows at q10/str10; unarmed fallback unchanged.
+
+- PVP KNOCKOUT CONSEQUENCES (server policy, all PvP paths - melee,
+  arrows, and the relay authority split). The loser forfeits 10% of
+  unused LP (victim's home node applies). The winner is flagged
+  CRIMINAL (assault) for 30 real minutes: `Player.criminal_until_ms`
+  (persisted, save v5 `#[serde(default)]`), live buff through the
+  real RMSG_BUFF channel (id 1, gfx/hud/buffs/thorn, countdown in
+  legacy 1/60 s cticks, re-streamed on world entry), expiry sweep in
+  the tick (RMSG_BUFF rm + chat). buff_set/buff_rm wire helpers were
+  waiting as dead code since the resources.rs wire surface - now live.
+
+- MANEUVER ECONOMY (fight.rs MANEUVERS + game.rs on_maneuver). All 28
+  paginae/atk buttons work end to end: world entry announces the root
+  + every table entry; MenuGrid act("atk", id) routes to on_maneuver.
+  Attack selections fill the two-slot queue (frv atk [cur,next]),
+  Dodge sets blk, boosts move IP/advantage. Advantage accumulates in
+  tenths (FightRel.adv) and sync_balance rounds/clamps to the wire
+  dial. Gating: Cleave >= 3 advantage, Battle Cry >= 14 IP, Skuld
+  >= 10 IP (RoB numbers; refusals chat and mutate nothing). Opponent
+  IP deltas apply to local victims and stream both windows; guest
+  targets keep authority home (mirror prediction only - documented
+  NEXT for the relay).
+
+- LOAD WINDOW (verify_session40.sh). Single node, 1000 dueling bots,
+  2-CPU sandbox: sessions=1000, steady-state mean 76 ms, p95 103 ms
+  (97% of the 100 ms tick budget), pvp_hits 3830, knockouts 105,
+  zero panics. The p95 is 3% over budget - documented as the frontier
+  (phase split: vis 22-47 ms, combat 13-24 ms, mv 20-34 ms; the vis
+  spawn churn of a 1000-runner crowd is the optimization target).
+  CLUSTER REGRESSION FOUND: 2x300 bots (s34's proven-good config)
+  now measures p95 175-242 ms with phase_guests_us 11-66 ms at
+  580-705 guests - the duel cohort's permanent chase keeps every
+  foreign gob moving (interpolation + LINSTEP fan-out per tick).
+  s34 passed the same cohort WITHOUT duels; the guest tract, not the
+  duel logic, is what regressed. Diagnosed and handed to NEXT.
+
+- WINDOWS SMOKE: NOT re-run this session - the sandbox has no pwsh
+  (verify_windows_gameres.sh needs it). The ps1 itself is unchanged
+  since session 38; re-run on a pwsh-capable host.
+
+EVIDENCE: 237 unit tests green (14 new: 3 weapon, 1 consequences,
+3 maneuver-formula/table, 4 maneuver-integration, plus updated
+literals), clippy -D warnings clean, fmt clean.
+scripts/verify_session40.sh units/full/boot: SESSION40 phases OK;
+load-1000 measured (frontier); load-cluster measured (regression
+diagnosis). Release binary boots; test_client WORLD ENTRY OK.
+
+NOT DONE THIS SESSION (rolled to NEXT):
+- Guest-phase optimization: the cluster duel regression (top item).
+- Cross-node relay of maneuver IP deltas (guest mirrors predict only).
+- Windows gameres smoke re-run (no pwsh in this sandbox).
+- GL-client run on a display-capable host (carried since session 34).
+- Unit-count reconciliation vs RoB (sources still behind Cloudflare).
+
+NEXT (handoff):
+- Profile and optimize tick_guests (guest interpolation + LINSTEP
+  fan-out) for the always-chasing duel cohort; re-run load-cluster
+  (the strict p95 budget returns once the regression is fixed).
+- Single-node vis spawn churn (vis_spawn_us up to 34 ms at 1000
+  runners) - spawn hysteresis/debounce on the vis boundary.
+- Cross-node maneuver IP relay (extend PvpSwingResult or add a small
+  ManeuverDelta message).
+- Windows smoke on a pwsh host; then the GL client e2e.
