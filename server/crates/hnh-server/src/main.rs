@@ -281,8 +281,9 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     if !res_dir.is_dir() {
         return Err(anyhow::anyhow!(
             "resource dir '{}' not found; generate it with \
-             powershell -File windows/make-gameres.ps1 (extracts lib/haven-res.jar) \
-             or pass --res-dir DIR",
+             powershell -File windows/make-gameres.ps1 (Windows) or \
+             server/scripts/make-gameres.sh (Linux) - both extract \
+             lib/haven-res.jar and overlay res/compiled - or pass --res-dir DIR",
             res_dir.display()
         ));
     }

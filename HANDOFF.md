@@ -1400,3 +1400,51 @@ are per-node); craft pagina ad->action wiring for remaining recipes;
 vis-scan result caching; carrying-pose state for bows; cursor pickup
 redirection (merge stacks); relay pickup/build against guest STATIC gobs
 (drops/structures) - the same RelayAttack pattern with an action enum.
+
+## 2026-10-05 - Session 29 (continued): cluster save story landed + sandbox re-provisioning
+Continuation under .unlazy/session29 (no dir; see this entry). The
+interrupted session-29 work (685 uncommitted lines found in the tree) was
+validated, completed and pushed.
+
+WHAT (already summarized in the cluster save story commit a294c5c):
+account-scoped save keys (`account:charname`, legacy bare-name snapshots
+adopted on load), per-node shard files (`save/cluster_nN.json` via
+HNH_SAVE_FILE default per node index), two-phase cross-node character
+migration (CharQuery broadcast over the mesh with a 700 ms retry and a
+6 s deadline, CharData re-served until CharAck, CharNack short-circuit;
+a downed peer never blocks a login).
+
+EVIDENCE: 152 unit tests green, fmt/clippy clean.
+server/scripts/verify_session29.sh: PHASE1 (shard isolation on disk),
+PHASE2 (same-node restore after restart), PHASE3 (cross-node migration,
+snapshot physically moves n0 -> n1 shard files) - SESSION29 E2E: OK.
+One stale grep pattern in the script was fixed ('serving snapshot to
+peer' is the actual log line).
+
+SANDBOX RESET RECOVERY (important for every future session): the tool
+sandbox was wiped between sessions - JDK8/JOGL/X11 tools, build/ and the
+gitignored gameres/ pack were gone. Recovery path, now fully scripted:
+1) bash scripts/jogl/deploy-agent-env.sh (now ALSO regenerates the
+   gameres pack when missing), 2) ant jar with JAVA_HOME=JDK8, 3) rerun
+   scripts/jogl/run-real-client-e2e.sh. New: server/scripts/make-gameres.sh
+   (Linux mirror of windows/make-gameres.ps1) - extracts lib/haven-res.jar
+   then overlays res/compiled. WITHOUT the res/compiled overlay the real
+   client 404s gfx/hud/vilind (KinInfo static init) and EVERY movement
+   verdict degrades to STUCK - the pack overlay is load-bearing for the
+   client e2e. Symptom signature for the future: client log shows
+   LoadException gfx/hud/vilind + ExceptionInInitializerError + player
+   frozen at spawn; the server silently falls back to a stale
+   server/gameres dir (exe-anchored candidate #2) when repo-root gameres
+   is missing.
+
+REAL CLIENT e2e AFTER the account-keying change: FULL regression green -
+MOVEMENT: MOVED, WALKDIR all five directions ARRIVED, NO TELEPORT: OK,
+RAPID CLICKS: GLIDING, PORTRAIT layers present, EQUIPVIS VERDICT: OK
+(doll recomposites linenpants), CURSOR drag + GROUNDDROP OK. The
+account-scoped save keys did not regress the real client path.
+
+NEXT (handoff): craft pagina ad->action wiring for remaining recipes;
+vis-scan result caching; carrying-pose state for bows; cursor pickup
+redirection (merge stacks); relay pickup/build against guest STATIC gobs
+(drops/structures) - the same RelayAttack pattern with an action enum;
+load-test story for the sharded save (per-node bot cohorts persisting).

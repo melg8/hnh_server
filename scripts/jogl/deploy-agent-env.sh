@@ -81,6 +81,16 @@ have Xvfb || fail "Xvfb missing: install xvfb (system package)"
 dpkg -l 2>/dev/null | grep -q libgl1-mesa-dri || \
   echo "WARNING: libgl1-mesa-dri (Mesa llvmpipe) not detected"
 
+# --- Server resource pack (gitignored; the client 404s without it) ---
+# Overlay: lib/haven-res.jar, then res/compiled. The real client's KinInfo
+# static init hard-loads gfx/hud/vilind, which only exists in res/compiled -
+# a missing pack breaks gob setup and every movement verdict downstream.
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+if [ ! -f "$REPO_ROOT/gameres/gfx/hud/vilind.res" ]; then
+  echo "== generating gameres resource pack"
+  bash "$REPO_ROOT/server/scripts/make-gameres.sh" || fail "gameres generation"
+fi
+
 echo "DEPLOY OK"
 echo "  JDK8:  $J8"
 echo "  JOGL:  $JOGL"
