@@ -201,8 +201,17 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     info!(workers, "tick workers");
     let save_path = match std::env::var("HNH_SAVE_FILE") {
         Ok(p) => std::path::PathBuf::from(p),
-        Err(_) => default_repo_dir("save").join("world.json"),
+        Err(_) => match &args.cluster {
+            // Cluster shards: one file per node in the SAME directory, so
+            // a dev-machine cluster shares the save store without
+            // concurrent writers colliding on one world.json. Keep the
+            // membership stable across restarts: shard placement follows
+            // the node index.
+            Some(_) => default_repo_dir("save").join(format!("cluster_n{}.json", args.node)),
+            None => default_repo_dir("save").join("world.json"),
+        },
     };
+    info!(save = %save_path.display(), "save path resolved");
     // Cluster mesh: spawned BEFORE the game task so peer links negotiate
     // while the world loads; inbound frames flow into the game command
     // channel as Cmd::NodeMsg.

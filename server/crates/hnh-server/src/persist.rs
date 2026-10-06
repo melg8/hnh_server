@@ -14,8 +14,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::Player;
 
+/// Full save key of a character: `<account>:<charname>`, with `:`
+/// stripped from the account so the separator stays unambiguous.
+/// The account is the authenticated login user (one character per
+/// account), which keeps two accounts' characters from colliding in the
+/// store and makes cluster character migration queries exact.
+pub fn save_key(account: &str, charname: &str) -> String {
+    let account = account.replace(':', "_");
+    format!("{account}:{charname}")
+}
+
 /// A serialized character snapshot (world position in subtiles).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `name` holds the full save key (`save_key`), not the display name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SavedPlayer {
     pub name: String,
     pub pos: (i32, i32),
@@ -28,18 +39,20 @@ pub struct SavedPlayer {
     pub inv: Vec<(String, u32, u8)>,
     /// Parallel display labels for `inv` (server-sent food names). Entries
     /// may be shorter than `inv` or absent (v1 saves): missing labels load
-    /// as empty strings. Kept additive so v1 files stay readable.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// as empty strings. NOTE: `skip_serializing_if` is intentionally NOT
+    /// used here - NodeMsg ships this struct over bincode, which is not
+    /// self-describing; omitted fields break positional deserialization.
+    #[serde(default)]
     pub inv_labels: Vec<String>,
     /// Purchased non-incrementable skills as `gfx/hud/skills/` basenames
     /// (v2, additive; absent in v1 saves -> empty). Incrementable skill
-    /// values live in `attrs`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// values live in `attrs`. Bincode-safe: `default` only, never skip.
+    #[serde(default)]
     pub skills: Vec<String>,
     /// Equipped paperdoll items as (slot 0..15, resource name, count,
     /// quality, label); only occupied slots are stored (v4, additive;
-    /// absent in older saves -> everything unequipped).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// absent in older saves -> everything unequipped). Bincode-safe.
+    #[serde(default)]
     pub equip: Vec<(usize, String, u32, u8, String)>,
 }
 
@@ -215,10 +228,11 @@ impl SaveStore {
         }
     }
 
-    /// Snapshot one online player. `inv_named` carries the inventory already
-    /// translated from process-local indices to resource names, with the
-    /// display labels parallel to the stacks. `equip_named` carries the
-    /// occupied paperdoll slots as (slot, resname, count, ql, label).
+    /// Snapshot one online player under its account save key. `inv_named`
+    /// carries the inventory already translated from process-local indices
+    /// to resource names, with the display labels parallel to the stacks.
+    /// `equip_named` carries the occupied paperdoll slots as
+    /// (slot, resname, count, ql, label).
     pub fn snapshot(
         &mut self,
         p: &Player,
@@ -227,10 +241,11 @@ impl SaveStore {
         inv_labels: Vec<String>,
         equip_named: Vec<(usize, String, u32, u8, String)>,
     ) {
+        let key = save_key(&p.account, &p.name);
         self.players.insert(
-            p.name.clone(),
+            key.clone(),
             SavedPlayer {
-                name: p.name.clone(),
+                name: key,
                 pos,
                 hp: p.hp,
                 energy: p.energy,
@@ -278,6 +293,7 @@ mod tests {
         let mut store = SaveStore::load(&path, 42);
         store.snapshot(
             &Player {
+                account: "tester".to_owned(),
                 name: "tester".to_owned(),
                 gob: 1,
                 equip: Vec::new(),
@@ -303,7 +319,10 @@ mod tests {
         store.flush(42).unwrap();
 
         let reloaded = SaveStore::load(&path, 42);
-        let p = reloaded.players.get("tester").expect("snapshot persisted");
+        let p = reloaded
+            .players
+            .get(&save_key("tester", "tester"))
+            .expect("snapshot persisted");
         assert_eq!(p.pos, (123, -456));
         assert_eq!(p.hp, 77);
         assert_eq!(p.lp, 12);
@@ -314,6 +333,13 @@ mod tests {
     }
 
     #[test]
+    fn save_key_separates_accounts_and_neutralizes_colons() {
+        assert_eq!(save_key("alice", "Player"), "alice:Player");
+        assert_eq!(save_key("a:b", "Player"), "a_b:Player");
+        assert_ne!(save_key("a:b", "Player"), save_key("a", "b:Player"));
+    }
+
+    #[test]
     fn seed_mismatch_starts_fresh() {
         let dir = std::env::temp_dir().join(format!("hnh-persist-seed-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -321,6 +347,7 @@ mod tests {
         let mut store = SaveStore::load(&path, 42);
         store.snapshot(
             &Player {
+                account: "a".to_owned(),
                 name: "a".to_owned(),
                 equip: Vec::new(),
                 gob: 1,

@@ -518,7 +518,12 @@ pub struct InvStack {
 /// Character vitals and attributes (docs/mechanics/character/*).
 #[derive(Debug, Clone)]
 pub struct Player {
+    /// In-world display name (the charlist entry the client picked).
     pub name: String,
+    /// Authenticated login account. Save keys are `account:name`, so two
+    /// accounts never share a character even though the legacy client's
+    /// single charlist entry is always called "Player".
+    pub account: String,
     pub gob: GobId,
     pub session: SessionId,
     /// Health 0..100 (SHP); reaching 0 knocks out then kills.
@@ -570,6 +575,8 @@ pub struct AnimalFight {
 pub struct SessionOut {
     #[allow(dead_code)] // echoed in session teardown bookkeeping
     pub sid: SessionId,
+    /// Authenticated login account (save keys are account-scoped).
+    pub account: String,
     pub queue: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     /// Bounded unreliable datagram fan-out (MAPDATA / OBJDATA); send_raw
     /// drops on a full queue exactly like a lost UDP datagram.

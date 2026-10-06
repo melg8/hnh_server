@@ -161,6 +161,34 @@ pub enum NodeMsg {
     /// Authority -> home: the guest attacker dealt the killing blow; the
     /// receiver grants the learning points (the LP wallet lives there).
     KillCredit { player_gob: i32, lp: i32 },
+    /// Cluster character migration (session 29). A node about to enter a
+    /// player whose save key it does not hold broadcasts this query. A
+    /// peer holding the snapshot offline answers CharData (re-serving it
+    /// on every retry until acknowledged); a peer without it answers
+    /// CharNack. `from` lets a node ignore its own broadcast echo.
+    CharQuery { from: usize, name: String },
+    /// Unicast answer to CharQuery: the full character snapshot, keyed by
+    /// the save key it was stored under. The receiver adopts it, acks
+    /// back (CharAck) and proceeds with the world entry. The holder keeps
+    /// its copy until the ack - a lost reply can always be re-served.
+    CharData {
+        to: usize,
+        from: usize,
+        name: String,
+        snap: crate::persist::SavedPlayer,
+    },
+    /// Unicast confirmation that the CharData snapshot was adopted. The
+    /// holder drops its copy only on receipt.
+    CharAck { name: String },
+    /// Unicast answer to CharQuery from a peer that does not hold the key
+    /// (or holds it online). Lets the requester enter immediately once
+    /// every peer answered - fresh logins must not wait out the deadline.
+    /// `to` routes to the requester, `from` identifies the answering peer.
+    CharNack {
+        to: usize,
+        from: usize,
+        name: String,
+    },
 }
 
 /// Length-prefix + bincode encode of one node message.
@@ -288,10 +316,11 @@ impl Mesh {
         let _ = self.out_tx.send((peer, msg));
     }
 
-    /// Broadcast to every peer.
-    pub fn broadcast(&self, count: usize, msg: NodeMsg) {
+    /// Broadcast to every peer EXCEPT `me` (self-addressed frames would
+    /// otherwise sit in an undrained queue and leak).
+    pub fn broadcast_except(&self, count: usize, me: usize, msg: NodeMsg) {
         for peer in 0..count {
-            if peer != usize::MAX {
+            if peer != me {
                 let _ = self.out_tx.send((peer, msg.clone()));
             }
         }
@@ -407,7 +436,9 @@ async fn serve_inbound(stream: TcpStream, me: usize, in_tx: UnboundedSender<Node
         tracing::debug!(error = %e, "cluster hello reply failed");
         return;
     }
+    tracing::debug!(peer, "cluster acceptor link up");
     pump_read(peer, rd, fr, in_tx).await;
+    tracing::debug!(peer, "cluster acceptor link closed");
 }
 
 /// Dialer-side link: send my Hello, validate the acceptor's reply, then
@@ -434,6 +465,7 @@ async fn pump_link(
         Some(other) => anyhow::bail!("unexpected cluster reply {other:?}"),
         None => anyhow::bail!("peer closed during handshake"),
     }
+    tracing::info!(peer, "cluster dial link up");
     pump_both(peer, rd, wr, fr, in_tx, out_rx).await
 }
 
@@ -506,6 +538,10 @@ fn msg_name(msg: &NodeMsg) -> &'static str {
         NodeMsg::GuestTransfer(_) => "guest_transfer",
         NodeMsg::RelayAttack { .. } => "relay_attack",
         NodeMsg::FightBars { .. } => "fight_bars",
+        NodeMsg::CharQuery { .. } => "char_query",
+        NodeMsg::CharData { .. } => "char_data",
+        NodeMsg::CharAck { .. } => "char_ack",
+        NodeMsg::CharNack { .. } => "char_nack",
         NodeMsg::PlayerHurt { .. } => "player_hurt",
         NodeMsg::KillCredit { .. } => "kill_credit",
     }

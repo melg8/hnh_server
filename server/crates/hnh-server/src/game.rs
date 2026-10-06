@@ -239,6 +239,9 @@ pub struct Game {
     populated: HashSet<(i32, i32)>,
     /// Character persistence store (loaded snapshots + live updates).
     pub save: crate::persist::SaveStore,
+    /// Sessions waiting on a cluster character migration (save key held by
+    /// a peer). A CharData reply or the deadline advances the entry.
+    pending_joins: HashMap<SessionId, PendingJoin>,
     /// Parsed etc/needed/fep.conf (food -> FEP vector).
     pub fep: crate::craft::FepTable,
     /// Number of parallel grid-owner workers used by the tick (data-parallel
@@ -251,6 +254,37 @@ pub struct Game {
     /// every cell is owned by node 0, authority checks short-circuit and no
     /// mesh socket exists (zero added tick cost vs the single-node build).
     pub cluster: Option<Cluster>,
+}
+
+/// A session whose world entry waits on a cluster character migration:
+/// the save key lives on a peer, which answers `NodeMsg::CharData`. If no
+/// answer arrives before the deadline the entry proceeds without a
+/// snapshot (fresh spawn) - a downed peer must not block logins.
+struct PendingJoin {
+    account: String,
+    chosen: String,
+    deadline: std::time::Instant,
+    /// Peers that answered (CharNack, or CharData which removes the join
+    /// outright). Entry proceeds early once every peer answered - the
+    /// deadline only bounds a dead-link cluster.
+    answered: HashSet<usize>,
+    /// Tick of the next CharQuery re-broadcast (mesh links buffer across
+    /// reconnects; a retry closes the query/reply race on a link that is
+    /// still negotiating).
+    next_retry: u64,
+}
+
+/// Re-broadcast an unanswered CharQuery every 700 ms (10 Hz tick).
+const CHAR_QUERY_RETRY_TICKS: u64 = 7;
+/// A pending join gives up after 6 s and enters fresh (a downed cluster
+/// must not block logins forever).
+const CHAR_QUERY_DEADLINE_MS: u64 = 6_000;
+
+impl PendingJoin {
+    /// True once every OTHER node answered the CharQuery.
+    fn peers_answered(&self, nodes: usize) -> bool {
+        nodes > 1 && self.answered.len() >= nodes - 1
+    }
 }
 
 /// Live multi-node state (session 27): peer subscriptions, guest
@@ -506,6 +540,7 @@ impl Game {
             overlay_seq: 0,
             populated: HashSet::new(),
             save,
+            pending_joins: HashMap::new(),
             fep,
             workers: 1,
             lp_ms_per_lp: {
@@ -581,9 +616,14 @@ impl Game {
                 }
                 ncmd = self.net_rx.recv() => {
                     match ncmd {
-                        Some(crate::net::NetCmd::Accept { game_tx, raw_tx, reply }) => {
+                        Some(crate::net::NetCmd::Accept {
+                            username,
+                            game_tx,
+                            raw_tx,
+                            reply,
+                        }) => {
                             let sid = self.alloc_sid();
-                            self.session_connected(sid, game_tx, raw_tx);
+                            self.session_connected(sid, username, game_tx, raw_tx);
                             let _ = reply.send(sid);
                         }
                         Some(other) => {
@@ -823,15 +863,18 @@ impl Game {
 
     /// Register a newly accepted session; shows the character list.
     /// `tx` is the sink the game task writes outgoing RMSG payloads into;
-    /// the session task owns the receiver.
+    /// the session task owns the receiver. `account` is the authenticated
+    /// login user (character save keys are account-scoped).
     pub fn session_connected(
         &mut self,
         sid: SessionId,
+        account: String,
         tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
         raw_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     ) {
         let mut out = SessionOut {
             sid,
+            account: account.clone(),
             queue: tx,
             raw: raw_tx,
             player_gob: None,
@@ -1083,6 +1126,67 @@ impl Game {
 
     /// Phase 3.2 (session-lifecycle.md): enter the world after `play`.
     fn enter_world(&mut self, sid: SessionId, name: String) {
+        self.enter_world_inner(sid, name, true);
+    }
+
+    /// World entry. `allow_defer` gates the cluster migration wait: a
+    /// session whose save key lives on a peer defers once (CharQuery
+    /// broadcast); the reply or the deadline re-enters with `false`, which
+    /// proceeds with whatever state is locally available.
+    fn enter_world_inner(&mut self, sid: SessionId, chosen: String, allow_defer: bool) {
+        let account = self
+            .sessions
+            .get(&sid)
+            .map(|o| o.account.clone())
+            .unwrap_or_default();
+        let key = crate::persist::save_key(&account, &chosen);
+        // Legacy saves (pre-account keying) stored characters under the
+        // bare display name; adopt the snapshot into this account's
+        // namespace so an existing single-node world survives the upgrade.
+        if !self.save.players.contains_key(&key) && self.save.players.contains_key(&chosen) {
+            if let Some(mut snap) = self.save.players.remove(&chosen) {
+                info!(%chosen, %account, "adopting legacy save key");
+                snap.name = key.clone();
+                self.save.players.insert(key.clone(), snap);
+            }
+        }
+        // Cluster: the key may live on a peer's shard. Ask before spawning
+        // fresh - deferring keeps the charlist widgets up and the client
+        // waits out a LAN round trip (bounded by the pending deadline).
+        // The query re-broadcasts every CHAR_QUERY_RETRY_MS from the tick
+        // drain: a link that is still negotiating buffers the retry and
+        // answers as soon as the mesh converges.
+        if allow_defer
+            && self.cluster_nodes() > 1
+            && !self.save.players.contains_key(&key)
+            && self.pending_joins.iter().all(|(_, j)| j.account != account)
+        {
+            if let Some(c) = self.cluster.as_ref() {
+                info!(sid, %key, "save key not local: querying cluster peers");
+                self.pending_joins.insert(
+                    sid,
+                    PendingJoin {
+                        account,
+                        chosen,
+                        deadline: std::time::Instant::now()
+                            + std::time::Duration::from_millis(CHAR_QUERY_DEADLINE_MS),
+                        answered: HashSet::new(),
+                        // First retry one cadence after the initial query.
+                        next_retry: CHAR_QUERY_RETRY_TICKS,
+                    },
+                );
+                c.mesh.broadcast_except(
+                    c.nodes.get(),
+                    c.me,
+                    crate::nodes::NodeMsg::CharQuery {
+                        from: c.me,
+                        name: key,
+                    },
+                );
+                return;
+            }
+        }
+        let name = chosen;
         // Destroy selection widgets.
         let widget_ids: Vec<u16> = {
             let Some(out) = self.sessions.get(&sid) else {
@@ -1099,9 +1203,9 @@ impl Game {
                 out.send(wdg::dst_wdg(id));
             }
         }
-        // Restore the persisted character when one exists for this name;
-        // the saved world position overrides the fresh-spawn search.
-        let saved_state = self.save.players.get(&name).map(|saved| {
+        // Restore the persisted character when one exists for this save
+        // key; the saved world position overrides the fresh-spawn search.
+        let saved_state = self.save.players.get(&key).map(|saved| {
             let mut restored_inv = Vec::with_capacity(saved.inv.len());
             for (n, (resname, count, ql)) in saved.inv.iter().enumerate() {
                 let idx = self.world.res.intern(leak_static(resname));
@@ -1200,6 +1304,7 @@ impl Game {
         }
         self.world.players.push(Player {
             name: name.clone(),
+            account,
             gob,
             session: sid,
             hp,
@@ -2018,7 +2123,142 @@ impl Game {
                     self.push_cattr(sid);
                 }
             }
+            NodeMsg::CharQuery { from, name } => {
+                // Cluster character migration, two-phase (query -> data ->
+                // ack). A peer holding the snapshot OFFLINE re-serves it on
+                // every query until the CharAck confirms adoption; a peer
+                // without the key (or with the character ONLINE - a live
+                // player keeps its home) answers CharNack.
+                if self.cluster.is_none() || from == self.cluster_me() {
+                    return;
+                }
+                let online = self
+                    .world
+                    .players
+                    .iter()
+                    .any(|p| crate::persist::save_key(&p.account, &p.name) == name);
+                if online || !self.save.players.contains_key(&name) {
+                    debug!(from, %name, "char query: nack (missing or online)");
+                    let me = self.cluster_me();
+                    self.cluster_mesh().send(
+                        from,
+                        NodeMsg::CharNack {
+                            to: from,
+                            from: me,
+                            name,
+                        },
+                    );
+                    return;
+                }
+                let Some(snap) = self.save.players.get(&name).cloned() else {
+                    return;
+                };
+                info!(from, %name, "char query: serving snapshot to peer");
+                let me = self.cluster_me();
+                self.cluster_mesh().send(
+                    from,
+                    NodeMsg::CharData {
+                        to: from,
+                        from: me,
+                        name,
+                        snap,
+                    },
+                );
+            }
+            NodeMsg::CharData {
+                to,
+                from,
+                name,
+                snap,
+            } => {
+                if self.cluster.is_none() || to != self.cluster_me() {
+                    return;
+                }
+                // Mark the peer answered even if the join is gone: a
+                // duplicate CharData after a retry needs no further nacks.
+                if let Some((_, join)) = self
+                    .pending_joins
+                    .iter_mut()
+                    .find(|(_, j)| crate::persist::save_key(&j.account, &j.chosen) == name)
+                {
+                    join.answered.insert(from);
+                }
+                let Some((sid, chosen)) = self
+                    .pending_joins
+                    .iter()
+                    .find(|(_, j)| crate::persist::save_key(&j.account, &j.chosen) == name)
+                    .map(|(s, j)| (*s, j.chosen.clone()))
+                else {
+                    debug!(%name, "late CharData with no pending join: dropped");
+                    return;
+                };
+                self.pending_joins.remove(&sid);
+                info!(sid, %name, pos = ?snap.pos, "char migration received: entering world");
+                self.save.players.insert(name.clone(), snap);
+                // Confirm adoption so the holder drops its copy.
+                self.cluster_mesh().send(from, NodeMsg::CharAck { name });
+                self.enter_world_inner(sid, chosen, false);
+            }
+            NodeMsg::CharAck { name } => {
+                // The requester adopted the snapshot: the migration is
+                // durable. Drop the local copy and persist the removal.
+                if self.cluster.is_none() || !self.save.players.contains_key(&name) {
+                    return;
+                }
+                info!(%name, "char ack: dropping migrated snapshot");
+                self.save.players.remove(&name);
+                if let Err(e) = self.save.flush(self.world.seed) {
+                    tracing::warn!(error = %e, "char migration flush failed");
+                }
+            }
+            NodeMsg::CharNack { to, from, name } => {
+                if self.cluster.is_none() || to != self.cluster_me() || from == self.cluster_me() {
+                    return;
+                }
+                let nodes = self.cluster_nodes();
+                let Some((sid, all_answered, chosen)) = self
+                    .pending_joins
+                    .iter_mut()
+                    .find(|(_, j)| crate::persist::save_key(&j.account, &j.chosen) == name)
+                    .map(|(s, j)| {
+                        j.answered.insert(from);
+                        let done = j.peers_answered(nodes);
+                        (*s, done, if done { Some(j.chosen.clone()) } else { None })
+                    })
+                else {
+                    debug!(%name, "late CharNack with no pending join: dropped");
+                    return;
+                };
+                if !all_answered {
+                    return;
+                }
+                self.pending_joins.remove(&sid);
+                if let Some(chosen) = chosen {
+                    info!(sid, %name, "char query: every peer answered, entering fresh");
+                    self.enter_world_inner(sid, chosen, false);
+                }
+            }
         }
+    }
+
+    /// My node index (single-node mode: 0).
+    fn cluster_me(&self) -> usize {
+        self.cluster.as_ref().map(|c| c.me).unwrap_or(0)
+    }
+
+    /// Peer count of the cluster (single-node mode: 0).
+    fn cluster_nodes(&self) -> usize {
+        self.cluster.as_ref().map(|c| c.nodes.get()).unwrap_or(0)
+    }
+
+    /// Mesh handle; single-node mode has none, so callers must only use
+    /// this after an `is_cluster()` check.
+    fn cluster_mesh(&self) -> &crate::nodes::Mesh {
+        &self
+            .cluster
+            .as_ref()
+            .expect("BUG: cluster_mesh called outside cluster mode")
+            .mesh
     }
 
     /// Render state of the local gob at `slot` as a wire guest state.
@@ -3177,8 +3417,9 @@ impl Game {
         // the sender's position for its own sessions).
         if self.is_cluster() {
             let c = self.cluster.as_ref().expect("cluster");
-            c.mesh.broadcast(
+            c.mesh.broadcast_except(
                 c.nodes.get(),
+                c.me,
                 crate::nodes::NodeMsg::Chat {
                     from: sender_name,
                     at: sender_pos,
@@ -5728,6 +5969,41 @@ impl Game {
 
     fn tick(&mut self) {
         self.world.tick += 1;
+        // Cluster character migrations: re-broadcast unanswered queries on
+        // a fixed cadence (a link still negotiating buffers the retry and
+        // answers once the mesh converges); past the deadline, enter with
+        // local state (fresh spawn) - logins never wedge on a peer.
+        if !self.pending_joins.is_empty() {
+            let now = std::time::Instant::now();
+            let tick = self.world.tick;
+            let mut expired: Vec<(SessionId, String)> = Vec::new();
+            let mut retries: Vec<String> = Vec::new();
+            for (sid, join) in self.pending_joins.iter_mut() {
+                if join.deadline <= now {
+                    expired.push((*sid, join.chosen.clone()));
+                } else if tick >= join.next_retry {
+                    join.next_retry = tick + CHAR_QUERY_RETRY_TICKS;
+                    retries.push(crate::persist::save_key(&join.account, &join.chosen));
+                }
+            }
+            if !retries.is_empty() {
+                if let Some(c) = self.cluster.as_ref() {
+                    for name in retries {
+                        debug!(%name, "char query retry");
+                        c.mesh.broadcast_except(
+                            c.nodes.get(),
+                            c.me,
+                            crate::nodes::NodeMsg::CharQuery { from: c.me, name },
+                        );
+                    }
+                }
+            }
+            for (sid, chosen) in expired {
+                self.pending_joins.remove(&sid);
+                info!(sid, %chosen, "char migration timed out: entering without snapshot");
+                self.enter_world_inner(sid, chosen, false);
+            }
+        }
         // Movement clock: all LinMove progress math anchors to this world
         // time (deterministic across ticks; no wall-clock dependence).
         self.world.now_ms = self.world.tick * TICK_MS;
@@ -7160,6 +7436,8 @@ impl Game {
     }
 
     fn on_session_closed(&mut self, sid: SessionId) {
+        // A migration pending on this session dies with it.
+        self.pending_joins.remove(&sid);
         if let Some(out) = self.sessions.remove(&sid) {
             // A stack left on the cursor goes back to the inventory so a
             // log-out mid-plant does not eat the item.
@@ -7293,7 +7571,7 @@ mod tests {
         );
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(512);
-        g.session_connected(1, tx, raw_tx);
+        g.session_connected(1, "acct".to_owned(), tx, raw_tx);
         let wid = g
             .sessions
             .get(&1)
@@ -7772,7 +8050,7 @@ mod tests {
         );
         let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
         let (raw_tx, mut raw_rx) = tokio::sync::mpsc::channel(512);
-        g.session_connected(1, tx, raw_tx);
+        g.session_connected(1, "acct".to_owned(), tx, raw_tx);
         let wid = g
             .sessions
             .get(&1)
@@ -7868,7 +8146,7 @@ mod tests {
         );
         let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
         let (raw_tx, _raw_rx) = tokio::sync::mpsc::channel(512);
-        g.session_connected(1, tx, raw_tx);
+        g.session_connected(1, "acct".to_owned(), tx, raw_tx);
         let charlist = g
             .sessions
             .get(&1)
@@ -8046,7 +8324,7 @@ mod tests {
         );
         let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
         let (raw_tx, _raw_rx) = tokio::sync::mpsc::channel(512);
-        g.session_connected(1, tx, raw_tx);
+        g.session_connected(1, "acct".to_owned(), tx, raw_tx);
         // Select the character through the normal widget path.
         let wid = g
             .sessions
@@ -8106,7 +8384,7 @@ mod tests {
         );
         let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
         let (raw_tx, _raw_rx) = tokio::sync::mpsc::channel(512);
-        g.session_connected(1, tx, raw_tx);
+        g.session_connected(1, "acct".to_owned(), tx, raw_tx);
         let wid = g
             .sessions
             .get(&1)
@@ -8209,7 +8487,7 @@ mod tests {
         );
         let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
         let (raw_tx, mut raw_rx) = tokio::sync::mpsc::channel(512);
-        g.session_connected(1, tx, raw_tx);
+        g.session_connected(1, "acct".to_owned(), tx, raw_tx);
         let wid = g
             .sessions
             .get(&1)
@@ -8361,7 +8639,7 @@ mod tests {
         );
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (raw_tx, _raw_rx) = tokio::sync::mpsc::channel(512);
-        g.session_connected(1, tx, raw_tx);
+        g.session_connected(1, "acct".to_owned(), tx, raw_tx);
         // Inspect the wire table state after registration.
         {
             let out = g.sessions.get(&1).unwrap();
@@ -8655,7 +8933,7 @@ mod tests {
             false,
             std::env::temp_dir().join(format!("hnh-cluster-test-{}.json", name)),
         );
-        let (mesh_tx, mesh_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (mesh_tx, mut mesh_rx) = tokio::sync::mpsc::unbounded_channel();
         let nz = NonZeroUsize::new(nodes).expect("nodes");
         g.world = World::with_layout(42, nz, me);
         g.cluster = Some(Cluster {
@@ -8668,7 +8946,7 @@ mod tests {
         });
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(4096);
-        g.session_connected(1, tx, raw_tx);
+        g.session_connected(1, "acct".to_owned(), tx, raw_tx);
         let wid = g
             .sessions
             .get(&1)
@@ -8684,6 +8962,30 @@ mod tests {
             "play",
             vec![hnh_proto::ListArg::Str(name.to_owned())],
         );
+        // Simulate the cluster answering the character-migration query:
+        // every peer nacks a save key it does not hold, which completes
+        // the world entry in one mesh round trip (no 2 s deadline wait).
+        if g.cluster.is_some() {
+            let nodes = g.cluster.as_ref().map(|c| c.nodes.get()).unwrap_or(0);
+            let me = g.cluster.as_ref().map(|c| c.me).unwrap_or(0);
+            let mut names: Vec<String> = Vec::new();
+            while let Ok((_, msg)) = mesh_rx.try_recv() {
+                if let crate::nodes::NodeMsg::CharQuery { name, .. } = msg {
+                    names.push(name);
+                }
+            }
+            for name in names {
+                for peer in 0..nodes {
+                    if peer != me {
+                        g.on_node_msg(crate::nodes::NodeMsg::CharNack {
+                            to: me,
+                            from: peer,
+                            name: name.clone(),
+                        });
+                    }
+                }
+            }
+        }
         for _ in 0..3 {
             g.tick();
         }
@@ -9355,6 +9657,265 @@ mod tests {
         assert!(
             out.fight.widget.is_none() && out.fight.rel(gid).is_none(),
             "the last relation must close the frv widget"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Session 29: cluster save story (account-keyed characters, migration)
+    // ------------------------------------------------------------------
+
+    /// A clustered game with NO session: the raw fixture for save-store
+    /// and node-msg level tests. Returns the mesh sink receiver so tests
+    /// can assert exactly what this node sends to its peers.
+    fn bare_clustered(
+        tag: &str,
+        me: usize,
+        nodes: usize,
+    ) -> (
+        Game,
+        tokio::sync::mpsc::UnboundedReceiver<(usize, crate::nodes::NodeMsg)>,
+    ) {
+        let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut g = Game::new(
+            42,
+            cmd_rx,
+            net_rx,
+            false,
+            std::env::temp_dir().join(format!("hnh-save-test-{}.json", tag)),
+        );
+        let (mesh_tx, mesh_rx) = tokio::sync::mpsc::unbounded_channel();
+        let nz = NonZeroUsize::new(nodes).expect("nodes");
+        g.world = World::with_layout(42, nz, me);
+        g.cluster = Some(Cluster {
+            me,
+            nodes: nz,
+            mesh: crate::nodes::Mesh { out_tx: mesh_tx },
+            peer_subs: HashMap::new(),
+            my_subs: HashMap::new(),
+            player_abroad: HashMap::new(),
+        });
+        (g, mesh_rx)
+    }
+
+    /// Open one session on `g` and press play on the charlist (the full
+    /// login path; cluster nodes may defer the entry on a CharQuery).
+    fn open_session_and_play(g: &mut Game, sid: SessionId, account: &str, chosen: &str) {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, _raw) = tokio::sync::mpsc::channel(512);
+        g.session_connected(sid, account.to_owned(), tx, raw_tx);
+        let wid = g.sessions[&sid]
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "charlist")
+            .map(|(k, _)| *k)
+            .expect("charlist widget");
+        g.on_wdgmsg(
+            sid,
+            wid,
+            "play",
+            vec![hnh_proto::ListArg::Str(chosen.to_owned())],
+        );
+    }
+
+    fn snapshot(key: &str, pos: (i32, i32)) -> crate::persist::SavedPlayer {
+        crate::persist::SavedPlayer {
+            name: key.to_owned(),
+            pos,
+            hp: 80,
+            energy: 70,
+            stamina: 60,
+            lp: 42,
+            attrs: HashMap::from([("str".to_owned(), 12)]),
+            inv: Vec::new(),
+            inv_labels: Vec::new(),
+            skills: Vec::new(),
+            equip: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn char_query_migrates_the_offline_snapshot_to_the_peer() {
+        let (mut holder, mut mesh_rx) = bare_clustered("migrate-holder", 0, 2);
+        let key = crate::persist::save_key("acct", "Player");
+        holder
+            .save
+            .players
+            .insert(key.clone(), snapshot(&key, (500, 500)));
+        holder.on_node_msg(crate::nodes::NodeMsg::CharQuery {
+            from: 1,
+            name: key.clone(),
+        });
+        // Two-phase: the holder KEEPS the snapshot until the ack, so a
+        // lost reply can always be re-served by a query retry.
+        assert!(
+            holder.save.players.contains_key(&key),
+            "the holder must keep the snapshot until CharAck"
+        );
+        let mut data = None;
+        while let Ok((peer, msg)) = mesh_rx.try_recv() {
+            assert_eq!(peer, 1, "unicast to the requester");
+            if let crate::nodes::NodeMsg::CharData {
+                to,
+                from,
+                name,
+                snap,
+            } = msg
+            {
+                assert_eq!(to, 1, "routed to the requester node");
+                assert_eq!(from, 0, "sent by the holder");
+                assert_eq!(name, key);
+                data = Some(snap);
+            }
+        }
+        let snap = data.expect("CharData reply");
+        assert_eq!(snap.pos, (500, 500));
+        assert_eq!(snap.lp, 42);
+        // Re-query before the ack: the snapshot is re-served (idempotent).
+        holder.on_node_msg(crate::nodes::NodeMsg::CharQuery {
+            from: 1,
+            name: key.clone(),
+        });
+        let mut re_served = false;
+        while let Ok((_, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::CharData { name, .. } = msg {
+                assert_eq!(name, key);
+                re_served = true;
+            }
+        }
+        assert!(re_served, "retry must re-serve the snapshot");
+        // The ack completes the migration: the copy leaves the holder.
+        holder.on_node_msg(crate::nodes::NodeMsg::CharAck { name: key.clone() });
+        assert!(
+            !holder.save.players.contains_key(&key),
+            "CharAck must drop the holder's copy"
+        );
+    }
+
+    #[tokio::test]
+    async fn char_query_for_an_online_character_nacks_and_keeps_the_snapshot() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("migrate-online", 0, 2);
+        let key = crate::persist::save_key("acct", &g.world.players[0].name);
+        g.save.players.insert(key.clone(), snapshot(&key, (10, 10)));
+        g.on_node_msg(crate::nodes::NodeMsg::CharQuery {
+            from: 1,
+            name: key.clone(),
+        });
+        let mut nacks = 0;
+        while let Ok((peer, msg)) = mesh_rx.try_recv() {
+            assert_eq!(peer, 1);
+            if let crate::nodes::NodeMsg::CharNack { to, from, name: n } = msg {
+                assert_eq!(to, 1, "routed to the requester");
+                assert_eq!(from, 0, "sent by the holder");
+                assert_eq!(n, key);
+                nacks += 1;
+            }
+        }
+        assert_eq!(nacks, 1, "an online character is answered with a nack");
+        assert!(
+            g.save.players.contains_key(&key),
+            "the live player's snapshot must not migrate"
+        );
+    }
+
+    #[tokio::test]
+    async fn chardata_adopts_the_snapshot_and_enters_the_world() {
+        let (mut g, mut mesh_rx) = bare_clustered("migrate-adopt", 1, 2);
+        open_session_and_play(&mut g, 1, "acct", "Player");
+        // The entry deferred: no player yet, one CharQuery on the mesh.
+        assert!(!g.world.by_session.contains_key(&1), "entry must defer");
+        let mut queried = None;
+        while let Ok((_, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::CharQuery { from, name } = msg {
+                assert_eq!(from, 1);
+                queried = Some(name);
+            }
+        }
+        let key = queried.expect("CharQuery broadcast");
+        assert_eq!(key, crate::persist::save_key("acct", "Player"));
+        // The holder answers; the requester adopts, acks back and enters.
+        g.on_node_msg(crate::nodes::NodeMsg::CharData {
+            to: 1,
+            from: 0,
+            name: key.clone(),
+            snap: snapshot(&key, (777, -777)),
+        });
+        let pidx = *g.world.by_session.get(&1).expect("entered via migration");
+        let pgob = g.world.players[pidx].gob;
+        let slot = g.world.gobs.get(pgob).expect("player slot");
+        assert_eq!(g.world.gobs.pos[slot], (777, -777), "restored position");
+        assert_eq!(g.world.players[pidx].lp, 42, "restored lp");
+        assert_eq!(g.world.players[pidx].hp, 80, "restored hp");
+        let mut acked = false;
+        while let Ok((peer, msg)) = mesh_rx.try_recv() {
+            assert_eq!(peer, 0, "ack unicast to the holder");
+            if let crate::nodes::NodeMsg::CharAck { name } = msg {
+                assert_eq!(name, key);
+                acked = true;
+            }
+        }
+        assert!(acked, "adoption must ack so the holder drops its copy");
+    }
+
+    #[tokio::test]
+    async fn char_nack_majority_enters_fresh_without_the_deadline() {
+        let (mut g, _mesh_rx) = bare_clustered("migrate-nacks", 1, 3);
+        open_session_and_play(&mut g, 1, "acct", "Player");
+        assert!(!g.world.by_session.contains_key(&1));
+        // One of two peers answered: still waiting.
+        g.on_node_msg(crate::nodes::NodeMsg::CharNack {
+            to: 1,
+            from: 0,
+            name: crate::persist::save_key("acct", "Player"),
+        });
+        assert!(
+            !g.world.by_session.contains_key(&1),
+            "entry waits for every peer"
+        );
+        g.on_node_msg(crate::nodes::NodeMsg::CharNack {
+            to: 1,
+            from: 2,
+            name: crate::persist::save_key("acct", "Player"),
+        });
+        assert!(
+            g.world.by_session.contains_key(&1),
+            "the last nack completes the entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn accounts_hold_separate_characters_and_legacy_saves_are_adopted() {
+        let (mut g, _mesh_rx) = bare_clustered("account-keys", 0, 1);
+        // Legacy layout: one bare "Player" snapshot from an older server.
+        g.save
+            .players
+            .insert("Player".to_owned(), snapshot("Player", (321, 123)));
+        open_session_and_play(&mut g, 1, "alice", "Player");
+        let pidx = *g.world.by_session.get(&1).expect("legacy adoption entered");
+        let pgob = g.world.players[pidx].gob;
+        let slot = g.world.gobs.get(pgob).expect("player slot");
+        assert_eq!(
+            g.world.gobs.pos[slot],
+            (321, 123),
+            "legacy snapshot restored"
+        );
+        // Adoption re-keyed the snapshot into the account namespace.
+        assert!(
+            g.save.players.contains_key("alice:Player"),
+            "legacy snapshot re-keyed"
+        );
+        assert!(!g.save.players.contains_key("Player"), "bare key consumed");
+        // A second account gets a FRESH character, not alice's.
+        open_session_and_play(&mut g, 2, "bob", "Player");
+        let pidx2 = *g.world.by_session.get(&2).expect("second account entered");
+        assert_ne!(
+            g.world.players[pidx].gob, g.world.players[pidx2].gob,
+            "two live players"
+        );
+        assert_eq!(
+            g.save.players.get("bob:Player").map(|s| s.pos),
+            None,
+            "bob starts with no snapshot"
         );
     }
 }

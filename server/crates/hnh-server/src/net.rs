@@ -34,7 +34,10 @@ pub const OUT_MTU: usize = 1200;
 /// Commands the net layer sends to the game task.
 pub enum NetCmd {
     /// New session accepted; game assigns a sid and returns it.
+    /// `username` is the authenticated account the session belongs to
+    /// (character save keys are account-scoped).
     Accept {
+        username: String,
         game_tx: mpsc::UnboundedSender<Vec<u8>>,
         raw_tx: mpsc::Sender<Vec<u8>>,
         reply: oneshot::Sender<SessionId>,
@@ -345,6 +348,7 @@ async fn finish_accept(
     let (reply_tx, reply_rx) = oneshot::channel();
     if game_tx
         .send(NetCmd::Accept {
+            username: username.clone(),
             game_tx: gameq_tx.clone(),
             raw_tx: raw_tx.clone(),
             reply: reply_tx,

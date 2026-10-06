@@ -24,13 +24,13 @@ def le16(v): return struct.pack("<H", v)
 def le32(v): return struct.pack("<i", v)
 def havstr(s): return s.encode() + b"\x00"
 
-def auth_cookie(username: str, password: str = "x") -> bytes:
+def auth_cookie(username: str, password: str = "x", port: int = 1871) -> bytes:
     """Do the TLS auth handshake natively (python ssl)."""
     import ssl as _ssl
     ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = _ssl.CERT_NONE
-    raw = socket.create_connection(("127.0.0.1", 1871), timeout=5)
+    raw = socket.create_connection(("127.0.0.1", port), timeout=5)
     tls = ctx.wrap_socket(raw)
     usr = username.encode()
     digest = hashlib.sha256(password.encode()).digest()
@@ -66,11 +66,14 @@ def auth_cookie(username: str, password: str = "x") -> bytes:
 
 def main():
     username = sys.argv[1] if len(sys.argv) > 1 else "testuser"
-    cookie = auth_cookie(username)
+    port = int(sys.argv[2]) if len(sys.argv) > 2 else 1870
+    auth_port = int(sys.argv[3]) if len(sys.argv) > 3 else 1871
+    cookie = auth_cookie(username, port=auth_port)
     print(f"cookie ok ({len(cookie)} bytes)")
+    print(f"game port: {port}")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(0.5)
-    server = ("127.0.0.1", 1870)
+    server = ("127.0.0.1", port)
     sess = bytes([0]) + le16(1) + havstr("Haven") + le16(2) + havstr(username) + cookie
     for _ in range(5):
         sock.sendto(sess, server)
