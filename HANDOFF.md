@@ -2109,3 +2109,99 @@ NEXT (handoff):
 - craft pagina ad->action wiring for further recipes beyond the bow
   chain (straw basket / wooden bowl are the natural next containers -
   paginae and invobj resources exist in the pack).
+
+## 2026-10-06 - Session 37: bow shooting (the Shoot action) - aim meter, arrow economy, quiver recipe, real-client probe green
+
+The session-36 NEXT items "bow shooting mechanics" and the carried
+"real-client e2e re-run" are CLOSED (the probe scope); the quiver
+recipe advances the craft pagina wiring.
+
+WHAT:
+
+- ARCHERY MODULE (server/crates/hnh-server/src/archery.rs). The Shoot
+  action of Legacy:Combat_Actions is live: aiming fills an ACCURACY
+  METER (10000 scale, Wooden Bow 250/tick = full aim in 4 s at the
+  10 Hz combat tick; the RoB "Ranger's Bow aims at half the Wooden
+  Bow's speed" note lives as a BOWS table row, data not code). Range
+  132 units (~12 tiles); inside 300 units the archer closes in and
+  keeps the aim, beyond it the aim drops (same radius as melee
+  disengage). Release is automatic at a full meter: ONE arrow
+  (arrow-stone | arrow-bone) is consumed hit or miss, the frv offence
+  bar (attack meter) is zeroed per the documented rule, stamina -2.
+  Damage `75*sqrt(q_bow/10)` (Fandom Bow page, the same
+  k*sqrt(x/10) shape as the unarmed maneuvers): q10 -> 75 (one-shots
+  Deer/Fox), q40 -> 150. Arrows BYPASS the openings economy - the hit
+  roll IS the resolution: chance `95 - 55*(dist/132) +
+  min(20, Marksmanship/5)` percent clamped 15..99 (server policy, the
+  legacy formula is not client-observable; combat-system.md Open
+  questions). Aim auto re-arms while the target lives and arrows
+  remain; a kill runs the standard death flow (loot + bone drops,
+  +10 LP, teardown).
+
+- ENGAGEMENT WIRING (game.rs). Clicking an animal with a
+  gfx/invobjs/bow stack in ANY equip slot takes the ranged path
+  INSTEAD of opening the frv duel; a dry bow refuses with a chat line
+  and never falls back to melee while equipped; without a bow the
+  same click opens the melee duel as before. Ground click cancels the
+  aim; an frv click (selecting a melee opponent) drops it. Progress
+  lines stream to chat at 25/50/75% (the client has no accuracy
+  widget - this was verified against the 2009 client's fight widgets
+  in session 26). Species::name() added for the hit/miss chat lines.
+
+- QUIVER (craft.rs + docs). Recipe `quiver` = raw cow hide x2 +
+  string x1 -> gfx/invobjs/quiver, type-weighted [1,1], ranged
+  softcap, pagina paginae/craft/quiver (shipped in the pack with ad
+  ["craft","quiver"], skill link Leather Working). The avatar back
+  layers (gfx/borka/quiver/{standing,walking,dead}) were ALREADY
+  wired in equip.rs PIECES (pre-existing entry); the new test pins
+  the world_layers mapping. namu.wiki confirms the back-slot
+  arrow-carrying role; the unit counts are documented server policy
+  (crafting-and-building.md Open questions) - RoB/Fandom stayed
+  behind Cloudflare, jina 401. The quiver is EQUIP-ONLY for now: the
+  2009 client ships no container widget (ISBox is a craft-window
+  counter, not a container).
+
+- REAL-CLIENT PROBE (carried item CLOSED in the probe scope). The
+  sandbox lost its repo-root gameres/ (it is NOT in git - regenerate
+  with `unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn
+  /tmp/hx/res/* gameres/ && cp -r res/compiled/* gameres/`); after
+  regenerating, the headless UiProbe (REAL client classes - Session +
+  UI + RemoteUI, the exact post-play receive path, no GL) is fully
+  green against the session-37 server: UI PROBE RUN/EQUIP/CHARLIST:
+  OK. The GL client itself still needs a display; the Windows
+  launcher path remains the user-side check.
+
+EVIDENCE: 193 unit tests green (15 new: 4 archery formula tests -
+damage curve 75/150/225, chance falloff 95->40 + marks bonus with
+15..99 clamp, 4 s meter fill, ordered report thresholds; 8 engagement
+flow tests - bow click opens aim not fight / dry bow refuses / hit
+consumes one arrow + depletes the attack meter + re-arms / miss
+spends the arrow only / meter fills with 25-75% chat lines / chase
+beyond range with the aim kept / walk cancels / lethal q40 shot kills
++ loots; quiver_recipe_and_back_layers_are_wired; plus the 2 pre-36
+count updates). clippy -D warnings clean, fmt clean.
+scripts/verify_session37.sh (archery-units/full/lint/boot):
+SESSION37 VERIFY: OK. scripts/verify_ui_probe.sh run|equip|charlist:
+all OK after the gameres regeneration.
+
+NOT DONE THIS SESSION (rolled to NEXT):
+- Guest-animal ranged fire (the cluster relay path is melee-only;
+  a RelayAttack with chip=0 would carry the damage but the aim/chase
+  state per foreign target needs the same guest_fights mirror work
+  melee got in session 21).
+- Player-vs-player archery (the melee relay fight between players
+  exists; ranged needs the same authority split).
+- Bow-chain and quiver unit counts reconciliation against RoB when a
+  source is reachable (crafting-and-building.md Open questions).
+- GL-client run on a display-capable host (the probe covers the wire
+  path only).
+
+NEXT (handoff):
+- ranged fire over the cluster relay (guest animals) - the natural
+  continuation of archery.rs into nodes.rs.
+- the remaining craft paginae with pack resources (none beyond the
+  bow chain + quiver are fully resourced; basket/bowl paginae do NOT
+  exist in this pack - checked this session).
+- Windows launcher smoke: make-gameres.ps1 + run scripts against the
+  session-37 binary (verify_windows_launch.sh exists; re-run after
+  the next resource regeneration).

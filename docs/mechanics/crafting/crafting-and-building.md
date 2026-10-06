@@ -212,6 +212,14 @@ All of them share the same server shape: an inventory (per-gob item store), a fu
   hcloak) and the RoB TYPE-weighted average (each input type first
   averages its own consumed units, then types combine as
   `sum(q_t * w_t)/sum(w_t)`).
+- Session 37 adds the quiver: `quiver` = raw cow hide x2 + string x1
+  -> quiver x1 (ad "quiver"), type-weighted [1, 1], softcapped by
+  Marksmanship (`ranged`). The craft pagina
+  (paginae/craft/quiver, tooltip "Quiver With Arrows", skill link
+  Leather Working) and the avatar back layers (gfx/borka/quiver/
+  {standing,walking,dead}) ship in the pack; namu.wiki's H&H tech
+  page places the quiver in the BACK slot carrying arrows. The unit
+  counts are server policy (see Open questions).
 - Labels travel with the item: the server tooltip string is the
   fep.conf lookup key end-to-end (inventory widget, ground drop, back).
 - Starter kit policy (session 36): fresh characters spawn with branch
@@ -289,6 +297,16 @@ All of them share the same server shape: an inventory (per-gob item store), a fu
   server policy (isolated in the RECIPES table, one edit away) and must
   be reconciled against Legacy:Bow / Legacy:Stone Arrow / Legacy:Bone
   Arrow when a source is reachable.
+- **Quiver recipe (session 37).** The legacy unit recipe could not be
+  recovered (RoB/Fandom blocked again; namu.wiki only confirms the back
+  slot + arrow-carrying role, and the pagina's skill link points at
+  Leather Working). The 2 hides + 1 string counts and the [1, 1]
+  weights are server policy mirroring the hide-cloak economy; reconcile
+  against Legacy:Quiver when a source is reachable. The quiver is
+  currently EQUIP-ONLY (back-layer render via equip.rs PIECES); a
+  container version needs client-side container support the 2009
+  client does not ship (ISBox is a craft-window item counter, not a
+  container).
 - **Legacy smelter/kiln/finery numbers.** Fuel amounts, load sizes, and durations quoted above for the smelter are current-world values; the legacy pages exist (Category:Legacy Structures) but were empty or not yet fetched. Fetch Legacy:Ore Smelter, Legacy:Kiln, Legacy:Finery Forge and reconcile.
 - **Craft All stop reporting.** Whether legacy servers sent an error widget/message when batch crafting stopped early, or stopped silently. Determine from a live capture (watch for `RMSG_NEWWDG` text/error widgets after `make 1`).
 - **Pop refresh semantics.** The makewindow `pop` appears to be sent once per window open; whether ingredient counts ever update dynamically (a second `pop` rebuilding the lists) needs a capture of a long-lived window.

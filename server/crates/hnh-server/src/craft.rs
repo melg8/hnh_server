@@ -248,6 +248,23 @@ pub const RECIPES: &[Recipe] = &[
         softcap_attr: "survive",
         q_weights: &[1, 2],
     },
+    // Session 37: the quiver. The craft pagina (paginae/craft/quiver,
+    // tooltip "Quiver With Arrows", ad ["craft","quiver"]) links the
+    // Leather Working skill page, and namu.wiki's H&H tech page places
+    // the quiver in the BACK slot carrying arrows. The exact legacy
+    // unit recipe is not recoverable from the blocked wikis - the
+    // 2 hides + 1 string counts and the [1,1] type weights are a
+    // documented server policy (crafting-and-building.md Open
+    // questions), mirroring the hide-cloak economy (2 cow hides).
+    Recipe {
+        id: "quiver",
+        name: "Quiver",
+        inputs: &[("gfx/invobjs/hide-raw-cow", 2), ("gfx/invobjs/string", 1)],
+        outputs: &[("gfx/invobjs/quiver", 1)],
+        pagina: "paginae/craft/quiver",
+        softcap_attr: "ranged",
+        q_weights: &[1, 1],
+    },
 ];
 
 /// Raw -> roasted meat mapping for the `roast` recipe (paginae/craft/roastmeat,
@@ -452,5 +469,46 @@ Peapod=STR:0.1 PER:0.9
         assert!(bow.q_note().starts_with("type-weighted"));
         let axe = RECIPES.iter().find(|r| r.id == "axe").unwrap();
         assert!(axe.q_note().starts_with("unit-weighted"));
+    }
+
+    /// Session 37: the quiver recipe is type-weighted like the bow
+    /// ((qHide + qString)/2, ranged softcap), outputs the equippable
+    /// gfx/invobjs/quiver (the PIECES table renders gfx/borka/quiver
+    /// back layers), and its craft pagina exists in the resource pack.
+    #[test]
+    fn quiver_recipe_and_back_layers_are_wired() {
+        let q = RECIPES.iter().find(|r| r.id == "quiver").unwrap();
+        assert_eq!(q.inputs.len(), 2);
+        assert_eq!(q.outputs, &[("gfx/invobjs/quiver", 1)]);
+        assert_eq!(q.pagina, "paginae/craft/quiver");
+        assert_eq!(q.softcap_attr, "ranged");
+        assert_eq!(q.q_weights, &[1, 1]);
+        assert!(q.q_note().starts_with("type-weighted"));
+        // The resource pack ships the craft pagina and the avatar
+        // back-layer directory the PIECES entry maps onto (skip when
+        // the pack is absent from the test sandbox - same pattern as
+        // the equip.rs pose test).
+        let pack = std::path::Path::new("../../gameres");
+        if pack.is_dir() {
+            assert!(pack.join("paginae/craft/quiver.res").exists());
+            assert!(pack.join("gfx/borka/quiver/standing").exists());
+        }
+        // equip.rs PIECES maps the invobj onto gfx/borka/quiver layers
+        // for standing AND walking poses (verified through the same
+        // world_layers path the server streams to the client).
+        let layers = crate::equip::world_layers(["gfx/invobjs/quiver"].iter(), false, 1);
+        assert!(
+            layers
+                .iter()
+                .all(|l| l.starts_with("gfx/borka/quiver/standing/")),
+            "standing back layers: {layers:?}"
+        );
+        let walking = crate::equip::world_layers(["gfx/invobjs/quiver"].iter(), true, 1);
+        assert!(
+            walking
+                .iter()
+                .all(|l| l.starts_with("gfx/borka/quiver/walking/")),
+            "walking back layers: {walking:?}"
+        );
     }
 }
