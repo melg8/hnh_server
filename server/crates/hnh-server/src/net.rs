@@ -430,7 +430,26 @@ async fn run_session(
         if d.closed {
             break;
         }
+        // Biased polling fixes the poll priority: inbound datagrams
+        // first (ACKs drive the reliable window), then the reliable
+        // stream (game_rx), and raw datagrams last. Session 34: RESID
+        // announcements ride the reliable stream while the OBJDATA
+        // blocks that REFERENCE them ride raw; without the
+        // game_rx-before-raw_rx bias, tokio's random branch choice
+        // could emit the raw block first, leaving the client unable to
+        // resolve the gob's resource (the probe caught gobs stuck with
+        // an unresolved resid).
         tokio::select! {
+            biased;
+            datagram = d.dgram_rx.recv() => {
+                match datagram {
+                    Some(data) => {
+                        d.last_recv = Instant::now();
+                        handle_datagram(&mut d, &data, &sock).await;
+                    }
+                    None => break, // net task dropped the session
+                }
+            }
             payload = d.game_rx.recv() => {
                 match payload {
                     Some(p) => {
@@ -448,15 +467,6 @@ async fn run_session(
                         let _ = sock.send_to(&p, d.addr).await;
                     }
                     None => break,
-                }
-            }
-            datagram = d.dgram_rx.recv() => {
-                match datagram {
-                    Some(data) => {
-                        d.last_recv = Instant::now();
-                        handle_datagram(&mut d, &data, &sock).await;
-                    }
-                    None => break, // net task dropped the session
                 }
             }
             _ = tokio::time::sleep_until(next_flush) => {

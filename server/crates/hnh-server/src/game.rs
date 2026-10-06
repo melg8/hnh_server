@@ -2205,7 +2205,18 @@ impl Game {
                         .filter(|&cell| crate::grid_owner::owner_of(cell, c.nodes) == c.me)
                         .collect();
                     tracing::debug!(from, cells = owned.len(), "peer subscribed");
-                    c.peer_subs.insert(from, owned.iter().copied().collect());
+                    // The sender ships DIFFS (tick_cluster sends only the
+                    // added cells; Unsub removes), so apply incrementally.
+                    // Session 34: the old whole-set replace silently
+                    // dropped every previously subscribed cell the first
+                    // time a moving session's view produced a second Sub
+                    // - cross-node updates stopped flowing for cells the
+                    // peer still subscribes to (a lit guest oven never
+                    // re-rendered).
+                    c.peer_subs
+                        .entry(from)
+                        .or_default()
+                        .extend(owned.iter().copied());
                     owned
                 };
                 // Session 33 (Sub-driven populate): the subscriber's own
@@ -3570,9 +3581,16 @@ impl Game {
                 m.uint8(OD_MOVE).coord(g.pos.0, g.pos.1);
             }
         }
-        m.uint8(OD_LAYERS);
+        // Composited drawables (players + animals only): server-side
+        // pose resolution, the mirror of the local encode_gob_block
+        // branch. Statics render from OD_RES alone and carry NO
+        // OD_LAYERS - the local path never writes one for them, and a
+        // bare 0xFFFF terminator without a base u16 breaks every
+        // strict OD sequence parser (the session-34 probe caught the
+        // test-build client crashing on guest static blocks).
         match &g.kind {
             GuestKind::Player { name, equip } => {
+                m.uint8(OD_LAYERS);
                 let base = "gfx/borka/body";
                 let bi = self.world.res.intern(base);
                 m.uint16(out.res.wire_named(bi, base));
@@ -3607,6 +3625,7 @@ impl Game {
                 m.uint8(OD_BUDDY).string(name).uint8(0).uint8(0);
             }
             GuestKind::Animal { species } => {
+                m.uint8(OD_LAYERS);
                 let sp = crate::state::Species::from_index(*species)?;
                 let base = kritter_base(sp);
                 let bi = self.world.res.intern(base);
@@ -3617,9 +3636,8 @@ impl Game {
                 m.uint16(65535);
             }
             GuestKind::Static { .. } => {
-                // OD_RES already carries the sprite; close the (empty)
-                // layer list for wire regularity.
-                m.uint16(65535);
+                // Statics render from OD_RES alone; no OD_LAYERS (see
+                // the comment above the match).
             }
         }
         let quarters = ((g.hp * 4) / g.max_hp.max(1)).clamp(0, 4) as u8;
@@ -3700,6 +3718,12 @@ impl Game {
         let Some(g) = self.world.guests.get(&id).cloned() else {
             return;
         };
+        // Statics have no pose (OD_RES alone renders them): an empty
+        // layer list would carry the same bare-0xFFFF defect the
+        // session-34 probe caught in the spawn block.
+        if matches!(g.kind, GuestKind::Static { .. }) {
+            return;
+        }
         let Some(out) = self.sessions.get_mut(&sid) else {
             return;
         };
@@ -13198,6 +13222,57 @@ mod tests {
         }
         assert!(mine > 0, "the grid's my-cells content spawned");
         assert_eq!(foreign, 0, "no static/animal may spawn on a non-owner node");
+    }
+
+    /// Session 34: Sub carries DIFFS (tick_cluster sends only the added
+    /// cells), so a follow-up Sub must EXTEND the peer's subscription,
+    /// not replace it. The old whole-set replace silently unsubscribed
+    /// every earlier cell the first time a moving session's view
+    /// produced a second Sub - cross-node updates for still-subscribed
+    /// cells stopped flowing (a lit guest oven never re-rendered).
+    #[tokio::test]
+    async fn sub_diffs_extend_not_replace() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("subdiff", 0, 2);
+        let nodes = g.cluster.as_ref().unwrap().nodes;
+        // Two cells THIS node owns: a peer subscribing to them passes the
+        // receiver-side ownership filter (Sub drops cells the receiver
+        // does not own).
+        let mut my_cells: Vec<(i32, i32)> = Vec::new();
+        'scan: for cy in -1..=4i32 {
+            for cx in -1..=4i32 {
+                let cell = (cx, cy);
+                if crate::grid_owner::owner_of(cell, nodes) == 0 {
+                    my_cells.push(cell);
+                    if my_cells.len() == 2 {
+                        break 'scan;
+                    }
+                }
+            }
+        }
+        assert_eq!(my_cells.len(), 2, "the lattice must have two own cells");
+        // First Sub: one cell. Follow-up Sub: the second cell (a diff).
+        g.on_node_msg(crate::nodes::NodeMsg::Sub {
+            from: 1,
+            cells: vec![my_cells[0]],
+        });
+        g.on_node_msg(crate::nodes::NodeMsg::Sub {
+            from: 1,
+            cells: vec![my_cells[1]],
+        });
+        let subs = &g.cluster.as_ref().unwrap().peer_subs[&1];
+        assert!(
+            subs.contains(&my_cells[0]) && subs.contains(&my_cells[1]),
+            "both diffed cells stay subscribed, got {:?}",
+            subs
+        );
+        // Unsub of one cell keeps the other (the same incremental rule).
+        g.on_node_msg(crate::nodes::NodeMsg::Unsub {
+            from: 1,
+            cells: vec![my_cells[1]],
+        });
+        let subs = &g.cluster.as_ref().unwrap().peer_subs[&1];
+        assert!(subs.contains(&my_cells[0]), "the untouched cell stays");
+        assert!(!subs.contains(&my_cells[1]), "the removed cell goes");
     }
 
     /// Sub-driven populate (session 33): a peer's Sub materializes the

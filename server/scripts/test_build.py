@@ -611,13 +611,16 @@ def run_stationbot():
     print("station lit; waiting for the tick job...")
 
     # --- output: the roast drop appears beside the oven ---------------------
-    drops_before = set(c.find_gobs("gfx/invobjs/meat").keys())
+    # The drop GOB renders with the gfx/terobjs/items world shape
+    # (drop_world_res: inventory icon resources lack a `neg` layer),
+    # so the world-gob search keys on the terobjs resource.
+    drops_before = set(c.find_gobs("gfx/terobjs/items/meat").keys())
     ok = c.wait_for(
-        lambda: len(set(c.find_gobs("gfx/invobjs/meat").keys()) - drops_before) > 0,
+        lambda: len(set(c.find_gobs("gfx/terobjs/items/meat").keys()) - drops_before) > 0,
         10,
     )
     assert ok, "no output drop appeared"
-    drop_id = (set(c.find_gobs("gfx/invobjs/meat").keys()) - drops_before).pop()
+    drop_id = (set(c.find_gobs("gfx/terobjs/items/meat").keys()) - drops_before).pop()
     drop_pos = c.gobs[drop_id]["pos"]
     print("output drop:", drop_id, "at", drop_pos)
 
