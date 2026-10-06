@@ -105,9 +105,19 @@ pub enum GuestKind {
     /// the gob's lifetime, so the subscriber can pick the relay act
     /// without any extra state sync. The authority still re-validates
     /// every act against its own Kind.
+    ///
+    /// `crop` is `Some((spec, stage))` for crops only (session 31): the
+    /// home node needs both to decide whether a click may open the
+    /// harvest flower menu, and the subscriber renders the growth stage
+    /// from it (sdt byte). Bincode over the node link is positional -
+    /// every node in a cluster runs the SAME binary, so additive struct
+    /// changes are safe (rolling upgrades are not supported anywhere
+    /// else either, see SavedPlayer in persist.rs).
     Static {
         res_name: String,
         class: StaticClass,
+        #[serde(default)]
+        crop: Option<(u8, u8)>,
     },
 }
 
@@ -120,7 +130,11 @@ pub enum StaticClass {
     Tree,
     /// Stone: the relay act is Mine.
     Stone,
-    /// Plans/stations/structures/crops: no relay act today (flavor only).
+    /// Growing crop: the home node opens the stage-appropriate harvest
+    /// menu locally; the chosen act (HarvestCrop) is re-validated by the
+    /// authority against its own crop state (session 31).
+    Crop,
+    /// Plans/stations/structures: no relay act today (flavor only).
     Structure,
 }
 
@@ -146,6 +160,10 @@ pub enum StaticAct {
     Pickup,
     Chop,
     Mine,
+    /// Harvest a growing crop (session 31). The authority decides
+    /// mature vs unripe from ITS crop state, rolls the yield table and
+    /// answers one StaticAck per yielded stack (crops never grant LP).
+    HarvestCrop,
 }
 
 /// One node-link message. Sub/Unsub flow viewer -> owner; guest messages
@@ -699,6 +717,7 @@ mod tests {
             kind: GuestKind::Static {
                 res_name: "gfx/terobjs/items/branch".into(),
                 class: StaticClass::Drop,
+                crop: None,
             },
             hp: 1,
             max_hp: 1,

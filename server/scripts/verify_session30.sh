@@ -16,6 +16,9 @@
 #                   bot logins must RESTORE their snapshots (log proof).
 # Usage: server/scripts/verify_session30.sh [logtag]
 set -u
+# Dev-box robustness: cargo installs to ~/.cargo/bin by default, which is
+# not on PATH in every non-interactive shell (cron, CI, agent sandboxes).
+export PATH="$HOME/.cargo/bin:$PATH"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO"
 TAG="${1:-s30}"

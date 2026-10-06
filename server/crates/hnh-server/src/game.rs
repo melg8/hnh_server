@@ -2459,23 +2459,35 @@ impl Game {
             Kind::Drop { .. } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Drop,
+                crop: None,
             },
             Kind::Tree { .. } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Tree,
+                crop: None,
             },
             Kind::Stone => GuestKind::Static {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Stone,
+                crop: None,
             },
-            // Plans/stations/structures/crops: renderable but no relay act
+            // Plans/stations/structures: renderable but no relay act
             // today (their menus are session UI on the authority side).
-            Kind::Plan { .. }
-            | Kind::Station { .. }
-            | Kind::Structure { .. }
-            | Kind::Crop { .. } => GuestKind::Static {
+            // Crops (session 31): publish with the Crop class + the
+            // (spec, stage) payload - the home node opens the harvest
+            // menu locally and the stage re-renders on the subscriber
+            // through the sdt byte in the guest spawn/update blocks.
+            Kind::Plan { .. } | Kind::Station { .. } | Kind::Structure { .. } => {
+                GuestKind::Static {
+                    res_name: self.static_res_name(slot),
+                    class: crate::nodes::StaticClass::Structure,
+                    crop: None,
+                }
+            }
+            Kind::Crop { spec, stage } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
-                class: crate::nodes::StaticClass::Structure,
+                class: crate::nodes::StaticClass::Crop,
+                crop: Some((spec, stage)),
             },
         };
         Some(GuestState {
@@ -3225,10 +3237,22 @@ impl Game {
             .uint8(0)
             .int32(id)
             .int32(g.frame as i32);
-        if let GuestKind::Static { res_name, .. } = &g.kind {
+        if let GuestKind::Static { res_name, crop, .. } = &g.kind {
             let name = leak_static(self.world.res.name(g.res_idx).unwrap_or(res_name.as_str()));
             let w = out.res.wire_named(g.res_idx, name);
-            m.uint8(OD_RES).uint16(w);
+            // Crops carry their growth stage as the sprite sdt byte -
+            // the same wire shape the local path emits for plants
+            // (wire id | 0x8000, then len + bytes; OCache rebuilds the
+            // sprite on a stage change).
+            match crop {
+                Some((_spec, stage)) => {
+                    m.uint8(OD_RES).uint16(w | 0x8000);
+                    m.uint8(1).uint8(*stage);
+                }
+                None => {
+                    m.uint8(OD_RES).uint16(w);
+                }
+            }
         }
         match &g.mv {
             Some(lm) => {
@@ -3496,14 +3520,31 @@ impl Game {
                     // authority through the relay; the act is picked from
                     // the STABLE class tag, the authority re-validates it
                     // against its own Kind.
-                    crate::nodes::GuestKind::Static { class, .. } => {
+                    crate::nodes::GuestKind::Static { class, crop, .. } => {
+                        // Crops (session 31): the harvest menu is session UI
+                        // and lives on the HOME node - open it locally from
+                        // the guest view's (spec, stage); the chosen act is
+                        // relayed when the menu is acted on.
+                        if let (crate::nodes::StaticClass::Crop, Some((spec, stage))) =
+                            (class, *crop)
+                        {
+                            if (spec as usize) < farm::CROPS.len()
+                                && stage >= farm::CROPS[spec as usize].early_stage
+                            {
+                                self.show_crop_menu(sid, target, spec, stage);
+                            } else {
+                                debug!(sid, stage, "guest crop not harvestable yet");
+                            }
+                            return;
+                        }
                         let act = match class {
                             crate::nodes::StaticClass::Drop => {
                                 Some(crate::nodes::StaticAct::Pickup)
                             }
                             crate::nodes::StaticClass::Tree => Some(crate::nodes::StaticAct::Chop),
                             crate::nodes::StaticClass::Stone => Some(crate::nodes::StaticAct::Mine),
-                            crate::nodes::StaticClass::Structure => None,
+                            crate::nodes::StaticClass::Crop
+                            | crate::nodes::StaticClass::Structure => None,
                         };
                         if let Some(act) = act {
                             if let Some(c) = self.cluster.as_ref() {
@@ -5048,16 +5089,23 @@ impl Game {
         let Some(slot) = self.world.gobs.get(target) else {
             return;
         };
-        let Kind::Crop { stage, .. } = self.world.gobs.kind[slot] else {
+        let Kind::Crop { stage, spec } = self.world.gobs.kind[slot] else {
             return;
         };
-        let Some(state) = self.world.crops.get(&target) else {
+        self.show_crop_menu(sid, target, spec, stage)
+    }
+
+    /// Flower menu UI for one crop (local and guest clicks share it;
+    /// `spec`/`stage` come from the authoritative state or the guest
+    /// view). The menu choice is applied by `harvest_crop`, which routes
+    /// locals through the world tables and guests through the relay.
+    fn show_crop_menu(&mut self, sid: SessionId, target: GobId, spec: u8, stage: u8) {
+        let Some(spec_data) = farm::CROPS.get(spec as usize) else {
             return;
         };
-        let spec = &farm::CROPS[state.spec as usize];
-        let option = if stage >= spec.stages {
+        let option = if stage >= spec_data.stages {
             "Harvest"
-        } else if stage >= spec.early_stage {
+        } else if stage >= spec_data.early_stage {
             "Harvest (unripe)"
         } else {
             debug!(sid, stage, "crop not harvestable yet");
@@ -5105,6 +5153,37 @@ impl Game {
             return;
         }
         out.send(wdg::wdgmsg(wid, "act", &[ListVal::I(0)]));
+        // Guest crop (session 31): the menu was local session UI; the
+        // harvest act itself routes to the crop's authority, which
+        // re-validates the stage, rolls the yield table and acks the
+        // stacks back to this node (StaticAck -> grant_pickup).
+        if let Some(g) = self.world.guests.get(&gob) {
+            if let crate::nodes::GuestKind::Static {
+                class: crate::nodes::StaticClass::Crop,
+                ..
+            } = &g.kind
+            {
+                let player_gob = self
+                    .world
+                    .players
+                    .iter()
+                    .find(|p| p.session == sid)
+                    .map(|p| p.gob);
+                if let (Some(player_gob), Some(c)) = (player_gob, self.cluster.as_ref()) {
+                    let authority = self.cell_owner(crate::visidx::cell_of(g.pos.0, g.pos.1));
+                    c.mesh.send(
+                        authority,
+                        crate::nodes::NodeMsg::RelayStaticAct {
+                            player: player_gob,
+                            target: gob,
+                            act: crate::nodes::StaticAct::HarvestCrop,
+                        },
+                    );
+                    debug!(sid, gob, authority, "relay crop harvest sent");
+                }
+            }
+            return;
+        }
         let Some(slot) = self.world.gobs.get(gob) else {
             return;
         };
@@ -5208,6 +5287,9 @@ impl Game {
                     Self::record_unacked(out, gob, frame, block);
                 }
             }
+            // Cluster: subscribers re-render the new stage from the
+            // updated guest payload (sdt byte in the re-published block).
+            self.publish(gob, GuestEv::Update);
             trace!(gob, stage, "crop stage advance");
         }
         // Tilth decay: unplanted furrows revert to grass.
@@ -7468,25 +7550,111 @@ impl Game {
             debug!(target, ?act, "relay static: target gone");
             return;
         };
-        let result: Option<(Option<StaticStack>, i32)> = match (&self.world.gobs.kind[tslot], act) {
-            (Kind::Drop { .. }, StaticAct::Pickup) => self.relay_pickup(target, tslot),
-            (Kind::Tree { harvests }, StaticAct::Chop) => self.relay_chop(target, tslot, *harvests),
-            (Kind::Stone, StaticAct::Mine) => self.relay_mine(target, tslot),
-            _ => {
-                // Stale guest view (class vs kind drift): drop the act,
-                // never trust the sender's classification.
-                debug!(target, ?act, "relay static: act/kind mismatch");
-                None
-            }
-        };
-        let Some((stack, lp)) = result else {
+        // Each leg returns (stacks, lp); a harvest yields several stacks,
+        // the other legs at most one. An empty vec = nothing to ack.
+        let result: Option<(Vec<Option<StaticStack>>, i32)> =
+            match (&self.world.gobs.kind[tslot], act) {
+                (Kind::Drop { .. }, StaticAct::Pickup) => self
+                    .relay_pickup(target, tslot)
+                    .map(|(s, lp)| (vec![s], lp)),
+                (Kind::Tree { harvests }, StaticAct::Chop) => self
+                    .relay_chop(target, tslot, *harvests)
+                    .map(|(s, lp)| (vec![s], lp)),
+                (Kind::Stone, StaticAct::Mine) => {
+                    self.relay_mine(target, tslot).map(|(s, lp)| (vec![s], lp))
+                }
+                (Kind::Crop { .. }, StaticAct::HarvestCrop) => Some((
+                    self.relay_crop_harvest(target, tslot)
+                        .into_iter()
+                        .map(Some)
+                        .collect(),
+                    0,
+                )),
+                _ => {
+                    // Stale guest view (class vs kind drift): drop the act,
+                    // never trust the sender's classification.
+                    debug!(target, ?act, "relay static: act/kind mismatch");
+                    None
+                }
+            };
+        let Some((stacks, lp)) = result else {
             return;
         };
         if let Some(c) = self.cluster.as_ref() {
             let home = self.node_of_gob(player);
-            c.mesh
-                .send(home, crate::nodes::NodeMsg::StaticAck { player, stack, lp });
+            for (i, stack) in stacks.into_iter().enumerate() {
+                // LP rides the FIRST ack only: single-stack legs emit one
+                // ack, and a crop harvest yields several stacks but never
+                // LP - so every ack after the first carries lp = 0.
+                let ack_lp = if i == 0 { lp } else { 0 };
+                c.mesh.send(
+                    home,
+                    crate::nodes::NodeMsg::StaticAck {
+                        player,
+                        stack,
+                        lp: ack_lp,
+                    },
+                );
+            }
         }
+    }
+
+    /// Crop-harvest leg (session 31): the authority decides mature vs
+    /// unripe from ITS crop state (the guest view may lag a stage), rolls
+    /// the SAME quality/yield tables as the local path, removes the crop,
+    /// restores tilth and returns every yielded stack as resource NAMES.
+    /// Crops never grant LP.
+    fn relay_crop_harvest(
+        &mut self,
+        target: GobId,
+        tslot: usize,
+    ) -> Vec<crate::nodes::StaticStack> {
+        let Kind::Crop { stage, spec } = self.world.gobs.kind[tslot] else {
+            return Vec::new();
+        };
+        let Some(state) = self.world.crops.get(&target).copied() else {
+            return Vec::new();
+        };
+        let Some(spec_data) = farm::CROPS.get(spec as usize) else {
+            return Vec::new();
+        };
+        let mature = stage >= spec_data.stages;
+        // Quality roll: seed q + [-5,+5], soil below seed caps at +2
+        // (docs "Quality model") - identical arithmetic to the local path.
+        let roll = farm::roll_from_uniform(self.world.next_ai_rand(11) as u32);
+        let ql = farm::quality_roll(state.seed_ql, state.soil_ql, roll);
+        let yields: Vec<farm::Yield> = if mature {
+            spec_data.mature_yields.to_vec()
+        } else {
+            vec![spec_data.early_yield]
+        };
+        let pos = self.world.gobs.pos[tslot];
+        // Remove the crop and restore a decaying tilth entry.
+        self.world.crops.remove(&target);
+        self.world
+            .crop_at
+            .remove(&(pos.0.div_euclid(11), pos.1.div_euclid(11)));
+        self.world.gobs.kill(target);
+        self.broadcast_retract(target);
+        self.world.tilth.insert(
+            (pos.0.div_euclid(11), pos.1.div_euclid(11)),
+            unix_ms() + crate::farm::tilth_decay_ms(),
+        );
+        let stacks = yields
+            .iter()
+            .map(|y| {
+                let n =
+                    farm::count_from_uniform(y.count, self.world.next_ai_rand(1_000_000) as u32);
+                crate::nodes::StaticStack {
+                    res: y.res.to_string(),
+                    count: n.max(1),
+                    ql,
+                    label: y.label.to_string(),
+                }
+            })
+            .collect();
+        info!(gob = target, mature, "guest crop harvested (relay)");
+        stacks
     }
 
     /// Pickup leg: remove the drop, return its exact stack. The stack
@@ -10517,6 +10685,7 @@ mod tests {
                 kind: crate::nodes::GuestKind::Static {
                     res_name: "gfx/terobjs/items/wood".into(),
                     class: crate::nodes::StaticClass::Drop,
+                    crop: None,
                 },
                 hp: 1,
                 max_hp: 1,
@@ -10874,5 +11043,234 @@ mod tests {
         // 5) The view stayed quiet in between (the clean skip fired at
         //    least once): visible_total accounting never crashed.
         let _ = base.len();
+    }
+
+    // ------------------------------------------------------------------
+    // Session 31: cross-node crop harvest relay
+    // ------------------------------------------------------------------
+
+    /// Plant a crop gob directly (restore-path construction, no farming
+    /// skill gate) near the test player and return its id.
+    fn planted_crop(g: &mut Game, spec: u8, stage: u8) -> GobId {
+        let pslot = g.world.gobs.get(pgob_of(g)).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let res = g.world.res.intern("gfx/terobjs/crops/wheat");
+        let gob = g
+            .world
+            .gobs
+            .spawn(Kind::Crop { spec, stage }, (px + 30, py), res, 1, 0);
+        g.world.crops.insert(
+            gob,
+            crate::farm::CropState {
+                spec,
+                stage,
+                seed_ql: 10,
+                soil_ql: 10,
+                next_stage_at: u64::MAX,
+            },
+        );
+        gob
+    }
+
+    #[tokio::test]
+    async fn crop_guest_state_carries_crop_class_and_payload() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("cropstate", 0, 2);
+        let gob = planted_crop(&mut g, 1, 3);
+        let slot = g.world.gobs.get(gob).unwrap();
+        let st = g
+            .guest_state_from_slot(gob, slot)
+            .expect("a crop publishes a guest state");
+        match st.kind {
+            crate::nodes::GuestKind::Static {
+                class,
+                crop: Some((spec, stage)),
+                ..
+            } => {
+                assert_eq!(class, crate::nodes::StaticClass::Crop);
+                assert_eq!((spec, stage), (1, 3), "spec and stage ride the payload");
+            }
+            other => panic!("expected a Crop static, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn crop_stage_advance_publishes_update_to_subscribers() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("cropstage", 0, 2);
+        let gob = planted_crop(&mut g, 1, 2);
+        // A subscribed peer: its subscription covers the crop's cell.
+        let (cx, cy) = crate::visidx::cell_of(
+            g.world.gobs.pos[g.world.gobs.get(gob).unwrap()].0,
+            g.world.gobs.pos[g.world.gobs.get(gob).unwrap()].1,
+        );
+        g.cluster
+            .as_mut()
+            .unwrap()
+            .peer_subs
+            .insert(1, std::iter::once((cx, cy)).collect());
+        while let Ok((_, msg)) = mesh_rx.try_recv() {
+            let _ = msg; // drain the subscribe/announce backlog
+        }
+        // Force a stage advance through the farming scheduler.
+        g.world.crops.get_mut(&gob).unwrap().next_stage_at = 0;
+        g.tick_farming();
+        // The advance re-publishes the guest state with the new stage.
+        let mut saw_stage_update = false;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::GuestUpdate(st) = msg {
+                if st.id == gob {
+                    match st.kind {
+                        crate::nodes::GuestKind::Static {
+                            class: crate::nodes::StaticClass::Crop,
+                            crop: Some((_spec, stage)),
+                            ..
+                        } => {
+                            assert_eq!(stage, 3, "wheat advances 2 -> 3");
+                            saw_stage_update = true;
+                        }
+                        other => panic!("expected a crop static update, got {other:?}"),
+                    }
+                }
+            }
+        }
+        assert!(saw_stage_update, "stage advance publishes a GuestUpdate");
+    }
+
+    #[tokio::test]
+    async fn guest_crop_click_opens_menu_only_when_ripe() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("cropmenu", 0, 2);
+        let pgob = pgob_of(&g);
+        // Ripe guest crop: stage 5 >= wheat early_stage 2 -> menu opens.
+        // Ingested through the REAL path (GuestAnnounce), so the guest row
+        // is exactly what a subscriber would hold.
+        let ripe = planted_crop(&mut g, 1, 5);
+        let rslot = g.world.gobs.get(ripe).unwrap();
+        let st = g.guest_state_from_slot(ripe, rslot).unwrap();
+        let (fx, fy) = st.pos;
+        g.world.gobs.kill(ripe);
+        g.on_node_msg(crate::nodes::NodeMsg::GuestAnnounce(st));
+        g.player_interact(1, pgob, ripe, (fx, fy));
+        assert!(
+            g.sessions.get(&1).unwrap().crop_menu.is_some(),
+            "a ripe guest crop opens the harvest menu"
+        );
+        // Unripe guest crop: stage 1 < early_stage 2 -> the menu target
+        // stays on the earlier crop.
+        let unripe = planted_crop(&mut g, 1, 1);
+        let uslot = g.world.gobs.get(unripe).unwrap();
+        let ust = g.guest_state_from_slot(unripe, uslot).unwrap();
+        g.world.gobs.kill(unripe);
+        g.on_node_msg(crate::nodes::NodeMsg::GuestAnnounce(ust));
+        g.player_interact(1, pgob, unripe, (0, 0));
+        let menu = g.sessions.get(&1).unwrap().crop_menu.unwrap();
+        assert_ne!(
+            menu.1, unripe,
+            "an unripe guest crop never replaces the menu target"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_harvest_crop_acks_yield_stacks_and_kills_crop() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("cropharvest", 0, 2);
+        // A mature wheat crop (spec 1, stage = stages = final).
+        let stages = crate::farm::CROPS[1].stages;
+        let gob = planted_crop(&mut g, 1, stages);
+        let clicker = foreign_node_gob_id(0, 2, 61);
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStaticAct {
+            player: clicker,
+            target: gob,
+            act: crate::nodes::StaticAct::HarvestCrop,
+        });
+        // The crop is dead on the authority and tilth is restored.
+        assert!(
+            g.world.gobs.get(gob).is_none(),
+            "the relayed harvest removes the crop"
+        );
+        // One StaticAck per mature-yield stack, all addressed to the
+        // clicking player's home node, none carrying LP.
+        let mut acks: Vec<(Option<crate::nodes::StaticStack>, i32)> = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::StaticAck { player, stack, lp } = msg {
+                assert_eq!(player, clicker);
+                acks.push((stack, lp));
+            }
+        }
+        let yields = crate::farm::CROPS[1].mature_yields;
+        assert_eq!(acks.len(), yields.len(), "one ack per yielded stack");
+        for (stack, lp) in &acks {
+            assert_eq!(*lp, 0, "crops never grant LP");
+            let stack = stack.as_ref().expect("harvest acks always carry a stack");
+            assert!(
+                yields.iter().any(|y| y.res == stack.res),
+                "yielded {} is in the wheat table",
+                stack.res
+            );
+            assert!(stack.count >= 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_harvest_crop_mismatch_is_dropped() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("cropmismatch", 0, 2);
+        // A TREE tagged with the harvest act: the authority re-validates
+        // the Kind and drops the stale view.
+        let pslot = g.world.gobs.get(pgob_of(&g)).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let res = g.world.res.intern("gfx/terobjs/trees/old");
+        let tree = g
+            .world
+            .gobs
+            .spawn(Kind::Tree { harvests: 2 }, (px + 40, py), res, 1, 0);
+        let clicker = foreign_node_gob_id(0, 2, 61);
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStaticAct {
+            player: clicker,
+            target: tree,
+            act: crate::nodes::StaticAct::HarvestCrop,
+        });
+        assert!(
+            g.world.gobs.get(tree).is_some(),
+            "the tree survives the mismatched act"
+        );
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            assert!(
+                !matches!(msg, crate::nodes::NodeMsg::StaticAck { .. }),
+                "a mismatched act never acks"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn home_node_grants_every_yield_ack_stack() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("cropack", 0, 2);
+        let pgob = pgob_of(&g);
+        let before = g
+            .world
+            .players
+            .iter()
+            .find(|p| p.gob == pgob)
+            .unwrap()
+            .inv
+            .len();
+        // Two acks (a two-stack harvest): BOTH stacks must land.
+        for res in ["gfx/invobjs/wheat", "gfx/invobjs/grainseed"] {
+            g.on_node_msg(crate::nodes::NodeMsg::StaticAck {
+                player: pgob,
+                stack: Some(crate::nodes::StaticStack {
+                    res: res.to_owned(),
+                    count: 3,
+                    ql: 10,
+                    label: "Wheat".to_owned(),
+                }),
+                lp: 0,
+            });
+        }
+        let after = g
+            .world
+            .players
+            .iter()
+            .find(|p| p.gob == pgob)
+            .unwrap()
+            .inv
+            .len();
+        assert_eq!(after, before + 2, "each yield ack grants its stack");
     }
 }
