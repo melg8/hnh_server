@@ -1555,7 +1555,15 @@ impl Game {
             pages.push(m.res);
         }
         pages.push("paginae/atk/blk");
-        out.send(wdg::paginae_add(&pages));
+        // One PAGINAE frame per entry: the 30-entry announce crosses the
+        // reliability-layer fragmentation path, and the real client's
+        // in-frame loop desynced mid-frame in the probe environment
+        // (pagina read at a shifted offset picked up a garbage version -
+        // "Wrong res version (1 != 28484)"). Per-entry frames carry the
+        // same entries with no in-frame cursor to desync.
+        for p in &pages {
+            out.send(wdg::paginae_add(std::slice::from_ref(p)));
+        }
         // Initial paperdoll contents ("set" + "ava") now that the player
         // and the epry widget both exist.
         self.send_epry_state(sid);

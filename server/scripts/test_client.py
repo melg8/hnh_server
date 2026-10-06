@@ -143,6 +143,18 @@ def main():
             stats["wdgmsg"] += 1
         elif t == 4:
             stats["globlob"] += 1
+        elif t == 5:  # PAGINAE: per entry '+' name\0 u16 ver
+            off = 0
+            while off < len(body):
+                act = body[off]
+                off += 1
+                nend = body.index(0, off)
+                nm = body[off:nend].decode()
+                off = nend + 1
+                ver = struct.unpack("<H", body[off:off + 2])[0]
+                off += 2
+                if act == 0x2B and nm.startswith("paginae/atk/"):
+                    stats[f"pag:{nm}={ver}"] = 1
         elif t == 6:
             stats["resid"] += 1
         elif t == 9:  # CATTR: (name\0 int32 base int32 comp)*
