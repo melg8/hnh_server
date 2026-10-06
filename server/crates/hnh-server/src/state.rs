@@ -180,6 +180,19 @@ impl Species {
         }
     }
 
+    /// Short species name for chat lines (ranged combat feedback).
+    pub fn name(self) -> &'static str {
+        match self {
+            Species::Deer => "Deer",
+            Species::Fox => "Fox",
+            Species::Wolf => "Wolf",
+            Species::Boar => "Boar",
+            Species::Cow => "Cow",
+            Species::Hare => "Hare",
+            Species::Aurochs => "Aurochs",
+        }
+    }
+
     /// Server-sent display name for this species' raw meat. Values match
     /// fep.conf keys so eating resolves FEPs (food-and-fep.md: the server's
     /// item tooltip names must match the table keys). Wolf meat has no
@@ -605,6 +618,9 @@ pub struct Player {
     pub fight_target: Option<GobId>,
     /// Attack cooldown in ticks.
     pub atk_cd: i32,
+    /// Active ranged aim (bow equipped; see archery.rs). Mutually
+    /// exclusive with `fight_target`.
+    pub aim: Option<crate::archery::RangedAim>,
 }
 
 /// Live combat bars for one animal engaged with a player.

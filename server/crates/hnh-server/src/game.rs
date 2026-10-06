@@ -1330,6 +1330,7 @@ impl Game {
             fep: crate::craft::FepState::default(),
             fight_target: None,
             atk_cd: 0,
+            aim: None,
         });
         self.world.by_session.insert(sid, player_idx);
 
@@ -3968,6 +3969,11 @@ impl Game {
     }
 
     fn player_walk(&mut self, sid: SessionId, player_gob: GobId, target: (i32, i32)) {
+        // A ground click cancels any active aim (the player chose to
+        // move instead of holding the draw).
+        if let Some(p) = self.world.player_mut(sid) {
+            p.aim = None;
+        }
         let Some(slot) = self.world.gobs.get(player_gob) else {
             return;
         };
@@ -4127,6 +4133,12 @@ impl Game {
                 self.broadcast_retract(target);
             }
             Kind::Animal { species } => {
+                // Bow-equipped players take the ranged path instead of
+                // the fight window (archery.rs; the aim meter is the
+                // accuracy meter of Legacy:Combat_Actions).
+                if self.start_aim(sid, target) {
+                    return;
+                }
                 self.start_fight(sid, target, species);
             }
             Kind::Crop { .. } => {
@@ -4725,6 +4737,227 @@ impl Game {
     }
 
     // ------------------------------------------------------------------
+    // Bow ranged combat (archery.rs)
+    // ------------------------------------------------------------------
+
+    /// Begin ranged aiming at `target` when the player has an equipped
+    /// bow. Returns true when the ranged path owns the click (aim
+    /// started, or refused with chat feedback); false falls through to
+    /// the melee fight window. Consuming the click keeps a bow carrier
+    /// out of melee engagements entirely, matching the legacy split
+    /// between the Shoot action and the openings fight.
+    fn start_aim(&mut self, sid: SessionId, target: GobId) -> bool {
+        let bow_gidx = self.world.res.intern("gfx/invobjs/bow");
+        let found = self.world.player(sid).and_then(|p| {
+            p.equip
+                .iter()
+                .flatten()
+                .find(|s| s.res == bow_gidx)
+                .map(|s| s.ql)
+        });
+        let Some(bow_ql) = found else {
+            return false;
+        };
+        let rate = crate::archery::BOWS
+            .iter()
+            .find(|(r, _)| *r == "gfx/invobjs/bow")
+            .map(|(_, rate)| *rate)
+            .unwrap_or(crate::archery::AIM_RATE_WOODBOW);
+        // Arrows are mandatory: a dry bow may not aim.
+        let arrow_gidx: Vec<u16> = crate::archery::ARROWS
+            .iter()
+            .map(|a| self.world.res.intern(a))
+            .collect();
+        let has_arrows = self
+            .world
+            .player(sid)
+            .map(|p| {
+                p.inv
+                    .iter()
+                    .any(|s| arrow_gidx.contains(&s.res) && s.count > 0)
+            })
+            .unwrap_or(false);
+        if !has_arrows {
+            self.chat_line(sid, "You have no arrows to shoot.", Some((255, 128, 128)));
+            return true;
+        }
+        // Drop any melee engagement first (the two states are exclusive).
+        let old_target = self
+            .world
+            .player_mut(sid)
+            .and_then(|p| p.fight_target.take());
+        if let Some(old) = old_target {
+            self.fight_del(sid, old);
+        }
+        if let Some(p) = self.world.player_mut(sid) {
+            p.aim = Some(crate::archery::RangedAim::new(target, bow_ql, rate));
+        }
+        self.chat_line(
+            sid,
+            "You draw your bow and start aiming...",
+            Some((192, 255, 192)),
+        );
+        info!(sid, target, bow_ql, "ranged aim started");
+        true
+    }
+
+    /// One combat tick of an active aim: chase an out-of-range target,
+    /// fill the accuracy meter (chat progress lines), auto-release at a
+    /// full meter.
+    fn tick_aim(
+        &mut self,
+        pidx: usize,
+        sid: SessionId,
+        pgob: GobId,
+        mut aim: crate::archery::RangedAim,
+    ) {
+        const CHASE_DROP: i32 = 300; // same disengage radius as melee
+        let Some(pslot) = self.world.gobs.get(pgob) else {
+            self.world.players[pidx].aim = None;
+            return;
+        };
+        // Local animals only: guest animals route through the static
+        // relay and stay melee-only for now.
+        let Some(tslot) = self.world.gobs.get(aim.target) else {
+            self.world.players[pidx].aim = None;
+            self.chat_line(sid, "Your target is gone.", Some((255, 200, 128)));
+            return;
+        };
+        if self.world.guests.contains_key(&aim.target) {
+            self.world.players[pidx].aim = None;
+            self.chat_line(sid, "You cannot aim at that.", Some((255, 200, 128)));
+            return;
+        }
+        let (px, py) = self.world.gobs.pos[pslot];
+        let (tx, ty) = self.world.gobs.pos[tslot];
+        let dist = (px - tx).abs().max((py - ty).abs());
+        if dist > CHASE_DROP {
+            self.world.players[pidx].aim = None;
+            self.chat_line(
+                sid,
+                "You lower your bow; the target escaped.",
+                Some((255, 200, 128)),
+            );
+            return;
+        }
+        if dist > crate::archery::BOW_RANGE {
+            // In sight but out of range: close in, keep the aim.
+            if self.world.gobs.mv[pslot].is_none() {
+                self.start_move(pslot, (tx, ty));
+            }
+            self.world.players[pidx].aim = Some(aim);
+            return;
+        }
+        aim.meter = (aim.meter + aim.rate).min(crate::archery::AIM_FULL);
+        let percent = aim.meter * 100 / crate::archery::AIM_FULL;
+        for r in crate::archery::AIM_REPORTS {
+            if percent >= r && aim.reported < r {
+                self.chat_line(sid, &format!("Aiming at {r}%..."), Some((192, 255, 192)));
+                aim.reported = r;
+            }
+        }
+        if aim.meter >= crate::archery::AIM_FULL {
+            let roll = self.world.next_ai_rand(100) as u32;
+            self.shoot_arrow(pidx, sid, aim, roll);
+            return;
+        }
+        self.world.players[pidx].aim = Some(aim);
+    }
+
+    /// Release one arrow at the aim target. `roll` is the 0..99 hit
+    /// roll (rng in production, fixed in tests). The arrow is consumed
+    /// whether the shot lands or not; the attack meter is depleted per
+    /// Legacy:Combat_Actions. Aim continues while the target lives and
+    /// arrows remain.
+    fn shoot_arrow(
+        &mut self,
+        pidx: usize,
+        sid: SessionId,
+        aim: crate::archery::RangedAim,
+        roll: u32,
+    ) {
+        let arrow_gidx: Vec<u16> = crate::archery::ARROWS
+            .iter()
+            .map(|a| self.world.res.intern(a))
+            .collect();
+        let arrow_slot = self.world.players[pidx]
+            .inv
+            .iter()
+            .position(|s| arrow_gidx.contains(&s.res) && s.count > 0);
+        let Some(aslot) = arrow_slot else {
+            self.world.players[pidx].aim = None;
+            self.chat_line(sid, "You have no arrows to shoot.", Some((255, 128, 128)));
+            return;
+        };
+        // Consume exactly one arrow.
+        {
+            let stack = &mut self.world.players[pidx].inv[aslot];
+            stack.count -= 1;
+            let empty = stack.count == 0;
+            if empty {
+                self.world.players[pidx].inv.remove(aslot);
+            }
+        }
+        // Deplete the attack meter (frv offence bar).
+        if let Some(out) = self.sessions.get_mut(&sid) {
+            out.fight.own_off = 0;
+        }
+        self.world.players[pidx].stamina = (self.world.players[pidx].stamina - 2).max(0);
+        let target = aim.target;
+        let Some(tslot) = self.world.gobs.get(target) else {
+            self.world.players[pidx].aim = None;
+            return;
+        };
+        let species = match self.world.gobs.kind[tslot] {
+            crate::state::Kind::Animal { species } => species,
+            _ => {
+                self.world.players[pidx].aim = None;
+                return;
+            }
+        };
+        let (px, py) = self
+            .world
+            .gobs
+            .get(self.world.players[pidx].gob)
+            .map(|s| self.world.gobs.pos[s])
+            .unwrap_or((0, 0));
+        let (tx, ty) = self.world.gobs.pos[tslot];
+        let dist = (px - tx).abs().max((py - ty).abs());
+        let marks = self.world.players[pidx]
+            .attrs
+            .get("marks")
+            .copied()
+            .unwrap_or(0);
+        let chance = crate::archery::hit_chance(dist, marks);
+        let dmg = crate::archery::bow_damage(aim.bow_ql);
+        if roll < chance as u32 {
+            self.chat_line(
+                sid,
+                &format!("Your arrow hits the {} for {dmg} damage.", species.name()),
+                Some((192, 255, 192)),
+            );
+            self.damage_animal(pidx, sid, target, tslot, dmg);
+        } else {
+            self.chat_line(sid, "Your arrow misses.", Some((255, 200, 128)));
+        }
+        // Keep aiming while the target lives and arrows remain.
+        let alive = self.world.gobs.get(target).is_some();
+        let more_arrows = self.world.players[pidx]
+            .inv
+            .iter()
+            .any(|s| arrow_gidx.contains(&s.res) && s.count > 0);
+        if alive && more_arrows {
+            self.world.players[pidx].aim =
+                Some(crate::archery::RangedAim::new(target, aim.bow_ql, aim.rate));
+        } else {
+            self.world.players[pidx].aim = None;
+            if !alive {
+                self.chat_line(sid, "You lower your bow.", Some((192, 255, 192)));
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Fightview (frv) widget protocol
     // ------------------------------------------------------------------
 
@@ -4801,9 +5034,12 @@ impl Game {
         let ints: Vec<i32> = args.iter().filter_map(|a| a.as_int()).collect();
         match name {
             "click" => {
-                // Select that opponent; answer with `cur`.
+                // Select that opponent; answer with `cur`. Selecting a
+                // melee opponent drops any active ranged aim (the two
+                // combat modes are exclusive player state).
                 if let Some(&gob) = ints.first() {
                     if let Some(p) = self.world.player_mut(sid) {
+                        p.aim = None;
                         p.fight_target = Some(gob);
                     }
                     if let Some(out) = self.sessions.get_mut(&sid) {
@@ -7896,10 +8132,16 @@ impl Game {
         // --- player side: offence gen, swings, bar streaming ---
         let players: Vec<usize> = (0..self.world.players.len()).collect();
         'player: for pidx in players {
-            let (target, sid, pgob) = {
+            let (target, aim, sid, pgob) = {
                 let p = &self.world.players[pidx];
-                (p.fight_target, p.session, p.gob)
+                (p.fight_target, p.aim, p.session, p.gob)
             };
+            // Ranged aim runs its own tick (accuracy meter, chase,
+            // auto-release) and is exclusive with a melee target.
+            if let Some(a) = aim {
+                self.tick_aim(pidx, sid, pgob, a);
+                continue;
+            }
             let Some(target) = target else { continue };
             let Some(pslot) = self.world.gobs.get(pgob) else {
                 continue;
@@ -13865,5 +14107,283 @@ mod tests {
                 "{page} in RECIPES"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Bow ranged combat (session 37, archery.rs)
+    // ------------------------------------------------------------------
+
+    /// Equip a bow into slot 0 and put one stack of arrows into the
+    /// inventory.
+    fn arm_bow(g: &mut Game, pidx: usize, arrows: u32, bow_ql: u8) {
+        let bow_gidx = g.world.res.intern("gfx/invobjs/bow");
+        g.world.players[pidx].equip[0] = Some(crate::state::InvStack {
+            res: bow_gidx,
+            count: 1,
+            ql: bow_ql,
+            label: "",
+        });
+        if arrows > 0 {
+            let arr_gidx = g.world.res.intern("gfx/invobjs/arrow-stone");
+            g.world.players[pidx].inv.push(crate::state::InvStack {
+                res: arr_gidx,
+                count: arrows,
+                ql: 10,
+                label: "",
+            });
+        }
+    }
+
+    /// Spawn a Deer at Chebyshev distance `d` (units) from the player
+    /// with explicit HP (lets hit/miss tests survive a 75-damage shot).
+    fn spawn_deer_at(g: &mut Game, pidx: usize, d: i32, hp: i32) -> crate::state::GobId {
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).expect("player gob");
+        let (px, py) = g.world.gobs.pos[pslot];
+        let res = g.world.res.intern(Species::Deer.resname());
+        let id = g.world.gobs.spawn(
+            Kind::Animal {
+                species: Species::Deer,
+            },
+            (px + d, py),
+            res,
+            hp,
+            33,
+        );
+        g.world.animal_gobs.push(id);
+        id
+    }
+
+    fn arrow_count(g: &mut Game, pidx: usize) -> u32 {
+        let arr_gidx = g.world.res.intern("gfx/invobjs/arrow-stone");
+        g.world.players[pidx]
+            .inv
+            .iter()
+            .filter(|s| s.res == arr_gidx)
+            .map(|s| s.count)
+            .sum()
+    }
+
+    /// Extract the chat "log" text from one RMSG_WDGMSG frame (used by
+    /// the aim-progress assertions). Payload after the widget name is
+    /// a typed list: LIST_STR(2), NUL-terminated text, then the color.
+    fn chat_log_text(msg: &[u8]) -> Option<String> {
+        if msg.first() != Some(&RMSG_WDGMSG) || msg.len() < 5 {
+            return None;
+        }
+        let nul = msg[3..].iter().position(|&b| b == 0)? + 3;
+        if &msg[3..nul] != b"log" {
+            return None;
+        }
+        let rest = &msg[nul + 1..];
+        if rest.first() != Some(&2) {
+            return None; // LIST_STR tag
+        }
+        let end = rest[1..].iter().position(|&b| b == 0)? + 1;
+        String::from_utf8(rest[1..end].to_vec()).ok()
+    }
+
+    /// Clicking an animal with an equipped bow opens the RANGED aim
+    /// path, not the melee fight window; without a bow the melee fight
+    /// opens as before.
+    #[tokio::test]
+    async fn bow_click_opens_aim_instead_of_fight() {
+        let (mut g, _rx, _raw) = entered_game("bowaim");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        arm_bow(&mut g, pidx, 10, 10);
+        let deer = spawn_deer_at(&mut g, pidx, 66, 200);
+        let pgob = g.world.players[pidx].gob;
+        g.player_interact(1, pgob, deer, (0, 0));
+        let p = &g.world.players[pidx];
+        assert_eq!(p.aim.map(|a| a.target), Some(deer), "aim started");
+        assert_eq!(p.fight_target, None, "no melee fight for a bow carrier");
+        // Without a bow the same click opens the melee fight.
+        g.world.players[pidx].aim = None;
+        g.world.players[pidx].equip[0] = None;
+        g.player_interact(1, pgob, deer, (0, 0));
+        assert_eq!(
+            g.world.players[pidx].fight_target,
+            Some(deer),
+            "melee fight opens without a bow"
+        );
+    }
+
+    /// A dry bow (no arrows) refuses to aim and never falls back into
+    /// melee while the bow is still equipped.
+    #[tokio::test]
+    async fn dry_bow_refuses_to_aim() {
+        let (mut g, _rx, _raw) = entered_game("drybow");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        arm_bow(&mut g, pidx, 0, 10);
+        let deer = spawn_deer_at(&mut g, pidx, 66, 200);
+        let pgob = g.world.players[pidx].gob;
+        g.player_interact(1, pgob, deer, (0, 0));
+        assert_eq!(g.world.players[pidx].aim, None, "no aim without arrows");
+        assert_eq!(
+            g.world.players[pidx].fight_target, None,
+            "no melee fallback while the bow is equipped"
+        );
+    }
+
+    /// A guaranteed hit (roll 0) consumes exactly one arrow, applies
+    /// the Fandom damage formula, depletes the attack meter and keeps
+    /// the aim up for the next shot.
+    #[tokio::test]
+    async fn arrow_hit_consumes_one_arrow_and_damages() {
+        let (mut g, _rx, _raw) = entered_game("arrowhit");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        arm_bow(&mut g, pidx, 10, 10);
+        let deer = spawn_deer_at(&mut g, pidx, 66, 200);
+        let dslot = g.world.gobs.get(deer).unwrap();
+        let hp0 = g.world.gobs.hp[dslot];
+        let aim = crate::archery::RangedAim::new(deer, 10, crate::archery::AIM_RATE_WOODBOW);
+        // Prime the offence bar so the depletion is observable.
+        if let Some(out) = g.sessions.get_mut(&1) {
+            out.fight.own_off = crate::fight::BAR_FULL;
+        }
+        g.shoot_arrow(pidx, 1, aim, 0);
+        let dslot = g.world.gobs.get(deer).unwrap();
+        assert_eq!(
+            g.world.gobs.hp[dslot],
+            hp0 - crate::archery::bow_damage(10),
+            "q10 bow deals 75*sqrt(10/10) = 75"
+        );
+        assert_eq!(arrow_count(&mut g, pidx), 9, "exactly one arrow consumed");
+        assert_eq!(
+            g.sessions[&1].fight.own_off, 0,
+            "attack meter depleted by the shot"
+        );
+        assert_eq!(
+            g.world.players[pidx].aim.map(|a| a.target),
+            Some(deer),
+            "aim continues while the target lives"
+        );
+    }
+
+    /// A guaranteed miss (roll 99) still spends the arrow but leaves
+    /// the target's HP untouched.
+    #[tokio::test]
+    async fn arrow_miss_spends_the_arrow_only() {
+        let (mut g, _rx, _raw) = entered_game("arrowmiss");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        arm_bow(&mut g, pidx, 10, 10);
+        let deer = spawn_deer_at(&mut g, pidx, 66, 200);
+        let dslot = g.world.gobs.get(deer).unwrap();
+        let hp0 = g.world.gobs.hp[dslot];
+        let aim = crate::archery::RangedAim::new(deer, 10, crate::archery::AIM_RATE_WOODBOW);
+        g.shoot_arrow(pidx, 1, aim, 99);
+        let dslot = g.world.gobs.get(deer).unwrap();
+        assert_eq!(g.world.gobs.hp[dslot], hp0, "miss deals no damage");
+        assert_eq!(arrow_count(&mut g, pidx), 9, "the arrow is lost on a miss");
+    }
+
+    /// The aim meter fills over 40 ticks (4 s at 10 Hz), streams the
+    /// 25/50/75% progress lines in order, and spends no arrow before
+    /// the release.
+    #[tokio::test]
+    async fn aim_meter_fills_with_progress_lines() {
+        let (mut g, mut rx, _raw) = entered_game("aimmeter");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        arm_bow(&mut g, pidx, 10, 10);
+        let deer = spawn_deer_at(&mut g, pidx, 66, 200);
+        let pgob = g.world.players[pidx].gob;
+        g.player_interact(1, pgob, deer, (0, 0));
+        let mut aim = g.world.players[pidx].aim.expect("aim started");
+        for _ in 0..39 {
+            g.tick_aim(pidx, 1, pgob, aim);
+            aim = g.world.players[pidx].aim.expect("still aiming");
+        }
+        assert!(
+            aim.meter >= 75 * crate::archery::AIM_FULL / 100,
+            "39 of 40 ticks reach at least 75%"
+        );
+        assert_eq!(
+            arrow_count(&mut g, pidx),
+            10,
+            "no arrow spent before release"
+        );
+        // Progress lines arrived.
+        let mut seen: Vec<String> = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let Some(text) = chat_log_text(&msg) {
+                seen.push(text);
+            }
+        }
+        assert!(
+            seen.iter().any(|t| t.contains("Aiming at 25%")),
+            "25% line sent: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|t| t.contains("Aiming at 75%")),
+            "75% line sent: {seen:?}"
+        );
+    }
+
+    /// An out-of-range target is chased, not shot at: no meter gain,
+    /// and the aim survives inside the drop radius.
+    #[tokio::test]
+    async fn out_of_range_target_is_chased() {
+        let (mut g, _rx, _raw) = entered_game("bowchase");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        arm_bow(&mut g, pidx, 10, 10);
+        let deer = spawn_deer_at(&mut g, pidx, 200, 200);
+        let pgob = g.world.players[pidx].gob;
+        let aim = crate::archery::RangedAim::new(deer, 10, crate::archery::AIM_RATE_WOODBOW);
+        g.world.players[pidx].aim = Some(aim);
+        g.tick_aim(pidx, 1, pgob, aim);
+        let aim = g.world.players[pidx].aim.expect("aim kept while chasing");
+        assert_eq!(aim.meter, 0, "no meter gain out of range");
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        assert!(g.world.gobs.mv[pslot].is_some(), "player closes in");
+        assert_eq!(aim.target, deer, "aim survives inside the drop radius");
+    }
+
+    /// A ground click cancels an active aim (walk away instead).
+    #[tokio::test]
+    async fn walk_cancels_aim() {
+        let (mut g, _rx, _raw) = entered_game("aimcancel");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        arm_bow(&mut g, pidx, 10, 10);
+        let deer = spawn_deer_at(&mut g, pidx, 66, 200);
+        let pgob = g.world.players[pidx].gob;
+        g.player_interact(1, pgob, deer, (0, 0));
+        assert!(g.world.players[pidx].aim.is_some());
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        g.player_walk(1, pgob, (px + 200, py));
+        assert_eq!(g.world.players[pidx].aim, None, "aim dropped on walk");
+    }
+
+    /// A lethal arrow kills the deer, drops its loot (meat + bone from
+    /// session 36) and ends the aim.
+    #[tokio::test]
+    async fn lethal_arrow_kills_and_loots() {
+        let (mut g, _rx, _raw) = entered_game("bowkill");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        arm_bow(&mut g, pidx, 10, 40);
+        let deer = spawn_deer_at(&mut g, pidx, 66, Species::Deer.max_hp());
+        let dslot = g.world.gobs.get(deer).unwrap();
+        let pos = g.world.gobs.pos[dslot];
+        let aim = crate::archery::RangedAim::new(deer, 40, crate::archery::AIM_RATE_WOODBOW);
+        g.shoot_arrow(pidx, 1, aim, 0);
+        assert!(
+            g.world.gobs.get(deer).is_none(),
+            "q40 arrow (150 dmg) kills a 40 HP deer"
+        );
+        assert_eq!(g.world.players[pidx].aim, None, "aim ends with the kill");
+        // Loot on the ground: deer drops meat and a bone nearby.
+        let meat_gidx = g.world.res.intern("gfx/invobjs/meat");
+        let bone_gidx = g.world.res.intern("gfx/invobjs/bone");
+        let loot: Vec<u16> = (0..g.world.gobs.kind.len())
+            .filter(|i| {
+                let (dx, dy) = g.world.gobs.pos[*i];
+                (dx - pos.0).abs() < 60 && (dy - pos.1).abs() < 60
+            })
+            .filter_map(|i| g.world.gobs.kind[i].drop_info().map(|d| d.0))
+            .collect();
+        assert!(
+            loot.contains(&meat_gidx) || loot.contains(&bone_gidx),
+            "meat or bone dropped near the kill"
+        );
     }
 }

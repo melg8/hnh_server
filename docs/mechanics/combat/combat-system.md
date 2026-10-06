@@ -237,6 +237,19 @@ Other actions outside the duel economy:
 - **Quell the Beast** (Q, Animal Husbandry): taming action usable against domesticatable animals; requires Combat Advantage >= 3, Combat Intensity 0, costs 2 initiative, and a rope. On success the animal is attached to the rope and follows, gaining tameness; at 100 tameness it becomes domesticated.
 - **Shoot** (H, Hunting/Archery): bow+arrow or sling+stones. "Firing with a bow will deplete your attack meter, but the chance of success only depends on the accuracy meter" (Legacy:Combat_Actions). This is the one documented case of a ranged hit-chance meter separate from the openings bars.
 
+### Implemented ranged model (server, session 37)
+
+The Shoot action is live for bow-equipped players against local animals (`server/crates/hnh-server/src/archery.rs`):
+
+- **Engagement**: clicking an animal while a `gfx/invobjs/bow` stack sits in any equipment slot opens the ranged path INSTEAD of the frv duel (a dry bow refuses with a chat line and never falls back to melee while equipped). A ground click cancels the aim; a melee click without a bow opens the duel as before.
+- **Accuracy meter**: fills at 250/10000 per 100 ms combat tick (full aim in 4 s for the Wooden Bow; the RoB note "a Ranger's Bow aims at half the speed of a Wooden Bow" is a data row in `BOWS`, not code). Progress lines stream to chat at 25/50/75%.
+- **Range**: shots land up to 132 units (~12 tiles); inside 300 units but beyond bow range the archer closes in and keeps the aim, beyond 300 the aim drops (same disengage radius as melee).
+- **Release**: automatic at a full meter. One arrow (`gfx/invobjs/arrow-stone` or `arrow-bone`) is consumed per shot, hit or miss; the frv offence bar (attack meter) is zeroed per the documented rule; stamina -2.
+- **Hit chance** (server policy - the legacy formula is not recoverable, see Open questions): `95 - 55 * (dist / 132) + min(20, Marksmanship/5)` percent, clamped 15..99 - point-blank 95%, 40% at max range for an unskilled archer.
+- **Damage**: `75 * sqrt(q_bow / 10)` (Fandom Bow page - the same k*sqrt(x/10) shape as the unarmed maneuvers). A q10 Wooden Bow hits for 75 (a one-shot on Deer/Fox), q40 for 150. Arrows bypass the openings economy entirely (no defence-bar chip): the hit roll IS the resolution, per the accuracy-meter rule.
+- **Aftermath**: the aim re-arms automatically while the target lives and arrows remain; a kill runs the standard death flow (loot drop, +10 LP, fight teardown).
+- **Not yet ranged**: guest animals on other nodes (the cluster relay is melee-only for now) and player-vs-player archery.
+
 ## How moves beat moves: the counterplay system
 
 The task of describing legacy combat as "rock-paper-scissors" resolves, in the documented sources, into a *weight contest plus advantage feedback loop* rather than a directional high/low or slash/chain/blunt triangle:
