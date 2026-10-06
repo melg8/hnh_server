@@ -252,6 +252,17 @@ pub struct Game {
     ///
     /// Reused across ticks via `clear` (no hot-path allocator churn).
     move_scratch: crate::move_batch::MoveBatch,
+    /// Packed start/FX block scratch (session 44): LINBEG move starts and
+    /// one-shot FX overlays emitted anywhere in the tick (combat chase,
+    /// hit tails, click handling) encode ONCE into this batch and fan out
+    /// through `broadcast_batch` at the END of the tick - one datagram per
+    /// session per tick instead of one per viewer per event. Same reuse
+    /// contract as `move_scratch`.
+    start_scratch: crate::move_batch::MoveBatch,
+    /// Scratch for `broadcast_batch`'s session anchor positions (taken/
+    /// restored; avoids two per-tick allocations at the 1000-session
+    /// scale - two batch fan-outs per tick).
+    fan_scratch: Vec<(SessionId, (i32, i32))>,
     /// Combat-phase lookup indexes (session 43): rebuilt once per tick in
     /// one O(players) pass, reused across ticks (mem-reuse-collections).
     ///
@@ -629,6 +640,8 @@ impl Game {
             fep,
             workers: 1,
             move_scratch: crate::move_batch::MoveBatch::default(),
+            start_scratch: crate::move_batch::MoveBatch::default(),
+            fan_scratch: Vec::new(),
             combat_ix: CombatIndex::default(),
             viewer_ix: ViewerIndex::default(),
             viewer_scratch: Vec::new(),
@@ -8403,6 +8416,8 @@ impl Game {
         self.world.tick += 1;
         self.world.perf.move_blocks = 0;
         self.world.perf.move_cells = 0;
+        self.world.perf.start_blocks = 0;
+        self.world.perf.fx_batch_n = 0;
         self.world.perf.mv_path_us = 0;
         self.world.perf.mv_viewers_us = 0;
         self.world.perf.mv_pose_us = 0;
@@ -8488,6 +8503,17 @@ impl Game {
         // The dirty set served this tick's visibility pass; spawn marks
         // after this point (farming/station drops) dirty the next pass.
         self.world.gobs.vis.clear_dirty();
+        // Session 44: fan out the tick's accumulated LINBEG starts and FX
+        // overlays (chase, hit tails, click handling) through the packed
+        // cell-indexed batch - ONE combined datagram per session per tick,
+        // encoded once per block. Visibility is fresh from the pass above,
+        // so the fan-out filter sees the exact post-update view.
+        if !self.start_scratch.is_empty() {
+            self.world.perf.start_blocks = self.start_scratch.len() as u64;
+            let batch = std::mem::take(&mut self.start_scratch);
+            self.broadcast_batch(&batch);
+            self.start_scratch = batch;
+        }
         let perf = &mut self.world.perf;
         perf.active_sessions = self.sessions.len();
         perf.phase_us = phase_us;
@@ -8626,25 +8652,29 @@ impl Game {
         self.world.perf.move_blocks += batch.len() as u64;
         self.world.perf.move_cells += batch.cell_count() as u64;
         // Session anchor positions (avatar gob slot -> SoA position).
-        let sids_pos: Vec<(SessionId, (i32, i32))> = self
-            .sessions
-            .iter()
-            .filter_map(|(sid, out)| {
-                let pg = out.player_gob?;
-                let slot = self.world.gobs.get(pg)?;
-                Some((*sid, self.world.gobs.pos[slot]))
-            })
-            .collect();
-        for (sid, (px, py)) in sids_pos {
-            let Some(out) = self.sessions.get_mut(&sid) else {
+        // Taken/restored scratch: this runs twice per tick at most (the
+        // movement batch mid-tick, the start/FX batch at tick end) and
+        // the `sessions` iteration order is arbitrary, so the buffer is
+        // just overwritten in place each call.
+        let mut sids_pos = std::mem::take(&mut self.fan_scratch);
+        sids_pos.clear();
+        for (sid, out) in self.sessions.iter() {
+            if let Some(pg) = out.player_gob {
+                if let Some(slot) = self.world.gobs.get(pg) {
+                    sids_pos.push((*sid, self.world.gobs.pos[slot]));
+                }
+            }
+        }
+        for (sid, (px, py)) in &sids_pos {
+            let Some(out) = self.sessions.get_mut(sid) else {
                 continue;
             };
             // Datagram is materialized lazily: sessions with no visible
             // blocks allocate nothing.
             let mut m: Option<MessageBuf> = None;
             for (cell, idxs) in batch.cells() {
-                if !crate::move_batch::cell_intersects_axis(cell.0, px, FANOUT_SPAN)
-                    || !crate::move_batch::cell_intersects_axis(cell.1, py, FANOUT_SPAN)
+                if !crate::move_batch::cell_intersects_axis(cell.0, *px, FANOUT_SPAN)
+                    || !crate::move_batch::cell_intersects_axis(cell.1, *py, FANOUT_SPAN)
                 {
                     continue;
                 }
@@ -8653,10 +8683,34 @@ impl Game {
                     if !out.visible.contains(&id) {
                         continue;
                     }
-                    m.get_or_insert_with(|| MessageBuf::with_capacity(512))
-                        .bytes(batch.block_bytes(i));
-                    if fin {
-                        Self::record_unacked(out, id, frame, batch.block_bytes(i).to_vec());
+                    let bytes = batch.block_bytes(i);
+                    if let Some((global, patch_off)) = batch.block_patch(i) {
+                        // Session-local wire id: resolve the name from the
+                        // game-global table, allocate the session wire id
+                        // (first use also queues the RMSG_RESID
+                        // announcement), rewrite the 2 placeholder bytes,
+                        // ship the per-session copy.
+                        if let Some(name) = self.world.res.name(global) {
+                            let w = out.res.wire_named(global, name);
+                            if let Some((rn, rv)) = out.res.pending_announce(w) {
+                                out.send(crate::resources::wdg::resid(w, rn, rv));
+                                out.res.mark_announced(w);
+                            }
+                            let mut patched = bytes.to_vec();
+                            let o = patch_off as usize;
+                            patched[o..o + 2].copy_from_slice(&w.to_le_bytes());
+                            m.get_or_insert_with(|| MessageBuf::with_capacity(512))
+                                .bytes(&patched);
+                            if fin {
+                                Self::record_unacked(out, id, frame, patched);
+                            }
+                        }
+                    } else {
+                        m.get_or_insert_with(|| MessageBuf::with_capacity(512))
+                            .bytes(bytes);
+                        if fin {
+                            Self::record_unacked(out, id, frame, bytes.to_vec());
+                        }
                     }
                 }
             }
@@ -8664,6 +8718,7 @@ impl Game {
                 out.send_raw(m.finish());
             }
         }
+        self.fan_scratch = sids_pos;
     }
 
     /// Record an OBJDATA block for per-gob retransmission. The per-gob
@@ -8689,6 +8744,12 @@ impl Game {
     /// The client removes the overlay itself once the resource's animation
     /// completes one cycle (Gob.ctick drops a finished non-persistent
     /// overlay), so no deletion message is ever needed.
+    ///
+    /// Session 44: the block encodes ONCE into the packed start batch
+    /// (with the session-local wire id left as a patch placeholder - the
+    /// fan-out rewrites it per session and first-announces the resource
+    /// there). The old per-viewer encode/clone loop spent its budget on
+    /// repeated encoding and one allocation per viewer.
     fn fx_overlay_broadcast(&mut self, id: GobId, res_name: &'static str) {
         let Some(slot) = self.world.gobs.get(id) else {
             return;
@@ -8696,38 +8757,35 @@ impl Game {
         let frame = self.world.gobs.frame[slot];
         let frame_i32 = frame as i32;
         let gi = self.world.res.intern(res_name);
+        let (px, py) = self.world.gobs.pos[slot];
         self.overlay_seq = self.overlay_seq.wrapping_add(1);
         // Wire id: bit 0 = the persist flag (0 = one-shot), the rest is the
         // client-side overlay id (15-bit sequence keeps it comfortably
         // positive).
         let olid = ((self.overlay_seq & 0x7FFF) << 1) as i32;
-        let mut viewers = std::mem::take(&mut self.viewer_scratch);
-        let mut cand = 0u64;
-        self.viewers_of_slot(slot, &mut viewers, &mut cand);
-        for &v in viewers.iter() {
-            let Some(out) = self.sessions.get_mut(&v) else {
-                continue;
-            };
-            let w = out.res.wire_named(gi, res_name);
-            if let Some((n, ver)) = out.res.pending_announce(w) {
-                out.send(wdg::resid(w, n, ver));
-                out.res.mark_announced(w);
-            }
-            let mut m = MessageBuf::new();
-            m.uint8(MSG_OBJDATA)
-                .uint8(0)
-                .int32(id)
-                .int32(frame_i32)
-                .uint8(OD_OVERLAY)
-                .int32(olid)
-                .uint16(w)
-                .uint8(OD_END);
-            let block = m.finish();
-            out.send_raw(block.clone());
-            Self::record_unacked(out, id, frame, block);
-        }
-        self.viewer_scratch = viewers;
-        self.world.perf.ix_cand_n += cand;
+        // Encode with the global index as the wire placeholder; record the
+        // byte offset of that uint16 so the fan-out can patch it per
+        // session. Layout: MSG, seq, id(4), frame(4), OD_OVERLAY, olid(4),
+        // wire(2) <- patch offset, OD_END.
+        let patch_off = 1 + 1 + 4 + 4 + 1 + 4;
+        let mut m = MessageBuf::new();
+        m.uint8(MSG_OBJDATA)
+            .uint8(0)
+            .int32(id)
+            .int32(frame_i32)
+            .uint8(OD_OVERLAY)
+            .int32(olid)
+            .uint16(gi)
+            .uint8(OD_END);
+        self.start_scratch.push_patched(
+            id,
+            frame,
+            crate::visidx::cell_of(px, py),
+            true,
+            Some((gi, patch_off)),
+            &m.finish(),
+        );
+        self.world.perf.fx_batch_n += 1;
     }
 
     /// Resolve and stream one composited-drawable pose (OD_LAYERS) to
@@ -8937,34 +8995,33 @@ impl Game {
         self.world.gobs.frame[slot] += 1;
         let frame = self.world.gobs.frame[slot];
         let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
+        // Session 44: the LINBEG block is identical for every viewer, so
+        // it is encoded ONCE into the packed start batch; the fan-out
+        // (cell rectangle + `visible.contains` + one combined datagram
+        // per session per tick) happens in `broadcast_batch` at tick end.
+        // The old per-viewer encode/clone loop was the measured chase
+        // cost (2.4-3.0 ms per start at the 1000-bot scale).
         let t_v = Instant::now();
-        // Viewer candidates from the per-tick cell index (was a full
-        // sessions scan per start: 636 us mean at the 1000-bot scale).
-        let mut viewers = std::mem::take(&mut self.viewer_scratch);
-        let mut cand = 0u64;
-        self.viewers_of_slot(slot, &mut viewers, &mut cand);
-        for &v in viewers.iter() {
-            if let Some(out) = self.sessions.get_mut(&v) {
-                let mut m = MessageBuf::new();
-                m.uint8(MSG_OBJDATA)
-                    .uint8(0)
-                    .int32(id)
-                    .int32(frame as i32)
-                    .uint8(OD_LINBEG)
-                    .coord(sx, sy)
-                    .coord(tx, ty)
-                    .int32(steps)
-                    .uint8(OD_END);
-                let block = m.finish();
-                out.send_raw(block.clone());
-                Self::record_unacked(out, id, frame, block);
-            }
+        {
+            let cell = crate::visidx::cell_of(sx, sy);
+            let mut m = MessageBuf::new();
+            m.uint8(MSG_OBJDATA)
+                .uint8(0)
+                .int32(id)
+                .int32(frame as i32)
+                .uint8(OD_LINBEG)
+                .coord(sx, sy)
+                .coord(tx, ty)
+                .int32(steps)
+                .uint8(OD_END);
+            // fin = true: LINBEG carries the authoritative frame, it
+            // lands in `unacked` for OBJACK retransmission exactly like
+            // the old per-viewer path did.
+            self.start_scratch.push(id, frame, cell, true, &m.finish());
         }
-        self.viewer_scratch = viewers;
         {
             let perf = &mut self.world.perf;
             perf.mv_viewers_us += t_v.elapsed().as_micros() as u64;
-            perf.ix_cand_n += cand;
         }
         trace!(id, sx, sy, tx, ty, steps, total_ms, "move started");
         // Face the travel direction and swap to the walking pose set.
@@ -9474,7 +9531,12 @@ impl Game {
                     let knocked = self.hurt_player(vpidx, dmg, pgob);
                     let vname = self.world.players[vpidx].name.clone();
                     let aname = self.world.players[pidx].name.clone();
-                    info!(sid, vsid, target, dmg, knocked, "pvp melee hit");
+                    // Session 44 hit-tail trim: the per-hit info log was a
+                    // measured chunk of the 1.3-3.6 ms hit tail at the
+                    // 1000-dueler scale (25-40 hits/s saturate the
+                    // tracing pipeline). Per-hit detail drops to debug;
+                    // the aggregate below keeps the operational signal.
+                    debug!(sid, vsid, target, dmg, knocked, "pvp melee hit");
                     self.chat_line(
                         sid,
                         &format!("You hit {vname} for {dmg} damage."),
@@ -9811,6 +9873,17 @@ impl Game {
         perf.combat_swing_n = swing_n;
         perf.combat_hit_n = hit_n;
         perf.combat_hit_us = hit_us;
+        // Session 44 hit-tail trim: the operational hit signal as a
+        // 5-second aggregate (50 ticks) instead of a per-hit info line
+        // (the per-hit log was a measured chunk of the hit tail).
+        if hit_n > 0 && self.world.tick.is_multiple_of(50) {
+            let mean_us = perf.combat_hit_us / hit_n.max(1);
+            info!(
+                hits = hit_n,
+                mean_hit_us = mean_us,
+                "pvp hits (5s aggregate)"
+            );
+        }
     }
 
     /// Apply player damage to an animal, handling death + loot.
@@ -12116,6 +12189,129 @@ mod tests {
         }
         assert!(g.world.gobs.mv[slot].is_none());
         assert_eq!(g.world.gobs.pos[slot], back);
+    }
+
+    /// Session 44: a LINBEG start encodes once into the packed start
+    /// batch and ships as ONE datagram to each viewer at tick end; the
+    /// authoritative frame lands in `unacked` for OBJACK retransmission.
+    #[tokio::test]
+    async fn batch_linbeg_fans_out_once_per_tick() {
+        let (mut g, _rx, mut raw) = entered_game("batchwalk");
+        let pgob = g.sessions[&1].player_gob.expect("player gob");
+        let slot = g.world.gobs.get(pgob).expect("slot");
+        let (sx, sy) = g.world.gobs.pos[slot];
+        assert!(g.start_move(slot, (sx + 330, sy)), "walk accepted");
+        assert!(
+            !g.start_scratch.is_empty(),
+            "the LINBEG block queues in the batch (fan-out at tick end)"
+        );
+        let frame = g.world.gobs.frame[slot]; // start_move bumped it
+        g.tick();
+        assert!(
+            g.world.perf.start_blocks >= 1,
+            "start batch counter recorded"
+        );
+        // Exactly one combined OBJDATA datagram carrying the LINBEG block.
+        let mut linbeg_n = 0u8;
+        let mut saw_block = false;
+        while let Ok(p) = raw.try_recv() {
+            // Walk the datagram's gob blocks: [MSG][seq][id i32][frame i32]
+            // [OD_LINBEG]...
+            let mut off = 0usize;
+            while off + 11 <= p.len() {
+                let id = i32::from_le_bytes(p[off + 2..off + 6].try_into().unwrap());
+                let fr = i32::from_le_bytes(p[off + 6..off + 10].try_into().unwrap());
+                let od = p[off + 10];
+                if id == pgob && fr == frame as i32 && od == hnh_proto::consts::OD_LINBEG {
+                    linbeg_n += 1;
+                    saw_block = true;
+                }
+                // Advance to the next block: each block ends with OD_END.
+                off = match p[off..]
+                    .iter()
+                    .position(|&b| b == hnh_proto::consts::OD_END)
+                {
+                    Some(rel) => off + rel + 1,
+                    None => p.len(),
+                };
+            }
+        }
+        assert!(saw_block, "LINBEG block reached the viewer");
+        assert_eq!(linbeg_n, 1, "one LINBEG per tick, not per viewer");
+        // The frame is retransmittable: recorded in `unacked`.
+        let out = g.sessions.get(&1).unwrap();
+        assert!(
+            out.unacked
+                .get(&pgob)
+                .is_some_and(|m| m.contains_key(&frame)),
+            "LINBEG frame {frame} recorded for OBJACK"
+        );
+    }
+
+    /// Session 44: a one-shot FX overlay encodes once with the global
+    /// index as the wire placeholder; the fan-out rewrites the 2-byte
+    /// session-local wire id, first-announces the resource to the session
+    /// and records the patched block in `unacked`.
+    #[tokio::test]
+    async fn batch_fx_patches_session_wire_id() {
+        let (mut g, mut rx, mut raw) = entered_game("batchfx");
+        let pgob = g.sessions[&1].player_gob.expect("player gob");
+        let slot = g.world.gobs.get(pgob).expect("slot");
+        let frame = g.world.gobs.frame[slot];
+        g.fx_overlay_broadcast(pgob, "gfx/fx/hit");
+        g.tick();
+        // The session wire id allocated for the resource after fan-out.
+        let gi = g.world.res.intern("gfx/fx/hit");
+        let w = g
+            .sessions
+            .get_mut(&1)
+            .unwrap()
+            .res
+            .wire_named(gi, "gfx/fx/hit");
+        let out = g.sessions.get(&1).unwrap();
+        // The reliable channel carried the RMSG_RESID announcement.
+        let needle = b"gfx/fx/hit";
+        let mut announced = false;
+        while let Ok(msg) = rx.try_recv() {
+            if msg.windows(needle.len()).any(|w2| w2 == needle) {
+                announced = true;
+            }
+        }
+        assert!(announced, "first-use RESID announcement was queued");
+        // The OBJDATA datagram carries the patched wire id at offset 15.
+        let mut found = false;
+        while let Ok(p) = raw.try_recv() {
+            let mut off = 0usize;
+            while off + 17 <= p.len() {
+                let id = i32::from_le_bytes(p[off + 2..off + 6].try_into().unwrap());
+                let od = p[off + 10];
+                if id == pgob && od == hnh_proto::consts::OD_OVERLAY {
+                    let wire = u16::from_le_bytes(p[off + 15..off + 17].try_into().unwrap());
+                    assert_eq!(
+                        wire, w,
+                        "overlay wire id patched to the session-local value"
+                    );
+                    found = true;
+                }
+                off = match p[off..]
+                    .iter()
+                    .position(|&b| b == hnh_proto::consts::OD_END)
+                {
+                    Some(rel) => off + rel + 1,
+                    None => p.len(),
+                };
+            }
+        }
+        assert!(found, "FX overlay block reached the viewer");
+        // The patched block is retransmittable (the FX block carries the
+        // CURRENT frame - it does not open a new one).
+        let rec = out.unacked.get(&pgob).and_then(|m| m.get(&frame));
+        assert!(rec.is_some(), "FX block recorded for OBJACK");
+        assert_eq!(
+            rec.unwrap()[15..17],
+            w.to_le_bytes(),
+            "unacked copy carries the PATCHED wire id"
+        );
     }
 
     /// Gait speeds must match docs/mechanics/character/attributes-and-vitals.md

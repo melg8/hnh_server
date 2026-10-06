@@ -38,6 +38,15 @@ pub struct BlockRef {
     /// Progress frames are superseded by the next tick's frame and are
     /// deliberately never recorded.
     pub fin: bool,
+    /// Per-session wire-id patch (session 44): the block embeds a
+    /// session-local resource wire id at `patch_off` (a uint16 LE field),
+    /// encoded from the placeholder global index `patch_global`. Each
+    /// receiving session rewrites those 2 bytes with its own wire id at
+    /// fan-out time (and first-announces the resource there) - this lets
+    /// one FX overlay block serve every viewer even though wire ids are
+    /// session-local. `None` for blocks with no session-local fields
+    /// (movement blocks are pure gob data).
+    pub patch: Option<(u16, u32)>,
 }
 
 /// Per-tick packed movement blocks + cell index. Reused across ticks:
@@ -70,6 +79,21 @@ impl MoveBatch {
 
     /// Append one encoded block with its fan-out metadata.
     pub fn push(&mut self, id: GobId, frame: u32, cell: (i32, i32), fin: bool, block: &[u8]) {
+        self.push_patched(id, frame, cell, fin, None, block);
+    }
+
+    /// Append a block carrying a session-local wire id (see
+    /// `BlockRef::patch`): `patch` is `(global index, byte offset of the
+    /// uint16 LE wire id inside `block`)`.
+    pub fn push_patched(
+        &mut self,
+        id: GobId,
+        frame: u32,
+        cell: (i32, i32),
+        fin: bool,
+        patch: Option<(u16, u32)>,
+        block: &[u8],
+    ) {
         let off = self.data.len() as u32;
         self.data.extend_from_slice(block);
         let idx = self.blocks.len() as u32;
@@ -79,6 +103,7 @@ impl MoveBatch {
             off,
             len: block.len() as u32,
             fin,
+            patch,
         });
         self.by_cell.entry(cell).or_default().push(idx);
     }
@@ -98,6 +123,12 @@ impl MoveBatch {
     pub fn block_info(&self, idx: u32) -> (GobId, u32, bool) {
         let b = &self.blocks[idx as usize];
         (b.id, b.frame, b.fin)
+    }
+
+    /// The block's session-local wire-id patch, if any.
+    #[inline]
+    pub fn block_patch(&self, idx: u32) -> Option<(u16, u32)> {
+        self.blocks[idx as usize].patch
     }
 
     /// Block bytes by index (borrow from the packed buffer).

@@ -950,6 +950,11 @@ pub struct Perf {
     /// count (the fan-out probe width). Zero with no movers.
     pub move_blocks: u64,
     pub move_cells: u64,
+    /// Last-tick packed start/FX batch (session 44): LINBEG starts + FX
+    /// overlays encoded once and fanned out at tick end. Block count (mv
+    /// + fx attribution: `fx_batch_n` counts the FX subset).
+    pub start_blocks: u64,
+    pub fx_batch_n: u64,
 }
 
 impl World {

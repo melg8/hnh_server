@@ -1,41 +1,37 @@
-# Session 43 Gates
+# Session 44 Gates
 
-Scope: the combat-phase attribution (session-42 NEXT top item), the
-combat slot indexes, the cell-indexed viewer fan-out, full
-verification, handoff.
+Scope: the session-43 NEXT top item - batched move starts (the
+session-41 packed-batch pattern applied to LINBEG starts and FX
+overlays: encode once, one datagram per session per tick) plus the
+hit-tail trim (per-hit info log rate-limited into an aggregate).
 
 ## G1: full unit battery + clippy + fmt stay green
 
 Runnable.
-  CHECK: cd server && cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test
-  EXPECT: test result: ok (243 tests)
+  CHECK: cd server && cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test --release
+  EXPECT: test result: ok
 
-## G2: combat index semantics (shared target winner + stale-row guard)
+## G2: batch fan-out semantics (encode-once + per-session wire patch + unacked recording)
 
 Runnable.
-  CHECK: cd server && cargo test --release combat_indexes && cargo test --release knockout_in_player_phase
+  CHECK: cd server && cargo test --release move_batch && cargo test --release batch_fx
   EXPECT: test result: ok (both)
 
-## G3: the release binary boots and the wire client enters the world
+## G3: wire behavior unchanged on the release binary
 
 Runnable.
-  CHECK: cd server && bash scripts/verify_session41.sh boot
-  EXPECT: SESSION41 BOOT: OK
+  CHECK: cd server && bash scripts/verify_session41.sh boot && python3 scripts/probe_walk.py && python3 scripts/probe_melee.py
+  EXPECT: SESSION41 BOOT: OK; MOVE PROBE: OK; MELEE WIRE: OK
 
-## G4: movement + melee wire probes stay green on the new fan-out
-
-Runnable.
-  CHECK: cd server && python3 scripts/probe_walk.py && python3 scripts/probe_melee.py
-  EXPECT: MOVE PROBE: OK; MELEE WIRE: OK
-
-## G5: the combat sub-attribution numbers are reproducible
+## G4: the chase/hit tail measurably shrinks under the 1000-bot cohort
 
 Runnable.
   CHECK: cd server && DUR=40 bash scripts/load43.sh
-  EXPECT: perf log shows combat_index_us < 30, combat_chase_us <
-  combat_players_us, ix_cand_n > 0; numbers land in HANDOFF session 43.
+  EXPECT: perf log shows mv_viewers_us and mv_pose_us per start at or
+  below session-43 levels, combat chase share of the tick reduced;
+  numbers land in HANDOFF session 44.
 
-## G6: HANDOFF.md session entry + commits pushed
+## G5: HANDOFF.md session entry + commits pushed
 
-Manual. Session 43 entry appended with measured numbers; commits
-7e42828, 5e833df, 6a06a92 + handoff on origin/master.
+Manual. Session 44 entry appended with measured numbers; commits on
+origin/master.
