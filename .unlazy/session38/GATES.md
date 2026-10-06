@@ -29,8 +29,8 @@ Scope: bow carriers can aim at and shoot OTHER PLAYERS (local and cross-node), t
   EXPECT: SESSION38 VERIFY: OK
   EVIDENCE: automatic-evidence=v1; definition-sha256=0e7aba74bf35f3e76f85f5c00e365a8d9064c44cd88126822034120128632e07; exit=0; EXPECT=matched; output-sha256=f912ff4b93090e7152aa4dbbb8f18eb87ea8818317c4ef042362463e7934aace; output-bytes=77; shell=/bin/sh; cwd=/home/z/my-project/hnh_server; path=cc94915413e1/11 entries
 
-- [ ] G6: docs/mechanics/combat/combat-system.md documents the implemented PvP archery model and removes the stale "melee relay fight between players exists" claim
-  EVIDENCE: pending
+- [x] G6: docs/mechanics/combat/combat-system.md documents the implemented PvP archery model and removes the stale "melee relay fight between players exists" claim
+  EVIDENCE: grep -c 'melee relay fight between players exists' docs/mechanics/combat/combat-system.md -> 0; grep -c 'Player-versus-player archery (server, session 38)' -> 1; the corrected paragraph lives in the 'Implemented ranged model' section (commit d42eebe).
 
-- [ ] G7: HANDOFF.md session-38 entry + worklog record + all commits pushed to master
-  EVIDENCE: pending
+- [x] G7: HANDOFF.md session-38 entry + worklog record + all commits pushed to master
+  EVIDENCE: HANDOFF.md session-38 entry appended (commit da2862a); worklog.md session-38 record appended; git push origin master -> 8339661..da2862a master -> master.
