@@ -1,48 +1,41 @@
-# Session 42 Gates
+# Session 43 Gates
 
-Scope: the session-41 PaginaException blocker (legacy pack repair), the
-vis spawn-churn debounce, the cross-node maneuver IP relay, full
+Scope: the combat-phase attribution (session-42 NEXT top item), the
+combat slot indexes, the cell-indexed viewer fan-out, full
 verification, handoff.
 
-## G1: the legacy pack ships no dropped AButton parent-versions
-
-Runnable (run after any make-gameres regeneration).
-  CHECK: python3 server/scripts/fix_gameres_versions.py gameres
-  EXPECT: corrupt=0
-
-## G2: the real-client probe passes in all modes
+## G1: full unit battery + clippy + fmt stay green
 
 Runnable.
-  CHECK: bash server/scripts/verify_ui_probe.sh run
-  EXPECT: UI PROBE RUN: OK
-  CHECK: bash server/scripts/verify_ui_probe.sh equip
-  EXPECT: UI PROBE EQUIP: OK
+  CHECK: cd server && cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test
+  EXPECT: test result: ok (243 tests)
 
-## G3: full unit battery + clippy + fmt stay green
+## G2: combat index semantics (shared target winner + stale-row guard)
 
 Runnable.
-  CHECK: cd server && cargo clippy --all-targets -- -D warnings && cargo fmt --all -- --check && cargo test
-  EXPECT: test result: ok
+  CHECK: cd server && cargo test --release combat_indexes && cargo test --release knockout_in_player_phase
+  EXPECT: test result: ok (both)
 
-## G4: the release binary boots and the wire client enters the world
+## G3: the release binary boots and the wire client enters the world
 
 Runnable.
-  CHECK: bash server/scripts/verify_session41.sh boot
+  CHECK: cd server && bash scripts/verify_session41.sh boot
   EXPECT: SESSION41 BOOT: OK
 
-## G5: movement wire probe stays green under the debounced retract sweep
+## G4: movement + melee wire probes stay green on the new fan-out
 
 Runnable.
-  CHECK: bash server/scripts/verify_session41.sh units && python3 server/scripts/probe_walk.py
-  EXPECT: MOVE PROBE: OK
+  CHECK: cd server && python3 scripts/probe_walk.py && python3 scripts/probe_melee.py
+  EXPECT: MOVE PROBE: OK; MELEE WIRE: OK
 
-## G6: the cross-node maneuver relay round-trips on the wire
+## G5: the combat sub-attribution numbers are reproducible
 
 Runnable.
-  CHECK: cd server && cargo test --release maneuver_delta
-  EXPECT: test result: ok
+  CHECK: cd server && DUR=40 bash scripts/load43.sh
+  EXPECT: perf log shows combat_index_us < 30, combat_chase_us <
+  combat_players_us, ix_cand_n > 0; numbers land in HANDOFF session 43.
 
-## G7: HANDOFF.md session entry + mechanics docs updated
+## G6: HANDOFF.md session entry + commits pushed
 
-Manual. Session 42 entry appended with measured numbers; combat-system.md
-documents the ManeuverDelta relay; commits pushed to origin/master.
+Manual. Session 43 entry appended with measured numbers; commits
+7e42828, 5e833df, 6a06a92 + handoff on origin/master.

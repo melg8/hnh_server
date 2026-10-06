@@ -2703,3 +2703,85 @@ NEXT (handoff):
   the batched-spawn idea from session 41 is unexplored).
 - Windows smoke + GL client e2e when a display-capable host exists.
 - Re-run load-cluster on a quiet host for the perf table.
+
+## 2026-10-07 - Session 43: combat-phase attribution + slot/viewer indexes
+
+The session-42 NEXT top item (combat-phase p95 spikes) is attributed
+to its root costs and the O(N^2) aggregate the attribution pointed at
+is replaced with per-tick slot/cell indexes. All numbers below are
+from the 1000-bot saturated duel cohort on the noisy 2-CPU sandbox
+(mean over the 40-50 s steady windows, scripts/load43.sh).
+
+WHAT:
+
+- COMBAT SUB-ATTRIBUTION (perf counters, first). The combat phase
+  mean (18-28 ms) splits into: index build 11-16 us (free), player
+  phase 17.9-27.2 ms (almost everything), animal retaliation 0.1-0.6
+  ms (the session-42 O(N^2) scan is already gone), relay 0. The
+  player phase splits again: chase `start_move` 5.5-6.6 starts/tick
+  at 2.4-3.0 ms EACH (13-18 ms/tick), swing bookkeeping ~70-140/tick
+  (cheap), landed-hit tail 2.5-4/tick at 1.3-3.6 ms each (hurt + chat
+  x2 + FX broadcast + info log).
+
+- COMBAT SLOT INDEXES (the O(N^2) kill). The PvP melee path resolved
+  its victim with a linear `players` scan per attacker per tick, and
+  the animal retaliation loop scanned players per animal. One
+  O(players) pass per tick now fills `CombatIndex::player_of_slot`
+  (gob slot -> player idx+1; players never leave mid-tick - knockout
+  resets bars, removal happens in the logout path) and
+  `engaged_of_slot` (fight-target slot -> first engaged player idx+1,
+  the removed linear `find` semantics). The animal loop iterates an
+  engaged-animal snapshot in `animal_gobs` order with a live
+  fight_target re-check (a PvP knockout inside the player phase
+  leaves a stale row; the re-check stops the deer biting the
+  knocked-out player - unit-tested). Per-tick allocations in the
+  phase (players range collect, animal_gobs clone, guest_attackers
+  collect, bar-stream sids collect) moved into taken/restored
+  scratch vectors.
+
+- VIEWER FAN-OUT INDEX. The per-event full `sessions` scan
+  (LINBEG fan-out, pose layer stream, FX overlay broadcast) cost
+  636-1100 us per event at this scale: cache-miss traversal of every
+  large SessionOut. `ViewerIndex` maps session id -> its player's
+  VisIndex cell, rebuilt once per tick in one O(sessions) pass;
+  `viewers_of_slot` probes the 5x5 cell neighborhood (VIEW_RADIUS
+  300 + one 50-subtile drift step fits inside two 250-tile cells on
+  each axis) and keeps the exact `visible.contains` filter
+  authoritative. Measured after: mv_viewers 417 us/call (was 636),
+  mv_pose 912 (was 1104), chase start 2.6 ms (was 3.0); combat mean
+  28.1 -> 23.2 ms, tick mean 84 -> 76 ms. Net effect is real but
+  bounded: at this cohort density the mean session SEES ~530 gobs, so
+  a mover's fan-out pair work (hundreds of sends per start) is the
+  honest lower bound - the scan overhead is only part of the cost.
+
+- DIAGNOSTICS that shaped the session: `start_move` sub-phase
+  counters (mv_path/mv_viewers/mv_pose_us, mv_calls), GridStore
+  gen_count/hit_count (grid-miss proof: 5 generations per 115 s
+  window - NOT the chase cost), ix_cand_n (cell-index candidate
+  volume), combat chase/hit/swing counters, scripts/load43.sh (boot
+  + 1000-bot cohort + sub-phase histogram parser).
+
+EVIDENCE: 243 unit tests green (2 new: shared-target first-winner,
+stale-row guard), clippy -D warnings clean, fmt clean. Wire probes
+green on the release binary: WORLD ENTRY OK, CATTR ORDER OK, MOVE
+PROBE OK, MELEE WIRE OK. Commits 7e42828, 5e833df, 6a06a92 pushed to
+origin/master.
+
+NOT DONE THIS SESSION (rolled to NEXT):
+- Batched move starts (the session-41 packed-batch pattern applied to
+  LINBEG + pose + FX: encode once, one datagram per session per
+  tick). The remaining chase cost is pair work; batching collapses
+  the per-pair send/clone overhead (~30-40% of the tail by the
+  move_batch precedent).
+- Hit-tail cost (1.3-3.6 ms/hit: info! log + 2x chat + FX) - a
+  chat/fx datagram merge or log-rate limit is the cheap cut.
+- Single-node tick p95 129 ms vs the 100 ms budget on the noisy
+  2-CPU sandbox - re-measure on a quiet multi-core host (carried).
+- Windows smoke on a pwsh host + GL client e2e (carried since
+  session 34).
+
+NEXT (handoff):
+- Batched move starts (LINBEG/pose/FX through the MoveBatch pattern).
+- Hit-tail trim (log rate limit; chat/fx merge).
+- Load-cluster re-run on a quiet host for the perf table.
+- Windows smoke + GL client e2e when a display host exists.
