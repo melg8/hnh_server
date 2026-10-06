@@ -16261,6 +16261,94 @@ mod tests {
         );
     }
 
+    /// Session-43 combat indexes: the slot maps resolve the PvP victim in
+    /// O(1) and the engaged map keeps the first-engaged-player semantics
+    /// of the removed linear `find` on a shared animal target.
+    #[tokio::test]
+    async fn combat_indexes_resolve_victims_and_first_engagement() {
+        let (mut g, _rx, _raw) = entered_game("cix");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let (vidx, vgob) = second_player(&mut g, "cixvictim", None);
+        let deer = spawn_deer_at(&mut g, pidx, 20, Species::Deer.max_hp());
+        // Both players engage the same deer: the lowest player index wins.
+        g.start_fight(1, deer, Species::Deer);
+        g.start_fight(2, deer, Species::Deer);
+        g.tick_combat();
+        let pslot = g.world.gobs.get(g.world.players[pidx].gob).unwrap();
+        let vslot = g.world.gobs.get(vgob).unwrap();
+        let dslot = g.world.gobs.get(deer).unwrap();
+        assert_eq!(
+            g.combat_ix.player_of_slot[pslot],
+            (pidx as u32) + 1,
+            "player_of_slot resolves the attacker's own gob"
+        );
+        assert_eq!(
+            g.combat_ix.player_of_slot[vslot],
+            (vidx as u32) + 1,
+            "player_of_slot resolves the second player"
+        );
+        assert_eq!(
+            g.combat_ix.engaged_of_slot[dslot],
+            (pidx as u32) + 1,
+            "first engaged player wins a shared target"
+        );
+        // The PvP victim resolves by slot too (the O(1) lookup replaced
+        // the linear `position` scan).
+        g.start_pvp_melee(1, vgob);
+        g.tick_combat();
+        let vslot = g.world.gobs.get(vgob).unwrap();
+        assert_eq!(
+            g.combat_ix.player_of_slot[vslot],
+            (vidx as u32) + 1,
+            "PvP victim index resolves through the slot map"
+        );
+    }
+
+    /// Session-43 stale-row guard: a player knocked out during the player
+    /// phase (PvP) keeps a stale engaged-animal row for the rest of the
+    /// tick; the live fight_target re-check must stop the deer from
+    /// biting the already-knocked-out player (the removed linear `find`
+    /// re-read fight_target at the same point).
+    #[tokio::test]
+    async fn knockout_in_player_phase_stops_the_animal_bite() {
+        let (mut g, _rx, _raw) = entered_game("cixstale");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let (_vidx, vgob) = second_player(&mut g, "cixstalev", None);
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        // The player attacks a deer within reach, one swing away.
+        let deer = spawn_deer_at(&mut g, pidx, 20, Species::Deer.max_hp());
+        g.start_fight(1, deer, Species::Deer);
+        g.world
+            .animal_fights
+            .get_mut(&deer)
+            .expect("deer fight row")
+            .off = crate::fight::SWING_SPEND;
+        // A PvP attacker stands next to the player, one swing from a
+        // knockout (defence at the opening threshold, 3 HP left).
+        let vslot = g.world.gobs.get(vgob).unwrap();
+        g.world.gobs.set_pos(vslot, (px + 20, py));
+        g.start_pvp_melee(2, pgob);
+        g.sessions.get_mut(&1).unwrap().fight.own_def = crate::fight::OPENING_THRESHOLD;
+        g.world.players[pidx].hp = 3;
+        g.sessions.get_mut(&2).unwrap().fight.own_off = crate::fight::BAR_FULL;
+        g.sessions.get_mut(&2).unwrap().fight.atkc = 0;
+        g.tick_combat();
+        assert_eq!(
+            g.world.players[pidx].hp, 50,
+            "the PvP swing knocked the player out (50 HP floor)"
+        );
+        assert_eq!(
+            g.world.players[pidx].fight_target, None,
+            "the knockout cleared the deer engagement"
+        );
+        assert_eq!(
+            g.world.players[pidx].hp, 50,
+            "the stale engaged row must NOT let the deer bite this tick"
+        );
+    }
+
     /// PvP knockout consequences (server policy, combat-system.md): the
     /// loser forfeits 10% of unused LP, the winner is flagged criminal
     /// with a live buff icon (RMSG_BUFF set), and the flag expires with
