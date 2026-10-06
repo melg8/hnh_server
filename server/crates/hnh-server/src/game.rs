@@ -1518,6 +1518,15 @@ impl Game {
         for r in crate::craft::RECIPES {
             pages.push(r.pagina);
         }
+        // Fight-window maneuver buttons (paginae/atk/*): the root page
+        // plus every implemented maneuver of the fight.rs table. Server
+        // policy: all buttons are visible from the start (skill gating
+        // is a future Open question in combat-system.md).
+        pages.push("paginae/atk/atk");
+        for m in crate::fight::MANEUVERS {
+            pages.push(m.res);
+        }
+        pages.push("paginae/atk/blk");
         out.send(wdg::paginae_add(&pages));
         // Initial paperdoll contents ("set" + "ava") now that the player
         // and the epry widget both exist.
@@ -2347,8 +2356,7 @@ impl Game {
                         // Winner's share of the knockout consequences
                         // (server policy): the criminal flag lives on
                         // the shooter's home node - here.
-                        if let Some(widx) =
-                            self.world.players.iter().position(|p| p.gob == shooter)
+                        if let Some(widx) = self.world.players.iter().position(|p| p.gob == shooter)
                         {
                             self.flag_criminal(widx);
                         }
@@ -5550,6 +5558,167 @@ impl Game {
     }
 
     /// Handle client->server frv wdgmsg (click / give).
+    /// One fight-window maneuver: `act("atk", id)` from the MenuGrid
+    /// (the paginae/atk/* buttons). Validates the IP/advantage
+    /// requirements against the CURRENT relation, applies the
+    /// costs/gains, mirrors the opponent-side IP delta to a local
+    /// victim, and streams the frv updates (`upd`, `atk`, `blk`).
+    /// Guest targets keep their authoritative IP on their home node
+    /// (documented server policy in combat-system.md).
+    fn on_maneuver(&mut self, sid: SessionId, id: &str) {
+        let Some(m) = crate::fight::maneuver(id) else {
+            debug!(sid, id, "unknown maneuver id");
+            return;
+        };
+        let Some(&pidx) = self.world.by_session.get(&sid) else {
+            return;
+        };
+        let pgob = self.world.players[pidx].gob;
+        let Some(target) = self.world.players[pidx].fight_target else {
+            self.chat_line(sid, "You are not fighting anyone.", Some((255, 128, 128)));
+            return;
+        };
+        // Requirements and costs first (refusals never mutate state).
+        let refuse: Option<String> = {
+            let Some(out) = self.sessions.get(&sid) else {
+                return;
+            };
+            let Some(rel) = out.fight.rel(target) else {
+                return;
+            };
+            if rel.ip_self < m.req_ip {
+                Some(format!(
+                    "You need at least {} initiative points for that.",
+                    m.req_ip
+                ))
+            } else if rel.adv < m.req_adv {
+                Some("You need more advantage for that.".to_owned())
+            } else if rel.ip_self < m.ip_cost {
+                Some("Not enough initiative points.".to_owned())
+            } else {
+                None
+            }
+        };
+        if let Some(why) = refuse {
+            self.chat_line(sid, &why, Some((255, 128, 128)));
+            return;
+        }
+        // Opponent-side IP delta FIRST: a LOCAL victim's own pool changes
+        // (their rel(pgob).ip_self) and their window re-streams; a
+        // GUEST's authoritative pool lives on their home node (the
+        // attacker's mirror applies the prediction below).
+        let mut new_opp_ip: Option<i32> = None;
+        if m.ip_opp != 0 {
+            let vsid = self
+                .world
+                .players
+                .iter()
+                .find(|p| p.gob == target)
+                .map(|p| p.session);
+            if let Some(vsid) = vsid {
+                let vupd = self.sessions.get_mut(&vsid).and_then(|vout| {
+                    let rel = vout.fight.rel_mut(pgob)?;
+                    rel.ip_self = (rel.ip_self + m.ip_opp).max(0);
+                    Some((
+                        rel.ip_self,
+                        vec![
+                            rel.gob,
+                            rel.balance,
+                            rel.intensity,
+                            rel.give,
+                            rel.ip_self,
+                            rel.ip_other,
+                        ],
+                    ))
+                });
+                if let Some((pool, vupd)) = vupd {
+                    new_opp_ip = Some(pool);
+                    if let Some(vout) = self.sessions.get_mut(&vsid) {
+                        if let Some(w) = vout.fight.widget {
+                            let b = crate::fight::uimsg(w, "upd", &vupd);
+                            vout.send(b);
+                        }
+                    }
+                }
+            }
+        }
+        // Apply the user's side: IP economy, advantage, attack queue.
+        let upd = {
+            let Some(out) = self.sessions.get_mut(&sid) else {
+                return;
+            };
+            // Attack queue / stance FIRST (disjoint fields from the
+            // relation list; rel_mut borrows the whole fight state).
+            match m.kind {
+                crate::fight::ManeuverKind::Attack => {
+                    // The two-slot queue: the current attack slides into
+                    // `next`, the selection becomes `current` (Fightview
+                    // renders atk [cur, next]).
+                    let old = out.fight.atk_cur;
+                    out.fight.atk_cur = Some(m.res);
+                    out.fight.atk_next = old;
+                }
+                crate::fight::ManeuverKind::Block => {
+                    out.fight.blk = Some(m.res);
+                }
+                crate::fight::ManeuverKind::Boost => {}
+            }
+            let Some(rel) = out.fight.rel_mut(target) else {
+                return;
+            };
+            rel.ip_self = (rel.ip_self - m.ip_cost + m.ip_gain).max(0);
+            rel.adv = (rel.adv + m.adv).clamp(-50, 50);
+            rel.sync_balance();
+            // The opponent pool view: the victim's fresh value when the
+            // delta applied locally, else the mirror prediction.
+            rel.ip_other = new_opp_ip.unwrap_or((rel.ip_other + m.ip_opp).max(0));
+            vec![
+                rel.gob,
+                rel.balance,
+                rel.intensity,
+                rel.give,
+                rel.ip_self,
+                rel.ip_other,
+            ]
+        };
+        // Stream the user's own window: the relation update plus the
+        // attack-queue / stance slot. Intern the pagina resources
+        // BEFORE the mutable session borrow (res.intern borrows the
+        // world store).
+        let (cur, next, blk) = {
+            let Some(out) = self.sessions.get(&sid) else {
+                return;
+            };
+            (out.fight.atk_cur, out.fight.atk_next, out.fight.blk)
+        };
+        let cur_gi = cur.map(|n| (n, self.world.res.intern(n)));
+        let next_gi = next.map(|n| (n, self.world.res.intern(n)));
+        let blk_gi = blk.map(|n| (n, self.world.res.intern(n)));
+        if let Some(out) = self.sessions.get_mut(&sid) {
+            if let Some(w) = out.fight.widget {
+                let b = crate::fight::uimsg(w, "upd", &upd);
+                out.send(b);
+                match m.kind {
+                    crate::fight::ManeuverKind::Attack => {
+                        let wc = cur_gi.map(|(n, gi)| announce_res(out, gi, n)).unwrap_or(-1);
+                        let wn = next_gi
+                            .map(|(n, gi)| announce_res(out, gi, n))
+                            .unwrap_or(-1);
+                        let b = crate::fight::uimsg(w, "atk", &[wc, wn]);
+                        out.send(b);
+                    }
+                    crate::fight::ManeuverKind::Block => {
+                        let wb = blk_gi.map(|(n, gi)| announce_res(out, gi, n)).unwrap_or(-1);
+                        let b = crate::fight::uimsg(w, "blk", &[wb]);
+                        out.send(b);
+                    }
+                    crate::fight::ManeuverKind::Boost => {}
+                }
+            }
+        }
+    }
+
+    /// Handle client->server frv wdgmsg (click / give).
     fn on_frv_msg(&mut self, sid: SessionId, name: &str, args: &[hnh_proto::ListArg]) {
         let ints: Vec<i32> = args.iter().filter_map(|a| a.as_int()).collect();
         match name {
@@ -7402,6 +7571,10 @@ impl Game {
                 return;
             }
             self.open_make_window(sid, recipe_id);
+        } else if action.len() >= 2 && action[0] == "atk" {
+            // Fight-window maneuvers: paginae/atk/* buttons send
+            // act("atk", <maneuver-id>) through MenuGrid.
+            self.on_maneuver(sid, action[1].as_str());
         } else if action.first().map(String::as_str) == Some("plow") {
             // Plow Field pagina (ad ["plow"]): arm tile plowing; the next
             // map click plows the tile under the cursor.
@@ -9990,8 +10163,7 @@ impl Game {
             .iter()
             .enumerate()
             .filter_map(|(i, p)| {
-                matches!(p.criminal_until_ms, Some(u) if u <= self.world.now_ms)
-                    .then_some(i)
+                matches!(p.criminal_until_ms, Some(u) if u <= self.world.now_ms).then_some(i)
             })
             .collect();
         for i in expired {
@@ -10000,7 +10172,11 @@ impl Game {
             if let Some(out) = self.sessions.get_mut(&sid) {
                 out.send(wdg::buff_rm(Self::CRIMINAL_BUFF_ID));
             }
-            self.chat_line(sid, "Your criminal flag has expired.", Some((192, 255, 192)));
+            self.chat_line(
+                sid,
+                "Your criminal flag has expired.",
+                Some((192, 255, 192)),
+            );
         }
     }
 
@@ -10248,6 +10424,18 @@ impl Kind {
             _ => None,
         }
     }
+}
+
+/// Announce one world resource to a session (the resid wire dance) and
+/// return its session-local wire id. Callers must intern the resource
+/// BEFORE borrowing the session mutably.
+fn announce_res(out: &mut SessionOut, gi: u16, name: &'static str) -> i32 {
+    let w = out.res.wire_named(gi, name);
+    if let Some((n, ver)) = out.res.pending_announce(w) {
+        out.send(wdg::resid(w, n, ver));
+        out.res.mark_announced(w);
+    }
+    w as i32
 }
 
 #[cfg(test)]
@@ -15764,9 +15952,7 @@ mod tests {
             g.world.players[vidx].lp, 90,
             "the loser forfeits 10% of unused LP"
         );
-        let until = g
-            .world
-            .players[pidx]
+        let until = g.world.players[pidx]
             .criminal_until_ms
             .expect("winner flagged criminal");
         assert!(until > g.world.now_ms, "the flag runs into the future");
@@ -15791,10 +15977,11 @@ mod tests {
         // The buff icon reached the winner's reliable stream: one
         // RMSG_BUFF "set" carrying the criminal tooltip.
         assert!(
-            frames.iter().any(|f| f.first()
-                == Some(&hnh_proto::consts::RMSG_BUFF)
-                && f[1..].starts_with(b"set\0")
-                && f.windows(18).any(|w| w == b"Criminal (assault)")),
+            frames
+                .iter()
+                .any(|f| f.first() == Some(&hnh_proto::consts::RMSG_BUFF)
+                    && f[1..].starts_with(b"set\0")
+                    && f.windows(18).any(|w| w == b"Criminal (assault)")),
             "RMSG_BUFF set with the criminal tooltip on the wire"
         );
         // Expiry: advance the flag to the past and sweep - the state
@@ -15802,8 +15989,7 @@ mod tests {
         g.world.players[pidx].criminal_until_ms = Some(g.world.now_ms);
         g.tick();
         assert_eq!(
-            g.world.players[pidx].criminal_until_ms,
-            None,
+            g.world.players[pidx].criminal_until_ms, None,
             "the sweep clears the expired flag"
         );
         let mut rm_frames = Vec::new();
@@ -15822,6 +16008,165 @@ mod tests {
                     && f[1..].starts_with(b"rm\0")),
             "RMSG_BUFF rm on expiry"
         );
+    }
+
+    /// Maneuver economy (session 40): act("atk", "sting") spends its 2
+    /// IP, fills the two-slot attack queue, and streams the frv `atk`
+    /// uimsg with the pagina resource.
+    #[tokio::test]
+    async fn maneuver_attack_select_streams_atk() {
+        let (mut g, mut rx, _raw) = entered_game("maneuver1");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let (_vidx, vgob) = second_player(&mut g, "victim", None);
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let vslot = g.world.gobs.get(vgob).unwrap();
+        g.world.gobs.set_pos(vslot, (px + 20, py));
+        g.start_pvp_melee(1, vgob);
+        // Both relations carry 5 IP (attacker rel on the victim's gob,
+        // victim rel on the attacker's gob).
+        g.sessions
+            .get_mut(&1)
+            .unwrap()
+            .fight
+            .rel_mut(vgob)
+            .unwrap()
+            .ip_self = 5;
+        g.sessions
+            .get_mut(&2)
+            .unwrap()
+            .fight
+            .rel_mut(pgob)
+            .unwrap()
+            .ip_self = 5;
+        g.on_maneuver(1, "sting");
+        let out = g.sessions.get(&1).unwrap();
+        let rel = out.fight.rel(vgob).unwrap();
+        assert_eq!(rel.ip_self, 3, "sting costs 2 IP");
+        assert_eq!(
+            out.fight.atk_cur,
+            Some("paginae/atk/sting"),
+            "the selection becomes the current attack"
+        );
+        assert_eq!(out.fight.atk_next, None, "empty queue slides into next");
+        // Queue a second attack: the first slides into `next`.
+        g.on_maneuver(1, "pow");
+        let out = g.sessions.get(&1).unwrap();
+        assert_eq!(out.fight.atk_cur, Some("paginae/atk/pow"));
+        assert_eq!(
+            out.fight.atk_next,
+            Some("paginae/atk/sting"),
+            "the previous current attack slides into next"
+        );
+        // The frv atk uimsg reached the wire (RMSG_WDGMSG "atk").
+        let mut saw_atk = false;
+        while let Ok(f) = rx.try_recv() {
+            if f.first() == Some(&hnh_proto::consts::RMSG_WDGMSG)
+                && f.windows(4).any(|w| w == b"atk\0")
+            {
+                saw_atk = true;
+            }
+        }
+        assert!(saw_atk, "frv atk uimsg on the wire");
+    }
+
+    /// Maneuver gating: Cleave refuses without >= 3 advantage and lands
+    /// once the advantage is there; Battle Cry refuses under 14 IP.
+    #[tokio::test]
+    async fn maneuver_requirements_gate_the_moves() {
+        let (mut g, mut rx, _raw) = entered_game("maneuver2");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let (_vidx, vgob) = second_player(&mut g, "victim", None);
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let vslot = g.world.gobs.get(vgob).unwrap();
+        g.world.gobs.set_pos(vslot, (px + 20, py));
+        g.start_pvp_melee(1, vgob);
+        // No advantage, no IP: both gated moves refuse.
+        g.on_maneuver(1, "cleave");
+        g.on_maneuver(1, "roar");
+        let chat = drain_chat(&mut rx);
+        assert!(
+            chat.iter().any(|t| t.contains("You need more advantage")),
+            "cleave refused without advantage: {chat:?}"
+        );
+        assert!(
+            chat.iter()
+                .any(|t| t.contains("You need at least 14 initiative")),
+            "battle cry refused under 14 IP: {chat:?}"
+        );
+        // Grant the requirement: Cleave lands (8 IP cost, >= 3 adv).
+        {
+            let out = g.sessions.get_mut(&1).unwrap();
+            let rel = out.fight.rel_mut(vgob).unwrap();
+            rel.ip_self = 20;
+            rel.adv = 30;
+        }
+        g.on_maneuver(1, "cleave");
+        let out = g.sessions.get(&1).unwrap();
+        let rel = out.fight.rel(vgob).unwrap();
+        assert_eq!(rel.ip_self, 12, "cleave spends its 8 IP");
+        assert_eq!(out.fight.atk_cur, Some("paginae/atk/cleave"));
+        // Battle Cry with 14 IP on hand: 14 - 7 = 7 left, +2 advantage.
+        {
+            let out = g.sessions.get_mut(&1).unwrap();
+            let rel = out.fight.rel_mut(vgob).unwrap();
+            rel.ip_self = 14;
+        }
+        let adv_before = g.sessions.get(&1).unwrap().fight.rel(vgob).unwrap().adv;
+        g.on_maneuver(1, "roar");
+        let out = g.sessions.get(&1).unwrap();
+        let rel = out.fight.rel(vgob).unwrap();
+        assert_eq!(rel.ip_self, 7, "battle cry spends its 7 IP");
+        assert_eq!(rel.adv, adv_before + 20, "battle cry grants +2 advantage");
+        assert_eq!(rel.balance, 5, "advantage clamps to the dial maximum");
+    }
+
+    /// Boost economy: Charge! generates +1 IP for the user, Throw Sand
+    /// drains 2 IP from the local victim's own pool (both windows
+    /// re-stream), and Seize The Day! banks +0.3 advantage.
+    #[tokio::test]
+    async fn maneuver_boosts_move_ip_and_advantage() {
+        let (mut g, mut rx, _raw) = entered_game("maneuver3");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let (_vidx, vgob) = second_player(&mut g, "victim", None);
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let vslot = g.world.gobs.get(vgob).unwrap();
+        g.world.gobs.set_pos(vslot, (px + 20, py));
+        g.start_pvp_melee(1, vgob);
+        // Charge! with an empty pool: +1 IP, no cost.
+        g.on_maneuver(1, "berserk");
+        let out = g.sessions.get(&1).unwrap();
+        let rel = out.fight.rel(vgob).unwrap();
+        assert_eq!(rel.ip_self, 1, "charge generates one IP");
+        // Seize The Day!: +0.3 advantage banks into the pool.
+        g.on_maneuver(1, "seize");
+        let out = g.sessions.get(&1).unwrap();
+        let rel = out.fight.rel(vgob).unwrap();
+        assert_eq!(rel.adv, 3, "seize banks +0.3 advantage");
+        assert_eq!(rel.balance, 0, "+0.3 still rounds to dial 0");
+        // Throw Sand: the victim starts with 5 IP and loses 2.
+        g.sessions
+            .get_mut(&2)
+            .unwrap()
+            .fight
+            .rel_mut(pgob)
+            .unwrap()
+            .ip_self = 5;
+        g.on_maneuver(1, "throwsand");
+        let vrel = g.sessions.get(&2).unwrap().fight.rel(pgob).unwrap();
+        assert_eq!(vrel.ip_self, 3, "throw sand drains the victim's pool");
+        let out = g.sessions.get(&1).unwrap();
+        let rel = out.fight.rel(vgob).unwrap();
+        assert_eq!(
+            rel.ip_other, 3,
+            "the attacker's mirror view tracks the victim's pool"
+        );
+        let _ = drain_chat(&mut rx);
     }
 
     /// A mutual duel swings BOTH ways: the victim (armed through the

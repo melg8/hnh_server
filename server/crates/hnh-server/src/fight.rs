@@ -89,6 +89,11 @@ pub struct FightRel {
     pub offence: i32,
     /// Opponent's defence against your attacks (scaled percentage).
     pub defence: i32,
+    /// Advantage accumulator in TENTHS (+3 = +0.3), -50..+50. The
+    /// integer `balance` streamed on the wire is the rounded, clamped
+    /// view of this pool (fractional accumulations like Seize The Day!
+    /// +0.3 need the sub-integer source; Legacy:Combat_Actions).
+    pub adv: i32,
 }
 
 impl FightRel {
@@ -102,8 +107,389 @@ impl FightRel {
             ip_other: 0,
             offence: 0,
             defence: BAR_FULL,
+            adv: 0,
         }
     }
+
+    /// Re-derive the wire balance (-5..+5) from the advantage pool.
+    pub fn sync_balance(&mut self) {
+        self.balance = (self.adv as f32 / 10.0).round().clamp(-5.0, 5.0) as i32;
+    }
+}
+
+/// What the fight window does with a maneuver selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManeuverKind {
+    /// An attack choice: frv `atk [cur, next]` (the two-slot attack
+    /// queue the client renders).
+    Attack,
+    /// A defensive stance: frv `blk [res]`.
+    Block,
+    /// A pure IP/advantage play: relation `upd` only.
+    Boost,
+}
+
+/// One fight-window maneuver (a `paginae/atk/*` action button, selected
+/// through MenuGrid `act("atk", id)`).
+///
+/// Numbers: every IP cost/gain and advantage value documented on the
+/// legacy wiki (RoB Legacy:Combat_Actions - Sting 2, Chop 4, Sidestep 4,
+/// Opportunity Knocks 5, Knock His Teeth Out! 6, Valorous Strike 6,
+/// Battle Cry 7 [needs 14 IP], Cleave 8 [needs >= 3 advantage],
+/// Invocation of Skuld 3 [needs 10 IP], Charge! +1 IP, Feign Flight +2,
+/// Throw Sand -2 opponent IP, Float Like A Butterfly +1 opponent IP,
+/// Seize The Day! +0.3 advantage, Sidestep/Skuld +1, Battle Cry +2) is
+/// marked DOC in the comments below; the rest are this server's policy
+/// (marked POLICY) and live in combat-system.md Open questions.
+pub struct Maneuver {
+    pub id: &'static str,
+    /// The pagina resource the client renders for the `atk`/`blk` slot.
+    pub res: &'static str,
+    pub kind: ManeuverKind,
+    /// IP spent from the user's pool.
+    pub ip_cost: i32,
+    /// IP generated for the user.
+    pub ip_gain: i32,
+    /// IP delta applied to the OPPONENT's pool (may be negative).
+    pub ip_opp: i32,
+    /// Advantage delta in tenths.
+    pub adv: i32,
+    /// Minimum user IP required (Battle Cry 14, Skuld 10 - DOC).
+    pub req_ip: i32,
+    /// Minimum advantage in tenths required (Cleave >= 3 advantage - DOC).
+    pub req_adv: i32,
+}
+
+pub const MANEUVERS: &[Maneuver] = &[
+    // ---- attacks (DOC numbers where the wiki lists them) ----
+    Maneuver {
+        id: "pow",
+        res: "paginae/atk/pow",
+        kind: ManeuverKind::Attack,
+        ip_cost: 0,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    }, // POLICY: Punch is free
+    Maneuver {
+        id: "sting",
+        res: "paginae/atk/sting",
+        kind: ManeuverKind::Attack,
+        ip_cost: 2,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    }, // DOC
+    Maneuver {
+        id: "baseaxe",
+        res: "paginae/atk/axe",
+        kind: ManeuverKind::Attack,
+        ip_cost: 4,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    }, // DOC (Chop)
+    Maneuver {
+        id: "sidestep",
+        res: "paginae/atk/sidestep",
+        kind: ManeuverKind::Attack,
+        ip_cost: 4,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 10,
+        req_ip: 0,
+        req_adv: 0,
+    }, // DOC
+    Maneuver {
+        id: "oppknock",
+        res: "paginae/atk/oppknock",
+        kind: ManeuverKind::Attack,
+        ip_cost: 5,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    }, // DOC
+    Maneuver {
+        id: "knockteeth",
+        res: "paginae/atk/knockteeth",
+        kind: ManeuverKind::Attack,
+        ip_cost: 6,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    }, // DOC
+    Maneuver {
+        id: "valstr",
+        res: "paginae/atk/valstr",
+        kind: ManeuverKind::Attack,
+        ip_cost: 6,
+        ip_gain: 0,
+        ip_opp: 2,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    }, // DOC (+2 opp IP)
+    Maneuver {
+        id: "roar",
+        res: "paginae/atk/roar",
+        kind: ManeuverKind::Attack,
+        ip_cost: 7,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 20,
+        req_ip: 14,
+        req_adv: 0,
+    }, // DOC (Battle Cry)
+    Maneuver {
+        id: "cleave",
+        res: "paginae/atk/cleave",
+        kind: ManeuverKind::Attack,
+        ip_cost: 8,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 30,
+    }, // DOC (>= 3 advantage)
+    Maneuver {
+        id: "skuld",
+        res: "paginae/atk/skuld",
+        kind: ManeuverKind::Attack,
+        ip_cost: 3,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 10,
+        req_ip: 10,
+        req_adv: 0,
+    }, // DOC (needs 10 IP)
+    // ---- attacks without documented numbers (POLICY) ----
+    Maneuver {
+        id: "strangle",
+        res: "paginae/atk/strangle",
+        kind: ManeuverKind::Attack,
+        ip_cost: 2,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    },
+    Maneuver {
+        id: "bee",
+        res: "paginae/atk/bee",
+        kind: ManeuverKind::Attack,
+        ip_cost: 2,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    },
+    Maneuver {
+        id: "ashoot",
+        res: "paginae/atk/ashoot",
+        kind: ManeuverKind::Attack,
+        ip_cost: 0,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    },
+    Maneuver {
+        id: "sos",
+        res: "paginae/atk/sos",
+        kind: ManeuverKind::Attack,
+        ip_cost: 8,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    },
+    Maneuver {
+        id: "quell",
+        res: "paginae/atk/quell",
+        kind: ManeuverKind::Attack,
+        ip_cost: 4,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    },
+    // ---- block (POLICY) ----
+    Maneuver {
+        id: "dodge",
+        res: "paginae/atk/dodge",
+        kind: ManeuverKind::Block,
+        ip_cost: 0,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    },
+    // ---- boosts: DOC numbers where listed ----
+    Maneuver {
+        id: "berserk",
+        res: "paginae/atk/berserk",
+        kind: ManeuverKind::Boost,
+        ip_cost: 0,
+        ip_gain: 1,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    }, // DOC (Charge! +1)
+    Maneuver {
+        id: "feignflight",
+        res: "paginae/atk/feignflight",
+        kind: ManeuverKind::Boost,
+        ip_cost: 0,
+        ip_gain: 2,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    }, // DOC
+    Maneuver {
+        id: "throwsand",
+        res: "paginae/atk/throwsand",
+        kind: ManeuverKind::Boost,
+        ip_cost: 0,
+        ip_gain: 0,
+        ip_opp: -2,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    }, // DOC
+    Maneuver {
+        id: "butterfly",
+        res: "paginae/atk/butterfly",
+        kind: ManeuverKind::Boost,
+        ip_cost: 0,
+        ip_gain: 0,
+        ip_opp: 1,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    }, // DOC
+    Maneuver {
+        id: "seize",
+        res: "paginae/atk/seize",
+        kind: ManeuverKind::Boost,
+        ip_cost: 0,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 3,
+        req_ip: 0,
+        req_adv: 0,
+    }, // DOC (+0.3)
+    // ---- boosts without documented numbers (POLICY) ----
+    Maneuver {
+        id: "jump",
+        res: "paginae/atk/jump",
+        kind: ManeuverKind::Boost,
+        ip_cost: 0,
+        ip_gain: 1,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    },
+    Maneuver {
+        id: "slide",
+        res: "paginae/atk/slide",
+        kind: ManeuverKind::Boost,
+        ip_cost: 0,
+        ip_gain: 1,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    },
+    Maneuver {
+        id: "flex",
+        res: "paginae/atk/flex",
+        kind: ManeuverKind::Boost,
+        ip_cost: 2,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 1,
+        req_ip: 0,
+        req_adv: 0,
+    },
+    Maneuver {
+        id: "advpush",
+        res: "paginae/atk/padv",
+        kind: ManeuverKind::Boost,
+        ip_cost: 4,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 10,
+        req_ip: 0,
+        req_adv: 0,
+    },
+    Maneuver {
+        id: "paingain",
+        res: "paginae/atk/paingain",
+        kind: ManeuverKind::Boost,
+        ip_cost: 4,
+        ip_gain: 1,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    },
+    Maneuver {
+        id: "bloodshot",
+        res: "paginae/atk/bloodshot",
+        kind: ManeuverKind::Boost,
+        ip_cost: 3,
+        ip_gain: 0,
+        ip_opp: -1,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    },
+    Maneuver {
+        id: "fcons",
+        res: "paginae/atk/cflame",
+        kind: ManeuverKind::Boost,
+        ip_cost: 4,
+        ip_gain: 2,
+        ip_opp: 0,
+        adv: 0,
+        req_ip: 0,
+        req_adv: 0,
+    },
+    Maneuver {
+        id: "fflame",
+        res: "paginae/atk/fflame",
+        kind: ManeuverKind::Boost,
+        ip_cost: 4,
+        ip_gain: 0,
+        ip_opp: 0,
+        adv: 5,
+        req_ip: 0,
+        req_adv: 0,
+    },
+];
+
+/// Look up a maneuver by its `ad[1]` id (act("atk", id)).
+pub fn maneuver(id: &str) -> Option<&'static Maneuver> {
+    MANEUVERS.iter().find(|m| m.id == id)
 }
 
 /// Per-session fight window state. `widget` is a session-local widget id.
@@ -116,6 +502,12 @@ pub struct FightState {
     pub own_def: i32,
     /// Swing cooldown in ticks (also reported via `atkc`).
     pub atkc: i32,
+    /// Selected attack queue (frv `atk [cur, next]`), as pagina
+    /// resource names; None renders the client's empty slot (-1).
+    pub atk_cur: Option<&'static str>,
+    pub atk_next: Option<&'static str>,
+    /// Selected defensive stance (frv `blk`), as a pagina resource.
+    pub blk: Option<&'static str>,
 }
 
 impl FightState {
@@ -130,6 +522,9 @@ impl FightState {
             own_off: 0,
             own_def: BAR_FULL,
             atkc: 0,
+            atk_cur: None,
+            atk_next: None,
+            blk: None,
         }
     }
 
@@ -187,5 +582,63 @@ mod tests {
         assert_eq!(weapon_dmg("gfx/invobjs/woodbow", 10, 10), None);
         assert_eq!(weapon_dmg("gfx/invobjs/stonearrow", 10, 10), None);
         assert_eq!(weapon_dmg("gfx/invobjs/branch", 10, 10), None);
+    }
+
+    #[test]
+    fn maneuver_table_carries_documented_values() {
+        // RoB Legacy:Combat_Actions numbers (see MANEUVERS comments).
+        let sting = maneuver("sting").unwrap();
+        assert_eq!(sting.ip_cost, 2);
+        assert_eq!(sting.kind, ManeuverKind::Attack);
+        let chop = maneuver("baseaxe").unwrap();
+        assert_eq!(chop.ip_cost, 4);
+        let sidestep = maneuver("sidestep").unwrap();
+        assert_eq!(sidestep.ip_cost, 4);
+        assert_eq!(sidestep.adv, 10, "Sidestep grants +1 advantage");
+        let cleave = maneuver("cleave").unwrap();
+        assert_eq!(cleave.ip_cost, 8);
+        assert_eq!(cleave.req_adv, 30, "Cleave needs >= 3 advantage");
+        let roar = maneuver("roar").unwrap();
+        assert_eq!(roar.ip_cost, 7);
+        assert_eq!(roar.req_ip, 14, "Battle Cry needs at least 14 IP");
+        assert_eq!(roar.adv, 20, "Battle Cry grants +2 advantage");
+        let skuld = maneuver("skuld").unwrap();
+        assert_eq!(skuld.ip_cost, 3);
+        assert_eq!(skuld.req_ip, 10);
+        let charge = maneuver("berserk").unwrap();
+        assert_eq!(charge.ip_gain, 1, "Charge! generates +1 IP");
+        assert_eq!(charge.ip_cost, 0);
+        let sand = maneuver("throwsand").unwrap();
+        assert_eq!(sand.ip_opp, -2, "Throw Sand costs the opponent 2 IP");
+        let butterfly = maneuver("butterfly").unwrap();
+        assert_eq!(butterfly.ip_opp, 1);
+        let seize = maneuver("seize").unwrap();
+        assert_eq!(seize.adv, 3, "Seize The Day! grants +0.3 advantage");
+        // Unknown ids do not resolve.
+        assert!(maneuver("nope").is_none());
+        // Every entry maps ad ids the client actually sends (each res
+        // ships an action layer with ad ["atk", id] - verified against
+        // the served pack in this session's extraction).
+        assert!(MANEUVERS.len() >= 25);
+        for m in MANEUVERS {
+            assert!(m.res.starts_with("paginae/atk/"), "{}", m.res);
+        }
+    }
+
+    #[test]
+    fn advantage_pool_syncs_the_wire_balance() {
+        let mut rel = FightRel::new(1);
+        rel.adv = 3; // +0.3
+        rel.sync_balance();
+        assert_eq!(rel.balance, 0, "+0.3 rounds to 0");
+        rel.adv = 5; // +0.5 rounds to 1 (legacy dial granularity)
+        rel.sync_balance();
+        assert_eq!(rel.balance, 1);
+        rel.adv = 47;
+        rel.sync_balance();
+        assert_eq!(rel.balance, 5, "clamped to the dial maximum");
+        rel.adv = -50;
+        rel.sync_balance();
+        assert_eq!(rel.balance, -5);
     }
 }
