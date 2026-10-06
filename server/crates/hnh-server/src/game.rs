@@ -2136,6 +2136,38 @@ impl Game {
                     self.push_cattr(sid);
                 }
             }
+            NodeMsg::RelayStaticAct {
+                player,
+                target,
+                act,
+            } => {
+                self.relay_static(player, target, act);
+            }
+            NodeMsg::StaticAck { player, stack, lp } => {
+                // Authority applied a relayed static act for MY session
+                // player: grant the stack/lp exactly like the local path.
+                if let Some(pidx) = self.world.players.iter().position(|p| p.gob == player) {
+                    let sid = self.world.players[pidx].session;
+                    if let Some(s) = stack {
+                        let res_name = leak_static(s.res.as_str());
+                        let gidx = self.world.res.intern(res_name);
+                        self.grant_pickup(
+                            sid,
+                            InvStack {
+                                res: gidx,
+                                count: s.count,
+                                ql: s.ql,
+                                label: leak_static(s.label.as_str()),
+                            },
+                        );
+                    }
+                    if lp > 0 {
+                        self.world.players[pidx].lp += lp;
+                        self.push_cattr(sid);
+                        self.push_lp_msgs(sid);
+                    }
+                }
+            }
             NodeMsg::CharQuery { from, name } => {
                 // Cluster character migration, two-phase (query -> data ->
                 // ack). A peer holding the snapshot OFFLINE re-serves it on
@@ -2275,6 +2307,17 @@ impl Game {
     }
 
     /// Render state of the local gob at `slot` as a wire guest state.
+    /// The render resource NAME of a local gob (its world shape, not the
+    /// inventory icon) as carried by GuestKind::Static. Leaks into the
+    /// interned-name arena like every other cross-node string.
+    fn static_res_name(&self, slot: usize) -> String {
+        self.world
+            .res
+            .name(self.world.gobs.res_idx[slot])
+            .unwrap_or("gfx/terobjs/items/branch")
+            .to_string()
+    }
+
     fn guest_state_from_slot(&self, id: GobId, slot: usize) -> Option<crate::nodes::GuestState> {
         use crate::nodes::{GuestKind, GuestLinMove, GuestState};
         let kind = match self.world.gobs.kind[slot] {
@@ -2289,7 +2332,32 @@ impl Game {
                     .map(|s| s.to_string())
                     .collect(),
             },
-            _ => return None, // only movers + players publish; the rest never leave their cell
+            // Statics publish too (session 30): drops near a cell boundary
+            // must be visible AND clickable across nodes. The render name
+            // is the gob's world shape (res_idx); the class tag is stable
+            // for the gob's lifetime, so subscribers never need an update
+            // to pick the right relay act.
+            Kind::Drop { .. } => GuestKind::Static {
+                res_name: self.static_res_name(slot),
+                class: crate::nodes::StaticClass::Drop,
+            },
+            Kind::Tree { .. } => GuestKind::Static {
+                res_name: self.static_res_name(slot),
+                class: crate::nodes::StaticClass::Tree,
+            },
+            Kind::Stone => GuestKind::Static {
+                res_name: self.static_res_name(slot),
+                class: crate::nodes::StaticClass::Stone,
+            },
+            // Plans/stations/structures/crops: renderable but no relay act
+            // today (their menus are session UI on the authority side).
+            Kind::Plan { .. }
+            | Kind::Station { .. }
+            | Kind::Structure { .. }
+            | Kind::Crop { .. } => GuestKind::Static {
+                res_name: self.static_res_name(slot),
+                class: crate::nodes::StaticClass::Structure,
+            },
         };
         Some(GuestState {
             id,
@@ -2345,24 +2413,57 @@ impl Game {
         if !self.is_cluster() {
             return;
         }
-        let Some(slot) = self.world.gobs.get(id) else {
-            return;
+        // A Retract may target an ALREADY-KILLED gob (every death path
+        // kills first, then retracts): resolve through the split id with
+        // a generation check, so a reused slot never retracts a stranger.
+        // Before session 30 this early-returned on dead gobs, so remote
+        // retracts never fired at all - subscribers had to wait for their
+        // own GC sweep. Announce/Update of a dead gob stays a no-op.
+        let slot = match self.world.gobs.get(id) {
+            Some(slot) => slot,
+            None => {
+                let (slot, gen) = crate::state::split_gob_id(id);
+                if slot >= self.world.gobs.alive.len() {
+                    return;
+                }
+                if self.world.gobs.gen[slot] != gen {
+                    return; // slot was reused: the id is ancient history
+                }
+                if !matches!(ev, GuestEv::Retract) {
+                    return;
+                }
+                slot
+            }
         };
-        let Some(st) = self.guest_state_from_slot(id, slot) else {
-            return;
-        };
-        for peer in self.publish_targets(id, slot) {
-            let msg = match ev {
-                GuestEv::Announce => NodeMsg::GuestAnnounce(st.clone()),
-                GuestEv::Update => NodeMsg::GuestUpdate(st.clone()),
-                GuestEv::Retract => NodeMsg::GuestRetract { id },
-            };
-            self.cluster
-                .as_ref()
-                .expect("checked above")
-                .mesh
-                .send(peer, msg);
-            self.world.perf.guest_pub += 1;
+        match ev {
+            GuestEv::Retract => {
+                for peer in self.publish_targets(id, slot) {
+                    self.cluster
+                        .as_ref()
+                        .expect("checked above")
+                        .mesh
+                        .send(peer, NodeMsg::GuestRetract { id });
+                    self.world.perf.guest_pub += 1;
+                }
+            }
+            GuestEv::Announce | GuestEv::Update => {
+                let Some(st) = self.guest_state_from_slot(id, slot) else {
+                    return;
+                };
+                for peer in self.publish_targets(id, slot) {
+                    let msg = match ev {
+                        GuestEv::Announce => NodeMsg::GuestAnnounce(st.clone()),
+                        GuestEv::Update => NodeMsg::GuestUpdate(st.clone()),
+                        GuestEv::Retract => unreachable!("routed above"),
+                    };
+                    self.cluster
+                        .as_ref()
+                        .expect("checked above")
+                        .mesh
+                        .send(peer, msg);
+                    self.world.perf.guest_pub += 1;
+                }
+            }
         }
     }
 
@@ -2630,7 +2731,9 @@ impl Game {
                 self.world.res.intern(sp.resname())
             }
             GuestKind::Player { .. } => self.world.res.intern("gfx/borka/body"),
-            GuestKind::Static { res_name } => self.world.res.intern(leak_static(res_name.as_str())),
+            GuestKind::Static { res_name, .. } => {
+                self.world.res.intern(leak_static(res_name.as_str()))
+            }
         };
         let mv_lin = mv.map(|g| LinMove {
             sx: g.sx,
@@ -3003,7 +3106,7 @@ impl Game {
             .uint8(0)
             .int32(id)
             .int32(g.frame as i32);
-        if let GuestKind::Static { res_name } = &g.kind {
+        if let GuestKind::Static { res_name, .. } = &g.kind {
             let name = leak_static(self.world.res.name(g.res_idx).unwrap_or(res_name.as_str()));
             let w = out.res.wire_named(g.res_idx, name);
             m.uint8(OD_RES).uint16(w);
@@ -3254,7 +3357,7 @@ impl Game {
     fn player_interact(
         &mut self,
         sid: SessionId,
-        _player_gob: GobId,
+        player_gob: GobId,
         target: GobId,
         _at: (i32, i32),
     ) {
@@ -3263,11 +3366,44 @@ impl Game {
             // Animals there are attackable through the interaction relay
             // (the fight UI stays local; the bars/HP stay on the owner).
             if let Some(g) = self.world.guests.get(&target) {
-                if let crate::nodes::GuestKind::Animal { species } = &g.kind {
-                    if let Some(sp) = crate::state::Species::from_index(*species) {
-                        self.start_fight(sid, target, sp);
-                        return;
+                match &g.kind {
+                    crate::nodes::GuestKind::Animal { species } => {
+                        if let Some(sp) = crate::state::Species::from_index(*species) {
+                            self.start_fight(sid, target, sp);
+                            return;
+                        }
                     }
+                    // Statics (session 30): the click routes to the target's
+                    // authority through the relay; the act is picked from
+                    // the STABLE class tag, the authority re-validates it
+                    // against its own Kind.
+                    crate::nodes::GuestKind::Static { class, .. } => {
+                        let act = match class {
+                            crate::nodes::StaticClass::Drop => {
+                                Some(crate::nodes::StaticAct::Pickup)
+                            }
+                            crate::nodes::StaticClass::Tree => Some(crate::nodes::StaticAct::Chop),
+                            crate::nodes::StaticClass::Stone => Some(crate::nodes::StaticAct::Mine),
+                            crate::nodes::StaticClass::Structure => None,
+                        };
+                        if let Some(act) = act {
+                            if let Some(c) = self.cluster.as_ref() {
+                                let authority =
+                                    self.cell_owner(crate::visidx::cell_of(g.pos.0, g.pos.1));
+                                c.mesh.send(
+                                    authority,
+                                    crate::nodes::NodeMsg::RelayStaticAct {
+                                        player: player_gob,
+                                        target,
+                                        act,
+                                    },
+                                );
+                                debug!(sid, target, ?act, authority, "relay static act sent");
+                            }
+                            return;
+                        }
+                    }
+                    crate::nodes::GuestKind::Player { .. } => {}
                 }
             }
             trace!(sid, target, "interact target gone");
@@ -7198,6 +7334,114 @@ impl Game {
         }
     }
 
+    /// Authority-side application of a relayed static interaction
+    /// (session 30). The clicking player is homed on the sender; the
+    /// target's lifecycle is authoritative HERE. Validates the act
+    /// against the real Kind (the sender's guest view may lag a hop),
+    /// applies the same logic as the local interact path, and answers
+    /// with StaticAck so the player's inventory/LP update on the home
+    /// node exactly once.
+    fn relay_static(&mut self, player: GobId, target: GobId, act: crate::nodes::StaticAct) {
+        use crate::nodes::{StaticAct, StaticStack};
+        let Some(tslot) = self.world.gobs.get(target) else {
+            // Gone between click and relay hop: the home node learns the
+            // truth from GuestRetract; ack nothing (idempotent no-op).
+            debug!(target, ?act, "relay static: target gone");
+            return;
+        };
+        let result: Option<(Option<StaticStack>, i32)> = match (&self.world.gobs.kind[tslot], act) {
+            (Kind::Drop { .. }, StaticAct::Pickup) => self.relay_pickup(target, tslot),
+            (Kind::Tree { harvests }, StaticAct::Chop) => self.relay_chop(target, tslot, *harvests),
+            (Kind::Stone, StaticAct::Mine) => self.relay_mine(target, tslot),
+            _ => {
+                // Stale guest view (class vs kind drift): drop the act,
+                // never trust the sender's classification.
+                debug!(target, ?act, "relay static: act/kind mismatch");
+                None
+            }
+        };
+        let Some((stack, lp)) = result else {
+            return;
+        };
+        if let Some(c) = self.cluster.as_ref() {
+            let home = self.node_of_gob(player);
+            c.mesh
+                .send(home, crate::nodes::NodeMsg::StaticAck { player, stack, lp });
+        }
+    }
+
+    /// Pickup leg: remove the drop, return its exact stack. The stack
+    /// crosses as resource NAME (resolves on every node) with count,
+    /// quality and the fep.conf display label.
+    fn relay_pickup(
+        &mut self,
+        target: GobId,
+        tslot: usize,
+    ) -> Option<(Option<crate::nodes::StaticStack>, i32)> {
+        let (inv_res, _count, ql, label) = self.world.gobs.kind[tslot].drop_info()?;
+        let res_name = self
+            .world
+            .res
+            .name(inv_res)
+            .unwrap_or("gfx/invobjs/branch")
+            .to_string();
+        self.world.gobs.kill(target);
+        self.broadcast_retract(target);
+        Some((
+            Some(crate::nodes::StaticStack {
+                res: res_name,
+                count: 1,
+                ql,
+                label: label.to_string(),
+            }),
+            0,
+        ))
+    }
+
+    /// Chop leg: one harvest off the tree. Fresh wood drops land on THIS
+    /// node (subscribers see them as guests); the frame bump publishes to
+    /// viewers so remote trees re-render their harvest state.
+    fn relay_chop(
+        &mut self,
+        target: GobId,
+        tslot: usize,
+        harvests: u8,
+    ) -> Option<(Option<crate::nodes::StaticStack>, i32)> {
+        if harvests > 0 {
+            self.world.gobs.kind[tslot] = Kind::Tree {
+                harvests: harvests - 1,
+            };
+            self.world.gobs.frame[tslot] += 1;
+            let pos = self.world.gobs.pos[tslot];
+            self.spawn_drop_near(pos, "gfx/invobjs/wood", 10, "");
+            // Frame/publish so every viewer (local and guest) re-renders.
+            self.publish(target, GuestEv::Update);
+            Some((None, 5))
+        } else {
+            // Exhausted: remove the tree, leave a stump (same as local).
+            let pos = self.world.gobs.pos[tslot];
+            self.world.gobs.kill(target);
+            self.broadcast_retract(target);
+            let stump = self.world.res.intern("gfx/terobjs/trees/log");
+            let id = self.world.gobs.spawn(Kind::Stone, pos, stump, 1, 0);
+            self.broadcast_spawn(id);
+            Some((None, 0))
+        }
+    }
+
+    /// Mine leg: the stone breaks into a pick-up-able stone drop.
+    fn relay_mine(
+        &mut self,
+        target: GobId,
+        tslot: usize,
+    ) -> Option<(Option<crate::nodes::StaticStack>, i32)> {
+        let pos = self.world.gobs.pos[tslot];
+        self.world.gobs.kill(target);
+        self.broadcast_retract(target);
+        self.spawn_drop_near(pos, "gfx/invobjs/stone", 10, "");
+        Some((None, 3))
+    }
+
     /// Authority-side application of one relayed swing (cluster mode):
     /// the attacking player is a guest homed on another node; `chip` /
     /// `dmg` were computed THERE with the same formulas as the local
@@ -10129,5 +10373,286 @@ mod tests {
             .collect();
         assert_eq!(inv_wood.len(), 1, "wood stored in its own stack");
         assert_eq!(inv_wood[0].count, 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Session 30: relay static acts (pickup/chop/mine vs guest statics)
+    // ------------------------------------------------------------------
+
+    /// Home side: an interact click on a guest DROP ships exactly one
+    /// RelayStaticAct{Pickup} to the drop's cell owner - never a no-op.
+    #[tokio::test]
+    async fn guest_drop_click_ships_relay_static_pickup() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("dropclick", 0, 2);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let (fx, fy) = foreign_cell_pos(&g, 0);
+        let gid = foreign_node_gob_id(0, 2, 31);
+        g.on_node_msg(crate::nodes::NodeMsg::GuestAnnounce(
+            crate::nodes::GuestState {
+                id: gid,
+                pos: (fx, fy),
+                mv: None,
+                moving: false,
+                facing: 1,
+                kind: crate::nodes::GuestKind::Static {
+                    res_name: "gfx/terobjs/items/wood".into(),
+                    class: crate::nodes::StaticClass::Drop,
+                },
+                hp: 1,
+                max_hp: 1,
+                speed: 0,
+            },
+        ));
+        g.tick();
+        g.player_interact(1, pgob, gid, (0, 0));
+        let mut relays = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::RelayStaticAct {
+                player,
+                target,
+                act,
+            } = msg
+            {
+                relays.push((player, target, act));
+            }
+        }
+        let authority = {
+            let c = g.cluster.as_ref().unwrap();
+            crate::grid_owner::owner_of(crate::visidx::cell_of(fx, fy), c.nodes)
+        };
+        assert_eq!(
+            relays,
+            vec![(pgob, gid, crate::nodes::StaticAct::Pickup)],
+            "one Pickup relay per click, addressed to the cell owner (node {authority})"
+        );
+    }
+
+    /// Authority side: a relayed Pickup removes the local drop, publishes
+    /// the retract, and answers StaticAck with the EXACT stack (resource
+    /// name + quality + fep label) so the home node grants it once.
+    #[tokio::test]
+    async fn relay_pickup_authority_removes_and_acks_stack() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("authdrop", 0, 2);
+        // A local drop in a cell OWNED BY ME (ownership is a per-cell
+        // hash, so the player's own cell can belong to the peer - anchor
+        // the drop at an owned cell's center; the +-33-subtile spawn
+        // jitter then never leaves the cell).
+        let (hx, hy) = home_cell_pos(&g, 0);
+        let cell = crate::visidx::cell_of(hx, hy);
+        let center = (
+            cell.0 * crate::visidx::CELL + 125,
+            cell.1 * crate::visidx::CELL + 125,
+        );
+        g.spawn_drop_near(center, "gfx/invobjs/branch", 10, "Branch");
+        let drop = only_drop_gob(&g);
+        // Node 1 subscribes to the drop's cell so the retract publishes.
+        g.on_node_msg(crate::nodes::NodeMsg::Sub {
+            from: 1,
+            cells: vec![cell],
+        });
+        // The clicking player is a foreign gob homed on node 1.
+        let clicker = foreign_node_gob_id(0, 2, 41);
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStaticAct {
+            player: clicker,
+            target: drop,
+            act: crate::nodes::StaticAct::Pickup,
+        });
+        assert!(
+            g.world.gobs.get(drop).is_none(),
+            "drop removed by the authority"
+        );
+        let mut acks = Vec::new();
+        let mut retracts = 0;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            match msg {
+                crate::nodes::NodeMsg::StaticAck { player, stack, lp } => {
+                    acks.push((player, stack, lp));
+                }
+                crate::nodes::NodeMsg::GuestRetract { id } if id == drop => retracts += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(retracts, 1, "the retract publishes to subscribers");
+        assert_eq!(acks.len(), 1, "exactly one StaticAck");
+        let (player, stack, lp) = acks.pop().unwrap();
+        assert_eq!(player, clicker);
+        assert_eq!(lp, 0);
+        let st = stack.expect("pickup acks a stack");
+        assert_eq!(st.res, "gfx/invobjs/branch");
+        assert_eq!(st.count, 1);
+        assert_eq!(st.ql, 10);
+        assert_eq!(st.label, "Branch");
+    }
+
+    /// Home ack side: StaticAck grants the stack through grant_pickup -
+    /// onto a same-resource cursor (redirection), else into inventory -
+    /// and lp>0 tops up the wallet + pushes the char sheet.
+    #[tokio::test]
+    async fn static_ack_grants_stack_and_lp_on_home() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("ackhome", 0, 2);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let branch = g.world.res.intern("gfx/invobjs/branch");
+        // Cursor drags a branch stack: the ack must redirect onto it.
+        g.sessions.get_mut(&1).unwrap().cursor = Some(InvStack {
+            res: branch,
+            count: 1,
+            ql: 10,
+            label: "Branch",
+        });
+        let lp_before = g.world.players[pidx].lp;
+        g.on_node_msg(crate::nodes::NodeMsg::StaticAck {
+            player: pgob,
+            stack: Some(crate::nodes::StaticStack {
+                res: "gfx/invobjs/branch".into(),
+                count: 2,
+                ql: 20,
+                label: "Branch".into(),
+            }),
+            lp: 5,
+        });
+        let cur = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .cursor
+            .expect("cursor absorbed the ack");
+        let lp_after = g.world.players[pidx].lp;
+        assert_eq!(cur.count, 3, "1@q10 + 2@q20 -> 3 units");
+        assert_eq!(cur.ql, 16, "(10*1+20*2)/3 = 16");
+        // The starter kit's branch stack (2) must stay UNTOUCHED: the ack
+        // redirected onto the cursor, not into the inventory.
+        let inv_branch: Vec<_> = g.world.players[pidx]
+            .inv
+            .iter()
+            .filter(|s| s.res == branch)
+            .collect();
+        assert_eq!((inv_branch.len(), inv_branch[0].count), (1, 2));
+        assert_eq!(
+            lp_after,
+            lp_before + 5,
+            "lp granted from the ack (relative)"
+        );
+        // A different-resource ack lands in its own inventory stack.
+        g.on_node_msg(crate::nodes::NodeMsg::StaticAck {
+            player: pgob,
+            stack: Some(crate::nodes::StaticStack {
+                res: "gfx/invobjs/wood".into(),
+                count: 1,
+                ql: 10,
+                label: String::new(),
+            }),
+            lp: 0,
+        });
+        let wood = g.world.res.intern("gfx/invobjs/wood");
+        assert_eq!(
+            g.world.players[pidx]
+                .inv
+                .iter()
+                .filter(|s| s.res == wood)
+                .count(),
+            1,
+            "wood stored as its own stack"
+        );
+    }
+
+    /// Chop authority side: harvests decrement, fresh wood drops spawn on
+    /// the authority, lp 5 acks; an exhausted tree is removed with a stump
+    /// and acks lp 0.
+    #[tokio::test]
+    async fn relay_chop_authority_decrements_and_acks() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("authchop", 0, 2);
+        let pslot = g.world.gobs.get(pgob_of(&g)).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        // A local tree in MY cell with 2 harvests left.
+        let tree_res = g.world.res.intern("gfx/terobjs/trees/old");
+        let tree = g
+            .world
+            .gobs
+            .spawn(Kind::Tree { harvests: 2 }, (px + 22, py), tree_res, 1, 0);
+        let clicker = foreign_node_gob_id(0, 2, 51);
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStaticAct {
+            player: clicker,
+            target: tree,
+            act: crate::nodes::StaticAct::Chop,
+        });
+        let tslot = g.world.gobs.get(tree).expect("tree survives one chop");
+        assert!(
+            matches!(g.world.gobs.kind[tslot], Kind::Tree { harvests: 1 }),
+            "one chop off"
+        );
+        // A fresh wood drop spawned next to the tree.
+        let mut wood_drops = 0;
+        for slot in 0..g.world.gobs.alive.len() {
+            if g.world.gobs.alive[slot] && matches!(g.world.gobs.kind[slot], Kind::Drop { .. }) {
+                wood_drops += 1;
+            }
+        }
+        assert_eq!(wood_drops, 1, "the chop spawned one wood drop");
+        // Exhaust the tree: second chop -> 1 harvest -> third chop kills it.
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStaticAct {
+            player: clicker,
+            target: tree,
+            act: crate::nodes::StaticAct::Chop,
+        });
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStaticAct {
+            player: clicker,
+            target: tree,
+            act: crate::nodes::StaticAct::Chop,
+        });
+        assert!(g.world.gobs.get(tree).is_none(), "exhausted tree removed");
+        let mut acks = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::StaticAck { player, stack, lp } = msg {
+                acks.push((player, stack.is_some(), lp));
+            }
+        }
+        assert_eq!(
+            acks,
+            vec![
+                (clicker, false, 5),
+                (clicker, false, 5),
+                (clicker, false, 0)
+            ],
+            "chop lp 5, chop lp 5, exhausted lp 0"
+        );
+    }
+
+    /// A stale guest view must never apply: a Pickup act against a TREE is
+    /// dropped by the authority (no state change, no ack).
+    #[tokio::test]
+    async fn relay_static_mismatch_is_dropped() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("mismatch", 0, 2);
+        let pslot = g.world.gobs.get(pgob_of(&g)).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let tree_res = g.world.res.intern("gfx/terobjs/trees/old");
+        let tree = g
+            .world
+            .gobs
+            .spawn(Kind::Tree { harvests: 2 }, (px + 22, py), tree_res, 1, 0);
+        let clicker = foreign_node_gob_id(0, 2, 61);
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStaticAct {
+            player: clicker,
+            target: tree,
+            act: crate::nodes::StaticAct::Pickup, // wrong act for a tree
+        });
+        let tslot = g.world.gobs.get(tree).expect("tree untouched");
+        assert!(matches!(
+            g.world.gobs.kind[tslot],
+            Kind::Tree { harvests: 2 }
+        ));
+        let mut saw_ack = false;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if matches!(msg, crate::nodes::NodeMsg::StaticAck { .. }) {
+                saw_ack = true;
+            }
+        }
+        assert!(!saw_ack, "a mismatched act acks nothing");
+    }
+
+    fn pgob_of(g: &Game) -> GobId {
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        g.world.players[pidx].gob
     }
 }

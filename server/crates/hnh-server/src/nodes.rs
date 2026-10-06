@@ -100,8 +100,52 @@ pub enum GuestKind {
         /// Equipped borka piece prefixes (equip.rs table), render-relevant.
         equip: Vec<String>,
     },
-    /// Drops/structures: rendered from one concrete resource.
-    Static { res_name: String },
+    /// Drops/structures: rendered from one concrete resource. `class` is
+    /// the STABLE interaction class (session 30): it never changes during
+    /// the gob's lifetime, so the subscriber can pick the relay act
+    /// without any extra state sync. The authority still re-validates
+    /// every act against its own Kind.
+    Static {
+        res_name: String,
+        class: StaticClass,
+    },
+}
+
+/// Stable interaction class carried by GuestKind::Static (session 30).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StaticClass {
+    /// Item drop: the relay act is Pickup.
+    Drop,
+    /// Harvestable tree: the relay act is Chop.
+    Tree,
+    /// Stone: the relay act is Mine.
+    Stone,
+    /// Plans/stations/structures/crops: no relay act today (flavor only).
+    Structure,
+}
+
+/// One pick-up-able stack as removed by the authority (session 30 relay).
+/// Resource NAME (not index) crosses the wire: names resolve on every
+/// node against the same served pack, the same rule every other Guest
+/// string follows. `label` keeps the food fep.conf identity alive from
+/// the authority's side to the picker's inventory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StaticStack {
+    pub res: String,
+    pub count: u32,
+    pub ql: u8,
+    pub label: String,
+}
+
+/// Player-side interaction choice for a relayed static act (session 30).
+/// Picked by the home node from the guest view's StaticClass; validated
+/// by the authority against its authoritative Kind. A mismatch (stale
+/// guest view) is dropped, never trusted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StaticAct {
+    Pickup,
+    Chop,
+    Mine,
 }
 
 /// One node-link message. Sub/Unsub flow viewer -> owner; guest messages
@@ -161,6 +205,26 @@ pub enum NodeMsg {
     /// Authority -> home: the guest attacker dealt the killing blow; the
     /// receiver grants the learning points (the LP wallet lives there).
     KillCredit { player_gob: i32, lp: i32 },
+    /// Cross-node static interaction (session 30), home -> authority.
+    /// The clicking player (a session player homed on the sender) acted on
+    /// the static gob `target`; the target's LIFECYCLE (drop contents, tree
+    /// harvests, stone) is authoritative on the receiver. The receiver
+    /// applies its local logic and answers StaticAck.
+    RelayStaticAct {
+        player: i32,
+        target: i32,
+        act: StaticAct,
+    },
+    /// Authority -> home: the result of a RelayStaticAct. `stack` carries
+    /// the removed drop's contents for Pickup (the home node pushes it
+    /// through grant_pickup); `lp` grants Chop/Mine learning points. An
+    /// empty ack means the target was gone or the act mismatched its kind
+    /// - the home side shows nothing and the retract has cleaned the view.
+    StaticAck {
+        player: i32,
+        stack: Option<StaticStack>,
+        lp: i32,
+    },
     /// Cluster character migration (session 29). A node about to enter a
     /// player whose save key it does not hold broadcasts this query. A
     /// peer holding the snapshot offline answers CharData (re-serving it
@@ -537,6 +601,8 @@ fn msg_name(msg: &NodeMsg) -> &'static str {
         NodeMsg::GuestRetract { .. } => "guest_retract",
         NodeMsg::GuestTransfer(_) => "guest_transfer",
         NodeMsg::RelayAttack { .. } => "relay_attack",
+        NodeMsg::RelayStaticAct { .. } => "relay_static_act",
+        NodeMsg::StaticAck { .. } => "static_ack",
         NodeMsg::FightBars { .. } => "fight_bars",
         NodeMsg::CharQuery { .. } => "char_query",
         NodeMsg::CharData { .. } => "char_data",
@@ -632,6 +698,7 @@ mod tests {
             facing: 1,
             kind: GuestKind::Static {
                 res_name: "gfx/terobjs/items/branch".into(),
+                class: StaticClass::Drop,
             },
             hp: 1,
             max_hp: 1,
@@ -655,6 +722,21 @@ mod tests {
         msg_roundtrip(NodeMsg::KillCredit {
             player_gob: 0x0001_0007,
             lp: 10,
+        });
+        msg_roundtrip(NodeMsg::RelayStaticAct {
+            player: 0x0002_0007,
+            target: 0x0001_0009,
+            act: StaticAct::Chop,
+        });
+        msg_roundtrip(NodeMsg::StaticAck {
+            player: 0x0002_0007,
+            stack: Some(StaticStack {
+                res: "gfx/invobjs/wood".into(),
+                count: 1,
+                ql: 10,
+                label: String::new(),
+            }),
+            lp: 0,
         });
     }
 
