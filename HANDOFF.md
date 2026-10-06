@@ -1448,3 +1448,42 @@ vis-scan result caching; carrying-pose state for bows; cursor pickup
 redirection (merge stacks); relay pickup/build against guest STATIC gobs
 (drops/structures) - the same RelayAttack pattern with an action enum;
 load-test story for the sharded save (per-node bot cohorts persisting).
+
+## 2026-10-05 - Session 29 (continued 2): 1k load evidence + vis sub-phase attribution
+Measurement session under .unlazy (no new dir). Goal: verify the
+"vis-scan result caching" handoff item against data before implementing.
+
+EVIDENCE (1000 in-process bots ramping to 1000 players / 1000 sessions,
+10 Hz, --workers 4, release build):
+- Steady state at the full 1000 sessions: mean_tick_us 43-45 ms
+  (45% of the 100 ms budget), max_tick_us 139 ms.
+- New sub-phase counters (committed): vis_scan_us 2-3 ms (dirty-cell
+  candidate scan), vis_spawn_us 9.7-32 ms (per-viewer spawn encode -
+  DOMINANT, spikes with bot cell-crossing churn), vis_retract_us ~0-6 ms.
+  Movement phase 5-33 ms. AI/combat/vitals negligible at this scale.
+- Decision on "vis-scan result caching": DEFERRED with rationale. At
+  VIEW_RADIUS=300 / CELL=250 a view square spans ~16 cells, only ~4 are
+  fully inside the Chebyshev square, so a per-cell set-bump cache caps at
+  ~25% cell skips; exact-range spawn correctness requires keying entries
+  on the session position (within-cell movement changes exact distances),
+  which zeroes the benefit for movers and helps only static viewers.
+  Re-evaluate ONLY with a static-heavy-world probe showing the scan
+  phase dominant.
+- The actual next perf lever (data-backed): the spawn encode path
+  (stream_spawn -> encode_gob_block + res table + unacked clone per
+  (gob, viewer)). Options for next session: buffer reuse in the encode
+  path, per-gob encode sharing where res ids are node-global, or spawn
+  coalescing budgets.
+
+Also this session: sandbox-wipe recovery is now one command
+(scripts/jogl/deploy-agent-env.sh regenerates gameres via the new
+server/scripts/make-gameres.sh); real-client full e2e green after the
+account-keying change (MOVEMENT/WALKDIR/NO TELEPORT/GLIDING/PORTRAIT/
+EQUIPVIS/CURSOR/GROUNDDROP all OK).
+
+NEXT (handoff): spawn-encode path optimization (data-backed, see above);
+craft pagina ad->action wiring for remaining recipes; carrying-pose
+state for bows; cursor pickup redirection (merge stacks); relay
+pickup/build against guest STATIC gobs (RelayAttack pattern with an
+action enum); load-test story for the sharded save (per-node bot
+cohorts persisting across a cluster restart).
