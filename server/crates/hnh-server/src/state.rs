@@ -913,6 +913,16 @@ pub struct Perf {
     pub guests_encode_us: u64,
     pub guests_fanout_us: u64,
     pub guests_pose_us: u64,
+    /// Last-tick combat-phase sub-attribution (microseconds, session 43):
+    /// the once-per-tick lookup-index build, the player-side melee loop,
+    /// the animal retaliation loop, and the guest relay loop. Attribution
+    /// before optimization (perf-profile-first): the session-42 combat
+    /// p95 spikes (39 ms) were unattributed; these four counters decide
+    /// whether the next cut targets PvP, animals or relays.
+    pub combat_index_us: u64,
+    pub combat_players_us: u64,
+    pub combat_animals_us: u64,
+    pub combat_relay_us: u64,
     /// Last-tick packed movement batch: block count and distinct cell
     /// count (the fan-out probe width). Zero with no movers.
     pub move_blocks: u64,

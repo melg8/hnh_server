@@ -252,6 +252,20 @@ pub struct Game {
     ///
     /// Reused across ticks via `clear` (no hot-path allocator churn).
     move_scratch: crate::move_batch::MoveBatch,
+    /// Combat-phase lookup indexes (session 43): rebuilt once per tick in
+    /// one O(players) pass, reused across ticks (mem-reuse-collections).
+    ///
+    /// Replaces the per-tick O(N) `players` scans the melee paths ran
+    /// per attacker/per animal (O(N^2) aggregate at the 1000-session
+    /// load scale) with O(1) slot-indexed lookups:
+    /// - `player_of_slot`: gob slot -> player index + 1 (0 = no player).
+    ///   Gob slots are dense and players never leave `world.players`
+    ///   mid-tick (knockout resets bars, removal happens in the logout
+    ///   path), so the map stays valid for the whole combat phase.
+    /// - `engaged_of_slot`: gob slot of an animal fight target ->
+    ///   player index + 1, first (lowest) player index wins - the same
+    ///   "first engaged player" semantics the linear `find` had.
+    combat_ix: CombatIndex,
     /// Milliseconds of online time per granted LP (skills.rs accrual;
     /// precomputed once from HNH_LP_RATE, u64::MAX = disabled).
     lp_ms_per_lp: u64,
@@ -284,6 +298,30 @@ const CHAR_QUERY_RETRY_TICKS: u64 = 7;
 /// A pending join gives up after 6 s and enters fresh (a downed cluster
 /// must not block logins forever).
 const CHAR_QUERY_DEADLINE_MS: u64 = 6_000;
+
+/// Per-tick combat lookup indexes (see `Game::combat_ix`). Both vectors
+/// keep capacity between ticks: `resize` fills only the delta, so the
+/// steady-state build is a single linear pass with no allocator traffic.
+#[derive(Default)]
+struct CombatIndex {
+    /// Gob slot -> player index + 1 (0 = no player at that slot).
+    player_of_slot: Vec<u32>,
+    /// Gob slot of a fight target -> engaged player index + 1. Only
+    /// players with a live `fight_target` enter the map; the first
+    /// (lowest) player index wins a shared target (the old linear
+    /// `find` semantics).
+    engaged_of_slot: Vec<u32>,
+    /// Scratch snapshot of `animal_gobs` entries with a live engagement,
+    /// in `animal_gobs` order (the old retaliation loop's iteration
+    /// order). Rebuilt each tick; taken and restored to reuse capacity.
+    engaged_animals: Vec<GobId>,
+    /// Scratch snapshot of the guest_attackers rows (the relay
+    /// retaliation loop iterates a copy: rows mutate mid-loop).
+    relay_rows: Vec<(GobId, GobId)>,
+    /// Scratch snapshot of session ids for the 5 Hz fight-bar streaming
+    /// pass (rows mutate mid-loop through `sessions.get_mut`).
+    bar_sids: Vec<SessionId>,
+}
 
 /// Movement fan-out square half-width (subtiles): a still-visible mover
 /// sits inside the 2x VIEW_RADIUS retract hysteresis; the retract sweep
@@ -570,6 +608,7 @@ impl Game {
             fep,
             workers: 1,
             move_scratch: crate::move_batch::MoveBatch::default(),
+            combat_ix: CombatIndex::default(),
             lp_ms_per_lp: {
                 // HNH_LP_RATE scales the passive accrual (skills.rs);
                 // malformed values disable accrual rather than wedge boot.
@@ -892,6 +931,10 @@ impl Game {
             guests_encode_us = self.world.perf.guests_encode_us,
             guests_fanout_us = self.world.perf.guests_fanout_us,
             guests_pose_us = self.world.perf.guests_pose_us,
+            combat_index_us = self.world.perf.combat_index_us,
+            combat_players_us = self.world.perf.combat_players_us,
+            combat_animals_us = self.world.perf.combat_animals_us,
+            combat_relay_us = self.world.perf.combat_relay_us,
             move_blocks = self.world.perf.move_blocks,
             move_cells = self.world.perf.move_cells,
             "perf"
@@ -9031,9 +9074,38 @@ impl Game {
         const DISENGAGE: i32 = 300;
         let tick = self.world.tick;
 
+        // --- once-per-tick lookup indexes (session 43) ---
+        // One O(players) pass fills the slot-indexed maps the melee paths
+        // below used to replace with per-attacker / per-animal linear
+        // scans (O(N^2) aggregate at the 1000-session load scale).
+        // `resize` to 0 keeps capacity across ticks; only growth reallocs
+        // (mem-reuse-collections).
+        let t_ix = Instant::now();
+        let nslots = self.world.gobs.alive.len();
+        self.combat_ix.player_of_slot.clear();
+        self.combat_ix.player_of_slot.resize(nslots, 0);
+        self.combat_ix.engaged_of_slot.clear();
+        self.combat_ix.engaged_of_slot.resize(nslots, 0);
+        for (i, p) in self.world.players.iter().enumerate() {
+            let Some(pslot) = self.world.gobs.get(p.gob) else {
+                continue;
+            };
+            self.combat_ix.player_of_slot[pslot] = (i as u32) + 1;
+            if let Some(t) = p.fight_target {
+                if let Some(tslot) = self.world.gobs.get(t) {
+                    // First (lowest) player index wins a shared target,
+                    // matching the removed linear `find` semantics.
+                    if self.combat_ix.engaged_of_slot[tslot] == 0 {
+                        self.combat_ix.engaged_of_slot[tslot] = (i as u32) + 1;
+                    }
+                }
+            }
+        }
+        let combat_index_us = t_ix.elapsed().as_micros() as u64;
+
         // --- player side: offence gen, swings, bar streaming ---
-        let players: Vec<usize> = (0..self.world.players.len()).collect();
-        'player: for pidx in players {
+        let t_pl = Instant::now();
+        'player: for pidx in 0..self.world.players.len() {
             let (target, aim, sid, pgob) = {
                 let p = &self.world.players[pidx];
                 (p.fight_target, p.aim, p.session, p.gob)
@@ -9195,10 +9267,15 @@ impl Game {
             // automatic relation on the attacker (start_pvp_melee)
             // mirrors the pressure so their fight window shows the duel.
             if matches!(self.world.gobs.kind[tslot], Kind::Player { .. }) {
-                let Some(vpidx) = self.world.players.iter().position(|p| p.gob == target) else {
-                    self.world.players[pidx].fight_target = None;
-                    self.fight_del(sid, target);
-                    continue;
+                // O(1) victim lookup through the slot index (was a linear
+                // `players` scan per attacker per tick: O(N^2) aggregate).
+                let vpidx = match self.combat_ix.player_of_slot[tslot] {
+                    0 => {
+                        self.world.players[pidx].fight_target = None;
+                        self.fight_del(sid, target);
+                        continue;
+                    }
+                    row => (row - 1) as usize,
                 };
                 let vsid = self.world.players[vpidx].session;
                 // Attacker bar gen + swing decision (the same pacing as
@@ -9356,116 +9433,141 @@ impl Game {
             }
         }
 
+        let combat_players_us = t_pl.elapsed().as_micros() as u64;
+
         // --- animal side: aggressive animals swing back ---
-        let animals: Vec<GobId> = self.world.animal_gobs.clone();
-        for id in animals {
-            let Some(slot) = self.world.gobs.get(id) else {
-                continue;
-            };
-            let Kind::Animal { species } = self.world.gobs.kind[slot] else {
-                continue;
-            };
-            let _ = species;
-            // Find the engaged player and re-check reach.
-            let Some(engaged) = self
-                .world
-                .players
-                .iter()
-                .enumerate()
-                .find(|(_, q)| q.fight_target == Some(id))
-                .map(|(i, q)| (i, q.session, q.gob))
-            else {
-                continue;
-            };
-            let (pidx, p_sid, p_gob) = engaged;
-            let Some(pslot) = self.world.gobs.get(p_gob) else {
-                continue;
-            };
-            let (ax, ay) = self.world.gobs.pos[slot];
-            let (px, py) = self.world.gobs.pos[pslot];
-            if (px - ax).abs() > 33 || (py - ay).abs() > 33 {
-                // Not in reach: animal defence regenerates.
-                if let Some(af) = self.world.animal_fights.get_mut(&id) {
-                    af.def = (af.def + crate::fight::DEF_REGEN).min(crate::fight::BAR_FULL);
-                }
-                continue;
-            }
-            // Animal offence builds every tick while in reach (mirrors the
-            // player's own_off regen). Without this the offence stayed at
-            // its initial 0 forever: the swing condition below could never
-            // fire and predators NEVER attacked (session 21: the missing
-            // attack animation had no attack behind it).
-            if let Some(af) = self.world.animal_fights.get_mut(&id) {
-                af.off = (af.off + crate::fight::OFF_REGEN).min(crate::fight::BAR_FULL);
-            }
-            let animal_off = self
-                .world
-                .animal_fights
-                .get(&id)
-                .map(|f| f.off)
-                .unwrap_or(0);
-            let own_def = self
-                .sessions
-                .get(&p_sid)
-                .map(|out| out.fight.own_def)
-                .unwrap_or(crate::fight::BAR_FULL);
-            // Armor defense slows the breakthrough (armor.rs); fetched
-            // outside the mutable borrow below.
-            let (def_ac, _) = self.armor_totals(pidx);
-            // Animal offence builds; swing chips the player's defence.
-            let mut bite = None;
-            // The defence bar to write back after this tick (None = no
-            // swing): the chip must ACCUMULATE across bites until an
-            // opening, not reset implicitly - the local `new_def` used
-            // to be dropped, which only worked because fresh sessions
-            // started at own_def = 0 (fixed in session 39: FightState::new
-            // starts the defence FULL).
-            let mut next_def: Option<i32> = None;
-            {
-                let Some(af) = self.world.animal_fights.get_mut(&id) else {
+        // Snapshot the engaged animals in `animal_gobs` order (rows are
+        // removed mid-loop by knockout deaths, so a copy is required);
+        // the old loop cloned the WHOLE animal list and linear-scanned
+        // players per animal (O(animals x players) per tick) - the slot
+        // index answers the engagement in O(1). A victim knocked out by
+        // the player pass above keeps a stale row here: the live
+        // `fight_target` re-check below reproduces the removed `find`
+        // semantics exactly (perf-coll, mem-reuse-collections).
+        let combat_animals_us;
+        {
+            let t_an = Instant::now();
+            let mut engaged_animals = std::mem::take(&mut self.combat_ix.engaged_animals);
+            engaged_animals.clear();
+            for &id in self.world.animal_gobs.iter() {
+                let Some(aslot) = self.world.gobs.get(id) else {
                     continue;
                 };
-                if animal_off >= crate::fight::SWING_SPEND {
-                    af.off -= crate::fight::SWING_SPEND;
-                    let str = *self.world.players[pidx].attrs.get("str").unwrap_or(&10);
-                    // Animal bites are lighter than player swings.
-                    let dmg = (5 * str / 10).max(1) / 2;
-                    let chip = crate::armor::defense_chip(crate::fight::SWING_DEF_DMG, def_ac);
-                    let new_def = (own_def - chip).max(0);
-                    if new_def <= crate::fight::OPENING_THRESHOLD {
-                        bite = Some(dmg);
+                if self.combat_ix.engaged_of_slot[aslot] != 0 {
+                    engaged_animals.push(id);
+                }
+            }
+            for id in engaged_animals.iter().copied() {
+                let Some(slot) = self.world.gobs.get(id) else {
+                    continue;
+                };
+                let Kind::Animal { species } = self.world.gobs.kind[slot] else {
+                    continue;
+                };
+                let _ = species;
+                // Find the engaged player and re-check reach. The live
+                // fight_target comparison keeps the first-engaged-player
+                // semantics of the removed linear scan.
+                let Some(row) = self.combat_ix.engaged_of_slot[slot].checked_sub(1) else {
+                    continue;
+                };
+                let pidx = row as usize;
+                if self.world.players[pidx].fight_target != Some(id) {
+                    continue;
+                }
+                let p_sid = self.world.players[pidx].session;
+                let p_gob = self.world.players[pidx].gob;
+                let Some(pslot) = self.world.gobs.get(p_gob) else {
+                    continue;
+                };
+                let (ax, ay) = self.world.gobs.pos[slot];
+                let (px, py) = self.world.gobs.pos[pslot];
+                if (px - ax).abs() > 33 || (py - ay).abs() > 33 {
+                    // Not in reach: animal defence regenerates.
+                    if let Some(af) = self.world.animal_fights.get_mut(&id) {
+                        af.def = (af.def + crate::fight::DEF_REGEN).min(crate::fight::BAR_FULL);
                     }
-                    next_def = Some(new_def);
+                    continue;
+                }
+                // Animal offence builds every tick while in reach (mirrors the
+                // player's own_off regen). Without this the offence stayed at
+                // its initial 0 forever: the swing condition below could never
+                // fire and predators NEVER attacked (session 21: the missing
+                // attack animation had no attack behind it).
+                if let Some(af) = self.world.animal_fights.get_mut(&id) {
+                    af.off = (af.off + crate::fight::OFF_REGEN).min(crate::fight::BAR_FULL);
+                }
+                let animal_off = self
+                    .world
+                    .animal_fights
+                    .get(&id)
+                    .map(|f| f.off)
+                    .unwrap_or(0);
+                let own_def = self
+                    .sessions
+                    .get(&p_sid)
+                    .map(|out| out.fight.own_def)
+                    .unwrap_or(crate::fight::BAR_FULL);
+                // Armor defense slows the breakthrough (armor.rs); fetched
+                // outside the mutable borrow below.
+                let (def_ac, _) = self.armor_totals(pidx);
+                // Animal offence builds; swing chips the player's defence.
+                let mut bite = None;
+                // The defence bar to write back after this tick (None = no
+                // swing): the chip must ACCUMULATE across bites until an
+                // opening, not reset implicitly - the local `new_def` used
+                // to be dropped, which only worked because fresh sessions
+                // started at own_def = 0 (fixed in session 39: FightState::new
+                // starts the defence FULL).
+                let mut next_def: Option<i32> = None;
+                {
+                    let Some(af) = self.world.animal_fights.get_mut(&id) else {
+                        continue;
+                    };
+                    if animal_off >= crate::fight::SWING_SPEND {
+                        af.off -= crate::fight::SWING_SPEND;
+                        let str = *self.world.players[pidx].attrs.get("str").unwrap_or(&10);
+                        // Animal bites are lighter than player swings.
+                        let dmg = (5 * str / 10).max(1) / 2;
+                        let chip = crate::armor::defense_chip(crate::fight::SWING_DEF_DMG, def_ac);
+                        let new_def = (own_def - chip).max(0);
+                        if new_def <= crate::fight::OPENING_THRESHOLD {
+                            bite = Some(dmg);
+                        }
+                        next_def = Some(new_def);
+                    }
+                }
+                if let Some(dmg) = bite {
+                    self.hurt_player(pidx, dmg, id);
+                    // Attack animation: the one-shot bite FX overlay on the
+                    // victim (8-frame anim in the resource; the client removes
+                    // the overlay itself once the cycle completes). This is the
+                    // native visual cue for animal attacks - the kritter pose
+                    // pack ships no dedicated attack pose.
+                    self.fx_overlay_broadcast(p_gob, "gfx/fx/bite");
+                }
+                // Mirror the animal bars into the player's relation view.
+                if let Some(out) = self.sessions.get_mut(&p_sid) {
+                    if let Some(rel) = out.fight.rel_mut(id) {
+                        rel.ip_other += 1;
+                        rel.offence = animal_off;
+                        rel.defence = self
+                            .world
+                            .animal_fights
+                            .get(&id)
+                            .map(|f| f.def)
+                            .unwrap_or(0);
+                    }
+                    if let Some(nd) = next_def {
+                        out.fight.own_def = nd;
+                    }
+                    if bite.is_some() {
+                        out.fight.own_def = crate::fight::BAR_FULL;
+                    }
                 }
             }
-            if let Some(dmg) = bite {
-                self.hurt_player(pidx, dmg, id);
-                // Attack animation: the one-shot bite FX overlay on the
-                // victim (8-frame anim in the resource; the client removes
-                // the overlay itself once the cycle completes). This is the
-                // native visual cue for animal attacks - the kritter pose
-                // pack ships no dedicated attack pose.
-                self.fx_overlay_broadcast(p_gob, "gfx/fx/bite");
-            }
-            // Mirror the animal bars into the player's relation view.
-            if let Some(out) = self.sessions.get_mut(&p_sid) {
-                if let Some(rel) = out.fight.rel_mut(id) {
-                    rel.ip_other += 1;
-                    rel.offence = animal_off;
-                    rel.defence = self
-                        .world
-                        .animal_fights
-                        .get(&id)
-                        .map(|f| f.def)
-                        .unwrap_or(0);
-                }
-                if let Some(nd) = next_def {
-                    out.fight.own_def = nd;
-                }
-                if bite.is_some() {
-                    out.fight.own_def = crate::fight::BAR_FULL;
-                }
-            }
+            combat_animals_us = t_an.elapsed().as_micros() as u64;
+            self.combat_ix.engaged_animals = engaged_animals;
         }
 
         // --- relay retaliation: animals strike back at guest players ---
@@ -9475,13 +9577,13 @@ impl Game {
         // attacker's home node, where hurt_player applies absorption,
         // HP, stamina and the knockout path. v1 bite uses the default
         // str (same value the local path computes for str 10).
-        let relay_rows: Vec<(GobId, GobId)> = self
-            .world
-            .guest_attackers
-            .iter()
-            .map(|(&a, &p)| (a, p))
-            .collect();
-        for (id, attacker) in relay_rows {
+        // Snapshot in scratch (rows mutate mid-loop); same iteration
+        // order the collected Vec had (mem-reuse-collections).
+        let t_re = Instant::now();
+        let mut relay_rows = std::mem::take(&mut self.combat_ix.relay_rows);
+        relay_rows.clear();
+        relay_rows.extend(self.world.guest_attackers.iter().map(|(&a, &p)| (a, p)));
+        for (id, attacker) in relay_rows.iter().copied() {
             let Some(slot) = self.world.gobs.get(id) else {
                 self.world.guest_attackers.remove(&id);
                 continue;
@@ -9532,12 +9634,16 @@ impl Game {
                 }
             }
         }
+        let combat_relay_us = t_re.elapsed().as_micros() as u64;
+        self.combat_ix.relay_rows = relay_rows;
 
         // --- fast bar streaming: updod per relation + offdef, every 2 ticks ---
         if tick.is_multiple_of(2) {
-            let sids: Vec<SessionId> = self.sessions.keys().copied().collect();
-            for sid in sids {
-                let Some(out) = self.sessions.get_mut(&sid) else {
+            let mut sids = std::mem::take(&mut self.combat_ix.bar_sids);
+            sids.clear();
+            sids.extend(self.sessions.keys().copied());
+            for sid in &sids {
+                let Some(out) = self.sessions.get_mut(sid) else {
                     continue;
                 };
                 let Some(w) = out.fight.widget else { continue };
@@ -9566,7 +9672,16 @@ impl Game {
                     }
                 }
             }
+            self.combat_ix.bar_sids = sids;
         }
+
+        // Session-43 sub-attribution: combat p95 spikes were the top NEXT
+        // target; these four counters decide where the next cut goes.
+        let perf = &mut self.world.perf;
+        perf.combat_index_us = combat_index_us;
+        perf.combat_players_us = combat_players_us;
+        perf.combat_animals_us = combat_animals_us;
+        perf.combat_relay_us = combat_relay_us;
     }
 
     /// Apply player damage to an animal, handling death + loot.
