@@ -2785,3 +2785,87 @@ NEXT (handoff):
 - Hit-tail trim (log rate limit; chat/fx merge).
 - Load-cluster re-run on a quiet host for the perf table.
 - Windows smoke + GL client e2e when a display host exists.
+
+## 2026-10-07 - Session 44: batched move starts + FX wire patch + two wire fixes
+
+The session-43 NEXT top item is implemented: LINBEG move starts and
+one-shot FX overlays now encode ONCE into a per-tick packed start batch
+(MoveBatch) fanned out at tick end - one datagram per session per tick.
+Two wire-format defects were exposed and fixed along the way.
+
+WHAT:
+
+- BATCHED STARTS (session-43 NEXT item). start_move no longer encodes a
+  LINBEG block per viewer (5.5-6.6 starts/tick x ~530 visible sessions x
+  encode+clone+send was the measured 13-18 ms/tick chase cost); it
+  encodes once into `start_scratch` and `tick()` fans the batch out
+  through the existing `broadcast_batch` (cell rectangle prefilter +
+  exact `visible.contains`, fin=true so the authoritative frame lands in
+  `unacked`). fx_overlay_broadcast does the same for OD_OVERLAY: the
+  block stores the game-global resource index as the wire placeholder
+  plus the byte offset of that uint16, and the fan-out rewrites the 2
+  bytes per session (first use also queues the RMSG_RESID announcement
+  there) - one encoded block serves every viewer despite session-local
+  wire ids. `broadcast_batch` now reuses a taken/restored
+  session-anchor scratch vector.
+
+- WIRE FIX 1 - HEADERLESS BLOCKS. probe_walk exposed a defect carried
+  since session 41: batch blocks were encoded WITH a per-block
+  MSG_OBJDATA+flags header, so multi-block datagrams were
+  [06 00 ...][06 00 ...]. The legacy client (Session.getobjdata) parses
+  a datagram as ONE type byte followed by consecutive headerless blocks
+  ([fl][id i32][frame i32][ops..][OD_END]) - every block after the
+  first was misread with a 1-byte shift (fl=0x06, garbage id/frame).
+  Single-block datagrams parsed correctly by coincidence, which is why
+  sparse-world probes stayed green while any real crowd broke. All
+  batch-encoded blocks (movement LINSTEP/finalizer, guest finish/step,
+  LINBEG, FX) are now headerless; broadcast_batch opens the datagram
+  with one MSG_OBJDATA byte. FX wire patch offset moved 15->14.
+
+- WIRE FIX 2 - START BATCH CLEAR. The load cohort regressed to 560
+  stuck logins and 157-183 ms mean ticks (sum of phases ~5 ms). tick()
+  restored the taken start batch WITHOUT clearing it: blocks
+  accumulated forever and re-fanned-out every tick - O(tick^2) datagram
+  explosion. The batch now clears right after its fan-out (capacity
+  reused, like the movement batch).
+
+- HIT-TAIL TRIM (session-43 NEXT item). The per-hit info! log
+  (25-40 lines/s at the 1000-dueler scale, a measured chunk of the
+  1.3-3.6 ms hit tail) is now debug!; an aggregate info! (hit count +
+  mean hit-tail us) prints every 5 s of activity.
+
+MEASURED (scripts/load43.sh, 1000-bot duel cohort, noisy 2-CPU sandbox;
+session-43 numbers in parentheses):
+- chase start ~1.7 ms/start (was 2.4-3.0); combat player phase
+  11-16 ms/tick (was 18-27).
+- mv_viewers_us 5-9 us/call (was 417); mv_pose 840-1370 us/call
+  (was 912) - pose fan-out is still per-session (NEXT).
+- combat_hit_us 12-56 us/hit (was 1.3-3.6 ms/hit).
+- mean tick 92-96 ms in the tail windows (was 83-85) - same noisy
+  sandbox, within run-to-run variance; cohort settles 1000/1000 again
+  after WIRE FIX 2.
+
+EVIDENCE: 245 unit tests green (3 new: batch_linbeg_fans_out_once_per_
+tick, batch_fx_patches_session_wire_id, plus the move_batch patch
+metadata tests), clippy -D warnings clean, fmt clean. SESSION41 BOOT
+OK, WORLD ENTRY OK, CATTR ORDER OK, MOVE PROBE OK (own LINBEG n=88
+after a click, zero decode errors), MELEE WIRE OK. Commits b66d75d,
+59d0727, baca65e pushed to origin/master.
+
+NOT DONE THIS SESSION (rolled to NEXT):
+- Batched POSE fan-out (OD_LAYERS/OD_AVATAR): the block embeds several
+  per-session wire ids, so encode-once needs multi-patch metadata;
+  mv_pose 840-1370 us/call is now the top fan-out cost.
+- Session-anchor + per-session wire tables for guests: guests fan-out
+  still scans all sessions per pose job (pose_jobs loop).
+- Single-node tick p95 ~244 ms vs the 100 ms budget on the noisy 2-CPU
+  sandbox - re-measure on a quiet multi-core host (carried).
+- Windows smoke on a pwsh host + GL client e2e (carried since
+  session 34; the wire-format fixes make this EASY to re-verify now).
+
+NEXT (handoff):
+- Batched pose fan-out with multi-patch MoveBatch blocks.
+- GL client e2e + Windows smoke: the legacy client now parses batch
+  datagrams correctly; re-run the client smoke to prove it.
+- Perf table on a quiet host.
+- Crafting paginae/Makewindow flow remains the top feature gap.
