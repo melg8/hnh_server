@@ -596,6 +596,11 @@ pub struct Player {
     pub stamina: i32,
     /// Learning points (LP currency).
     pub lp: i32,
+    /// Wall-clock world time (`world.now_ms`) until which the player is
+    /// flagged CRIMINAL for a PvP knockout (the assault policy,
+    /// combat-system.md "PvP knockout consequences"). None = clean
+    /// record. Persisted; refreshed by every new knockout.
+    pub criminal_until_ms: Option<u64>,
     /// Selected movement gait (speedget index; GAIT_SPEEDS entry).
     pub gait: u8,
     /// Fractional LP accrual carry (ms toward the next point; see

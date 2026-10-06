@@ -1312,6 +1312,13 @@ impl Game {
         if let Some(slot) = self.world.gobs.get(gob) {
             self.world.gobs.kind[slot] = Kind::Player { player: player_idx };
         }
+        // Restore the criminal flag from the save (None on fresh
+        // characters or older saves; the buff re-streams on world entry).
+        let criminal_until_ms = self
+            .save
+            .players
+            .get(&key)
+            .and_then(|s| s.criminal_until_ms);
         self.world.players.push(Player {
             name: name.clone(),
             account,
@@ -1321,6 +1328,7 @@ impl Game {
             energy,
             stamina,
             lp,
+            criminal_until_ms,
             lp_carry_ms: 0,
             gait: GAIT_WALK as u8,
             skills: restored_skills,
@@ -1514,6 +1522,9 @@ impl Game {
         // Initial paperdoll contents ("set" + "ava") now that the player
         // and the epry widget both exist.
         self.send_epry_state(sid);
+        // Restore the criminal-state buff icon on reconnects (the Glob
+        // is rebuilt client-side on every world entry).
+        self.stream_criminal_buff(sid);
         info!(sid, %name, gob, "player entered world");
     }
 
@@ -2304,6 +2315,13 @@ impl Game {
                         Some((255, 128, 128)),
                     );
                     self.fx_overlay_broadcast(victim, "gfx/fx/hit");
+                    if knocked {
+                        // Authority side of the knockout consequences: the
+                        // victim's LP share lives here (home node); the
+                        // shooter's criminal flag is applied when the
+                        // PvpArrowResult answer reaches ITS node.
+                        self.knockout_lp_loss(pidx);
+                    }
                     if let Some(c) = self.cluster.as_ref() {
                         let home = self.node_of_gob(attacker);
                         c.mesh.send(
@@ -2326,6 +2344,14 @@ impl Game {
                             "You have defeated your target!",
                             Some((192, 255, 192)),
                         );
+                        // Winner's share of the knockout consequences
+                        // (server policy): the criminal flag lives on
+                        // the shooter's home node - here.
+                        if let Some(widx) =
+                            self.world.players.iter().position(|p| p.gob == shooter)
+                        {
+                            self.flag_criminal(widx);
+                        }
                     }
                 }
             }
@@ -2377,6 +2403,13 @@ impl Game {
                             Some((255, 128, 128)),
                         );
                         self.fx_overlay_broadcast(victim, "gfx/fx/hit");
+                        if killed {
+                            // Authority side of the knockout consequences:
+                            // the victim's LP share lives here (home
+                            // node); the attacker's criminal flag is
+                            // applied from the PvpSwingResult answer.
+                            self.knockout_lp_loss(pidx);
+                        }
                     }
                     if let Some(c) = self.cluster.as_ref() {
                         let home = self.node_of_gob(attacker);
@@ -2434,6 +2467,11 @@ impl Game {
                             let pidx = self.world.players.iter().position(|p| p.gob == attacker);
                             if let Some(pidx) = pidx {
                                 self.world.players[pidx].fight_target = None;
+                                // Winner's share of the knockout
+                                // consequences (server policy): the
+                                // criminal flag lives on the attacker's
+                                // home node - here.
+                                self.flag_criminal(pidx);
                             }
                             self.world.guest_fights.remove(&victim);
                             self.fight_del(sid, victim);
@@ -5350,6 +5388,11 @@ impl Game {
                             &format!("You have defeated {tname}!"),
                             Some((192, 255, 192)),
                         );
+                        // PvP knockout consequences (server policy):
+                        // LP loss on the loser, criminal flag on the
+                        // winner (combat-system.md).
+                        self.knockout_lp_loss(vidx);
+                        self.flag_criminal(pidx);
                     }
                 }
                 None if is_player => {
@@ -7959,6 +8002,9 @@ impl Game {
         let t8 = Instant::now();
         self.tick_guests();
         phase_us[8] = t8.elapsed().as_micros();
+        // Criminal-flag expiry: a rare-event O(players) scan kept out of
+        // the phase histogram (it is empty in the steady state).
+        self.tick_criminal_expiry();
         // The dirty set served this tick's visibility pass; spawn marks
         // after this point (farming/station drops) dirty the next pass.
         self.world.gobs.vis.clear_dirty();
@@ -8867,6 +8913,11 @@ impl Game {
                             "You have defeated your target!",
                             Some((192, 255, 192)),
                         );
+                        // PvP knockout consequences (server policy): the
+                        // loser forfeits 10% unused LP, the winner takes
+                        // the criminal flag (combat-system.md).
+                        self.knockout_lp_loss(vpidx);
+                        self.flag_criminal(pidx);
                         // Teardown on the attacker's side; hurt_player
                         // already reset the victim (hp, rels, target).
                         self.world.players[pidx].fight_target = None;
@@ -9844,6 +9895,113 @@ impl Game {
             out.send_raw(m.finish());
         }
         false
+    }
+
+    /// Criminal-flag duration for a PvP knockout (server policy): 30
+    /// real minutes, refreshed by every new knockout while it runs.
+    pub const CRIMINAL_MS: u64 = 30 * 60 * 1000;
+    /// RMSG_BUFF id of the criminal state. Real buffs start at 1; the
+    /// client's pseudo-buffs own the negative ids (-1 crime toggle,
+    /// -2 tracking, -3 swim - combat-system.md buff channel).
+    pub const CRIMINAL_BUFF_ID: i32 = 1;
+
+    /// The loser's share of a PvP knockout (server policy,
+    /// combat-system.md "PvP knockout consequences"): legacy documents
+    /// only the DEATH penalties (25-75% through the Tradition/Change
+    /// slider); the knockout share - 10% of UNUSED LP, floor zero - is
+    /// this server's written policy. Runs on the victim's home node.
+    fn knockout_lp_loss(&mut self, loser_pidx: usize) {
+        let lost = (self.world.players[loser_pidx].lp / 10).max(0);
+        if lost > 0 {
+            self.world.players[loser_pidx].lp -= lost;
+        }
+        let sid = self.world.players[loser_pidx].session;
+        if lost > 0 {
+            self.chat_line(
+                sid,
+                &format!("You lost {lost} learning points in the defeat."),
+                Some((255, 128, 128)),
+            );
+        }
+    }
+
+    /// The winner's share of a PvP knockout (server policy): flagged
+    /// CRIMINAL (assault) for [`CRIMINAL_MS`], icon streamed as a live
+    /// buff with a countdown. Runs on the winner's home node (the
+    /// relay paths answer there through PvpSwingResult/PvpArrowResult).
+    fn flag_criminal(&mut self, winner_pidx: usize) {
+        let until = self.world.now_ms + Self::CRIMINAL_MS;
+        self.world.players[winner_pidx].criminal_until_ms = Some(until);
+        let sid = self.world.players[winner_pidx].session;
+        self.chat_line(
+            sid,
+            "You are flagged criminal for the assault (30 minutes).",
+            Some((255, 196, 128)),
+        );
+        self.stream_criminal_buff(sid);
+    }
+
+    /// Stream (or refresh) the criminal buff to one session: countdown
+    /// meter in legacy 1/60 s ticks over the remaining wall time. Also
+    /// called on world entry so reconnects restore the icon.
+    fn stream_criminal_buff(&mut self, sid: SessionId) {
+        let Some(&pidx) = self.world.by_session.get(&sid) else {
+            return;
+        };
+        let Some(until) = self.world.players[pidx].criminal_until_ms else {
+            return;
+        };
+        let remaining = until.saturating_sub(self.world.now_ms);
+        if remaining == 0 {
+            return;
+        }
+        let cticks = (remaining / 60) as i32;
+        const NAME: &str = "gfx/hud/buffs/thorn";
+        let gi = self.world.res.intern(NAME);
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        let w = out.res.wire_named(gi, NAME);
+        if let Some((n, ver)) = out.res.pending_announce(w) {
+            out.send(wdg::resid(w, n, ver));
+            out.res.mark_announced(w);
+        }
+        // RMSG_BUFF rides the RELIABLE session stream (Glob.buffmsg),
+        // unlike OBJDATA overlays whose send_raw is datagram-semantics.
+        out.send(wdg::buff_set(
+            Self::CRIMINAL_BUFF_ID,
+            w,
+            "Criminal (assault)",
+            -1,
+            -1,
+            100,
+            cticks,
+            1,
+        ));
+    }
+
+    /// Criminal-flag expiry sweep (one cheap pass in the world tick):
+    /// when the timer runs out the flag clears and the buff icon is
+    /// removed with RMSG_BUFF rm.
+    fn tick_criminal_expiry(&mut self) {
+        let expired: Vec<usize> = self
+            .world
+            .players
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| {
+                matches!(p.criminal_until_ms, Some(u) if u <= self.world.now_ms)
+                    .then_some(i)
+            })
+            .collect();
+        for i in expired {
+            self.world.players[i].criminal_until_ms = None;
+            let sid = self.world.players[i].session;
+            if let Some(out) = self.sessions.get_mut(&sid) {
+                out.send(wdg::buff_rm(Self::CRIMINAL_BUFF_ID));
+            }
+            self.chat_line(sid, "Your criminal flag has expired.", Some((192, 255, 192)));
+        }
     }
 
     fn tick_vitals(&mut self) {
@@ -12415,6 +12573,7 @@ mod tests {
             inv_labels: Vec::new(),
             skills: Vec::new(),
             equip: Vec::new(),
+            criminal_until_ms: None,
         }
     }
 
@@ -15576,6 +15735,92 @@ mod tests {
         assert!(
             chat.iter().any(|t| t.contains("You have defeated")),
             "attacker told about the knockout: {chat:?}"
+        );
+    }
+
+    /// PvP knockout consequences (server policy, combat-system.md): the
+    /// loser forfeits 10% of unused LP, the winner is flagged criminal
+    /// with a live buff icon (RMSG_BUFF set), and the flag expires with
+    /// an RMSG_BUFF rm once the timer runs out.
+    #[tokio::test]
+    async fn pvp_knockout_consequences_local() {
+        let (mut g, mut rx, _raw) = entered_game("pvpconseq");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let (vidx, vgob) = second_player(&mut g, "victim", None);
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let vslot = g.world.gobs.get(vgob).unwrap();
+        g.world.gobs.set_pos(vslot, (px + 20, py));
+        // The victim carries 100 unused LP: the knockout must cost 10.
+        g.world.players[vidx].lp = 100;
+        g.start_pvp_melee(1, vgob);
+        g.sessions.get_mut(&2).unwrap().fight.own_def = crate::fight::OPENING_THRESHOLD;
+        g.world.players[vidx].hp = 3;
+        g.sessions.get_mut(&1).unwrap().fight.own_off = crate::fight::BAR_FULL;
+        g.sessions.get_mut(&1).unwrap().fight.atkc = 0;
+        g.tick();
+        assert_eq!(
+            g.world.players[vidx].lp, 90,
+            "the loser forfeits 10% of unused LP"
+        );
+        let until = g
+            .world
+            .players[pidx]
+            .criminal_until_ms
+            .expect("winner flagged criminal");
+        assert!(until > g.world.now_ms, "the flag runs into the future");
+        assert_eq!(
+            (until - g.world.now_ms) / 1000,
+            30 * 60,
+            "the flag runs 30 real minutes"
+        );
+        let mut frames = Vec::new();
+        while let Ok(f) = rx.try_recv() {
+            frames.push(f);
+        }
+        let chat: Vec<String> = frames.iter().filter_map(|f| chat_log_text(f)).collect();
+        assert!(
+            chat.iter()
+                .any(|t| t.contains("flagged criminal for the assault")),
+            "winner told about the flag: {chat:?}"
+        );
+        // The loser's chat line goes to session 2's channel (dropped by
+        // the second_player helper); the LP state above already proves
+        // the loser's share was applied.
+        // The buff icon reached the winner's reliable stream: one
+        // RMSG_BUFF "set" carrying the criminal tooltip.
+        assert!(
+            frames.iter().any(|f| f.first()
+                == Some(&hnh_proto::consts::RMSG_BUFF)
+                && f[1..].starts_with(b"set\0")
+                && f.windows(18).any(|w| w == b"Criminal (assault)")),
+            "RMSG_BUFF set with the criminal tooltip on the wire"
+        );
+        // Expiry: advance the flag to the past and sweep - the state
+        // clears and an RMSG_BUFF rm lands on the stream.
+        g.world.players[pidx].criminal_until_ms = Some(g.world.now_ms);
+        g.tick();
+        assert_eq!(
+            g.world.players[pidx].criminal_until_ms,
+            None,
+            "the sweep clears the expired flag"
+        );
+        let mut rm_frames = Vec::new();
+        while let Ok(f) = rx.try_recv() {
+            rm_frames.push(f);
+        }
+        let chat: Vec<String> = rm_frames.iter().filter_map(|f| chat_log_text(f)).collect();
+        assert!(
+            chat.iter().any(|t| t.contains("criminal flag has expired")),
+            "expiry chat: {chat:?}"
+        );
+        assert!(
+            rm_frames
+                .iter()
+                .any(|f| f.first() == Some(&hnh_proto::consts::RMSG_BUFF)
+                    && f[1..].starts_with(b"rm\0")),
+            "RMSG_BUFF rm on expiry"
         );
     }
 

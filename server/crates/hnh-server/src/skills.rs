@@ -307,6 +307,7 @@ mod tests {
             energy: 100,
             stamina: 100,
             lp,
+            criminal_until_ms: None,
             attrs: std::collections::HashMap::new(),
             inv: Vec::new(),
             inv_labels: Vec::new(),

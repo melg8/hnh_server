@@ -304,6 +304,14 @@ pub mod wdg {
         m.finish()
     }
 
+    /// RMSG_BUFF rm.
+    #[allow(dead_code)] // wire surface for mechanics landing this session
+    pub fn buff_rm(id: i32) -> Vec<u8> {
+        let mut m = MessageBuf::new();
+        m.uint8(RMSG_BUFF).string("rm").int32(id);
+        m.finish()
+    }
+
     /// RMSG_SFX.
     #[allow(dead_code)] // wire surface for mechanics landing this session
     pub fn sfx(wire_idx: u16) -> Vec<u8> {

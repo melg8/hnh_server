@@ -54,6 +54,10 @@ pub struct SavedPlayer {
     /// absent in older saves -> everything unequipped). Bincode-safe.
     #[serde(default)]
     pub equip: Vec<(usize, String, u32, u8, String)>,
+    /// Criminal-flag expiry in world ms (v5, additive; absent in older
+    /// saves -> clean record). None while the record is clean.
+    #[serde(default)]
+    pub criminal_until_ms: Option<u64>,
 }
 
 /// Top-level save container. Bump VERSION on incompatible changes.
@@ -256,6 +260,7 @@ impl SaveStore {
                 inv_labels,
                 skills: p.skills.iter().map(|s| s.to_string()).collect(),
                 equip: equip_named,
+                criminal_until_ms: p.criminal_until_ms,
             },
         );
     }
@@ -302,6 +307,7 @@ mod tests {
                 energy: 55,
                 stamina: 99,
                 lp: 12,
+                criminal_until_ms: None,
                 lp_carry_ms: 0,
                 gait: 1,
                 skills: std::collections::HashSet::new(),
@@ -358,6 +364,7 @@ mod tests {
                 stamina: 10,
                 lp: 0,
                 gait: 1,
+                criminal_until_ms: None,
                 lp_carry_ms: 0,
                 skills: std::collections::HashSet::new(),
                 attrs: HashMap::new(),
