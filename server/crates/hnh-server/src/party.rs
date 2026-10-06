@@ -47,6 +47,10 @@ pub enum PlayerMenu {
     InviteTarget(GobId),
     /// The invitee's consent menu ("Join <leader>'s party").
     JoinParty { leader: GobId },
+    /// The clicker's melee duel menu on `target` ("Fight") - session 39
+    /// PvP: the same flower menu arms the unarmed openings duel between
+    /// two players (local target or a cross-node guest).
+    FightTarget(GobId),
 }
 
 /// Outcome of removing a member.

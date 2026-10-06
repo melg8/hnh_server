@@ -134,6 +134,16 @@ pub enum GuestKind {
     },
 }
 
+impl GuestKind {
+    /// The player's name when this guest is a player, else None.
+    pub fn player_name(&self) -> Option<&str> {
+        match self {
+            GuestKind::Player { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+}
+
 /// Full drop payload for authority transfer (session 35): a node that
 /// spawns a `Kind::Drop` onto a cell it does not own (e.g. a station
 /// output drop whose spawn jitter crossed a cell boundary) hands the
@@ -342,6 +352,33 @@ pub enum NodeMsg {
     /// close the engagement narrative (the aim itself re-arms while the
     /// target lives and arrows remain).
     PvpArrowResult { shooter: i32, killed: bool },
+    /// Cross-node melee PvP (session 39), attacker's node -> the VICTIM's
+    /// home node. The attacker swung at the guest player `victim`; `chip`
+    /// (defence-bar damage) and `dmg` (HP damage on an opening) follow the
+    /// same openings economy as the animal RelayAttack - computed on the
+    /// attacker's node, applied to the victim's authoritative defence bar
+    /// and HP on the victim's home node (the same authority split as
+    /// PvpArrow: armor, HP and the knockout path live with the session).
+    PvpSwing {
+        attacker: i32,
+        victim: i32,
+        chip: i32,
+        dmg: i32,
+    },
+    /// Victim's home node -> the attacker's node: the applied outcome of a
+    /// PvpSwing. `def` is the victim's authoritative defence bar after the
+    /// chip (the attacker's mirror re-syncs from it, exactly like the
+    /// animal FightBars answer), `landed` tells the swing reached HP
+    /// through an opening, and `killed` reports the knockout so the
+    /// attacker's chat can close the duel. `victim` identifies the mirror
+    /// row on the attacker's node.
+    PvpSwingResult {
+        attacker: i32,
+        victim: i32,
+        def: i32,
+        landed: bool,
+        killed: bool,
+    },
     /// Cross-node static interaction (session 30), home -> authority.
     /// The clicking player (a session player homed on the sender) acted on
     /// the static gob `target`; the target's LIFECYCLE (drop contents, tree
@@ -827,6 +864,8 @@ fn msg_name(msg: &NodeMsg) -> &'static str {
         NodeMsg::FightBars { .. } => "fight_bars",
         NodeMsg::PvpArrow { .. } => "pvp_arrow",
         NodeMsg::PvpArrowResult { .. } => "pvp_arrow_result",
+        NodeMsg::PvpSwing { .. } => "pvp_swing",
+        NodeMsg::PvpSwingResult { .. } => "pvp_swing_result",
         NodeMsg::CharQuery { .. } => "char_query",
         NodeMsg::CharData { .. } => "char_data",
         NodeMsg::CharAck { .. } => "char_ack",
@@ -949,6 +988,19 @@ mod tests {
         msg_roundtrip(NodeMsg::KillCredit {
             player_gob: 0x0001_0007,
             lp: 10,
+        });
+        msg_roundtrip(NodeMsg::PvpSwing {
+            attacker: 0x0001_0007,
+            victim: 0x0002_0003,
+            chip: 3000,
+            dmg: 5,
+        });
+        msg_roundtrip(NodeMsg::PvpSwingResult {
+            attacker: 0x0001_0007,
+            victim: 0x0002_0003,
+            def: 7000,
+            landed: false,
+            killed: false,
         });
         msg_roundtrip(NodeMsg::RelayStaticAct {
             player: 0x0002_0007,

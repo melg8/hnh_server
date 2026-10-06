@@ -89,6 +89,20 @@ pub struct FightState {
 }
 
 impl FightState {
+    /// A fresh fight state: the defence bar starts FULL (an unengaged
+    /// player presents a whole defence against the first swing) while
+    /// offence starts empty. `Default` leaves `own_def` at 0, which
+    /// would open every fresh player to instant damage.
+    pub fn new() -> Self {
+        FightState {
+            widget: None,
+            rels: Vec::new(),
+            own_off: 0,
+            own_def: BAR_FULL,
+            atkc: 0,
+        }
+    }
+
     pub fn rel(&self, gob: i32) -> Option<&FightRel> {
         self.rels.iter().find(|r| r.gob == gob)
     }

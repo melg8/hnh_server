@@ -892,7 +892,7 @@ impl Game {
             widgets: HashMap::new(),
             mapreqs: HashSet::new(),
             res: crate::resources::ResTable::new(),
-            fight: crate::fight::FightState::default(),
+            fight: crate::fight::FightState::new(),
             craft_recipe: None,
             craft_window: None,
             item_menu: None,
@@ -2326,6 +2326,118 @@ impl Game {
                             "You have defeated your target!",
                             Some((192, 255, 192)),
                         );
+                    }
+                }
+            }
+            NodeMsg::PvpSwing {
+                attacker,
+                victim,
+                chip,
+                dmg,
+            } => {
+                // Cross-node melee PvP (session 39): one of MY session
+                // players is being swung at by a foreign attacker. The
+                // victim's defence bar, armor, HP and the knockout path
+                // are all authoritative here; the applied outcome goes
+                // back as PvpSwingResult so the attacker's mirror and
+                // chat stay truthful.
+                if let Some(pidx) = self.world.players.iter().position(|p| p.gob == victim) {
+                    tracing::debug!(attacker, victim, chip, dmg, "pvp swing applied");
+                    let vsid = self.world.players[pidx].session;
+                    let (landed, def_after) = {
+                        let Some(vout) = self.sessions.get_mut(&vsid) else {
+                            return;
+                        };
+                        let breaking = vout.fight.own_def <= crate::fight::OPENING_THRESHOLD;
+                        vout.fight.own_def = (vout.fight.own_def - chip).max(0);
+                        let landed =
+                            breaking || vout.fight.own_def <= crate::fight::OPENING_THRESHOLD;
+                        if landed {
+                            vout.fight.own_def = crate::fight::BAR_FULL;
+                        }
+                        (landed, vout.fight.own_def)
+                    };
+                    let def_now = def_after;
+                    let mut killed = false;
+                    if landed {
+                        killed = self.hurt_player(pidx, dmg, attacker);
+                        // The attacker is published here as a guest while
+                        // both players see each other; fall back to an
+                        // anonymous line if the view already dropped.
+                        let aname = self
+                            .world
+                            .guests
+                            .get(&attacker)
+                            .and_then(|g| g.kind.player_name())
+                            .unwrap_or("Someone")
+                            .to_owned();
+                        self.chat_line(
+                            vsid,
+                            &format!("{aname} hits you for {dmg} damage."),
+                            Some((255, 128, 128)),
+                        );
+                        self.fx_overlay_broadcast(victim, "gfx/fx/hit");
+                    }
+                    if let Some(c) = self.cluster.as_ref() {
+                        let home = self.node_of_gob(attacker);
+                        c.mesh.send(
+                            home,
+                            crate::nodes::NodeMsg::PvpSwingResult {
+                                attacker,
+                                victim,
+                                def: def_now,
+                                landed,
+                                killed,
+                            },
+                        );
+                    }
+                }
+            }
+            NodeMsg::PvpSwingResult {
+                attacker,
+                victim,
+                def,
+                landed,
+                killed,
+            } => {
+                // The victim's home node answered my swing: re-sync the
+                // local mirror (the fightview reads it) and close the
+                // narrative on a landed hit / knockout.
+                if let Some(p) = self.world.players.iter().find(|p| p.gob == attacker) {
+                    let sid = p.session;
+                    if let Some(mf) = self.world.guest_fights.get_mut(&victim) {
+                        mf.def = def.clamp(0, crate::fight::BAR_FULL);
+                    }
+                    if let Some(out) = self.sessions.get_mut(&sid) {
+                        if let Some(rel) = out.fight.rel_mut(victim) {
+                            rel.defence = def.clamp(0, crate::fight::BAR_FULL);
+                        }
+                    }
+                    if landed {
+                        let vname = self
+                            .world
+                            .guests
+                            .get(&victim)
+                            .and_then(|g| g.kind.player_name())
+                            .unwrap_or("your target");
+                        self.chat_line(
+                            sid,
+                            &format!("You hit {vname} for damage."),
+                            Some((192, 255, 192)),
+                        );
+                        if killed {
+                            self.chat_line(
+                                sid,
+                                "You have defeated your target!",
+                                Some((192, 255, 192)),
+                            );
+                            let pidx = self.world.players.iter().position(|p| p.gob == attacker);
+                            if let Some(pidx) = pidx {
+                                self.world.players[pidx].fight_target = None;
+                            }
+                            self.world.guest_fights.remove(&victim);
+                            self.fight_del(sid, victim);
+                        }
                     }
                 }
             }
@@ -4125,12 +4237,14 @@ impl Game {
                     // cross-node player; the hit roll stays here (aim is
                     // session state) and the damage relays to the VICTIM's
                     // home node, whose hurt_player path owns armor/HP/
-                    // knockout. Without a bow there is no remote
-                    // party-invite relay yet - the click falls through.
+                    // knockout. Melee carriers (session 39) get the Fight
+                    // flower menu instead - the duel relays one PvpSwing
+                    // per swing through the same authority split.
                     crate::nodes::GuestKind::Player { .. } => {
                         if self.start_aim(sid, target) {
                             return;
                         }
+                        self.open_guest_fight_menu(sid, target);
                     }
                 }
             }
@@ -4355,19 +4469,17 @@ impl Game {
         if target == clicker_gob {
             return;
         }
-        if self.world.party_idx(target).is_some() {
-            self.system_line(sid, "That player is already in a party.");
-            return;
-        }
-        if let Some(pidx) = self.world.party_idx(clicker_gob) {
-            let party = &self.world.parties[pidx];
-            if party.leader != clicker_gob {
-                self.system_line(sid, "Only the party leader can invite.");
-                return;
-            }
-            if party.members.len() >= crate::party::MAX_MEMBERS {
-                self.system_line(sid, "Your party is full.");
-                return;
+        // Party-invite applicability does NOT gate the Fight option
+        // (session 39): an already-partied or full-party target can
+        // still be dueled, so the refusals below only drop the invite
+        // petal from the menu instead of blocking it entirely.
+        let mut invite_ok = self.world.party_idx(target).is_none();
+        if invite_ok {
+            if let Some(pidx) = self.world.party_idx(clicker_gob) {
+                let party = &self.world.parties[pidx];
+                if party.leader != clicker_gob || party.members.len() >= crate::party::MAX_MEMBERS {
+                    invite_ok = false;
+                }
             }
         }
         let Some(out) = self.sessions.get_mut(&sid) else {
@@ -4384,6 +4496,40 @@ impl Game {
             out.send(wdg::dst_wdg(old));
         }
         let w = out.new_wid("sm");
+        let petals: Vec<ListVal> = if invite_ok {
+            vec![
+                ListVal::S("Invite to party".to_owned()),
+                ListVal::S("Fight".to_owned()),
+                ListVal::S("Cancel".to_owned()),
+            ]
+        } else {
+            vec![
+                ListVal::S("Fight".to_owned()),
+                ListVal::S("Cancel".to_owned()),
+            ]
+        };
+        out.send(wdg::new_wdg(w, "sm", -1, -1, 0, &petals));
+        out.player_menu = Some((w, crate::party::PlayerMenu::InviteTarget(target)));
+    }
+
+    /// Melee duel offer on a CROSS-NODE guest player (session 39): the
+    /// same flower menu, minus the party petal - party membership has no
+    /// cross-node relay, so Fight is the only offer available.
+    fn open_guest_fight_menu(&mut self, sid: SessionId, target: GobId) {
+        let clicker_gob = match self.sessions.get(&sid).and_then(|o| o.player_gob) {
+            Some(g) => g,
+            None => return,
+        };
+        if target == clicker_gob {
+            return;
+        }
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        if let Some((old, _)) = out.player_menu {
+            out.send(wdg::dst_wdg(old));
+        }
+        let w = out.new_wid("sm");
         out.send(wdg::new_wdg(
             w,
             "sm",
@@ -4391,11 +4537,11 @@ impl Game {
             -1,
             0,
             &[
-                ListVal::S("Invite to party".to_owned()),
+                ListVal::S("Fight".to_owned()),
                 ListVal::S("Cancel".to_owned()),
             ],
         ));
-        out.player_menu = Some((w, crate::party::PlayerMenu::InviteTarget(target)));
+        out.player_menu = Some((w, crate::party::PlayerMenu::FightTarget(target)));
     }
 
     /// Flower menu petal on a party menu: confirm/cancel the clicker's
@@ -4415,16 +4561,43 @@ impl Game {
         };
         out.player_menu = None;
         out.send(wdg::dst_wdg(wid));
-        if choice != 0 {
-            out.send(wdg::wdgmsg(wid, "cancel", &[]));
-            return;
-        }
+        // NOTE: the petal index is NOT validated here - each action below
+        // knows its own menu layout (the Fight petal is index 1 on the
+        // invite menu, 0 on the guest menu) and cancels on anything else.
         match action {
             crate::party::PlayerMenu::InviteTarget(target) => {
-                self.send_party_invitation(sid, target);
+                // Petal 0 invites; petal 1 opens the melee duel (session
+                // 39); anything else cancels.
+                if choice == 0 {
+                    self.send_party_invitation(sid, target);
+                } else if choice == 1 {
+                    self.start_pvp_melee(sid, target);
+                } else {
+                    let out = self.sessions.get_mut(&sid);
+                    if let Some(out) = out {
+                        out.send(wdg::wdgmsg(wid, "cancel", &[]));
+                    }
+                }
             }
             crate::party::PlayerMenu::JoinParty { leader } => {
-                self.join_party(leader, sid);
+                if choice == 0 {
+                    self.join_party(leader, sid);
+                } else {
+                    let out = self.sessions.get_mut(&sid);
+                    if let Some(out) = out {
+                        out.send(wdg::wdgmsg(wid, "cancel", &[]));
+                    }
+                }
+            }
+            crate::party::PlayerMenu::FightTarget(target) => {
+                if choice == 0 {
+                    self.start_pvp_melee(sid, target);
+                } else {
+                    let out = self.sessions.get_mut(&sid);
+                    if let Some(out) = out {
+                        out.send(wdg::wdgmsg(wid, "cancel", &[]));
+                    }
+                }
             }
         }
     }
@@ -4803,6 +4976,77 @@ impl Game {
                 def: crate::fight::BAR_FULL,
             });
         info!(sid, target, ?species, "fight started");
+    }
+
+    /// Open the unarmed melee duel on another PLAYER (session 39 PvP).
+    /// The attacker's offence bar and the fight UI stay LOCAL (session
+    /// state, exactly like the animal fight); the victim's defence bar
+    /// is the victim session's `own_def` when both players are local,
+    /// or lives on the victim's home node when the target is a guest
+    /// (each swing relays a PvpSwing there and the PvpSwingResult
+    /// answer re-syncs the local mirror).
+    fn start_pvp_melee(&mut self, sid: SessionId, target: GobId) {
+        // Self-clicks never engage (the menu guard already refuses them,
+        // this is the belt-and-braces path for direct callers).
+        if self.world.player(sid).map(|p| p.gob) == Some(target) {
+            return;
+        }
+        // Melee and ranged are exclusive player state; drop any live aim.
+        if let Some(p) = self.world.player_mut(sid) {
+            p.aim = None;
+        }
+        // Cross-node guest player: mirror the animal relay-fight setup.
+        if self.world.guests.contains_key(&target) {
+            let vname = self
+                .world
+                .guests
+                .get(&target)
+                .and_then(|g| g.kind.player_name())
+                .unwrap_or("someone")
+                .to_owned();
+            if let Some(p) = self.world.player_mut(sid) {
+                p.fight_target = Some(target);
+                p.atk_cd = 0;
+            }
+            self.fight_open(sid, target);
+            self.world
+                .guest_fights
+                .entry(target)
+                .or_insert_with(|| crate::state::AnimalFight {
+                    off: 0,
+                    def: crate::fight::BAR_FULL,
+                });
+            self.chat_line(sid, &format!("You attack {vname}!"), Some((255, 200, 128)));
+            info!(sid, target, "pvp relay duel started");
+            return;
+        }
+        // Local player target: open the duel on BOTH sides - the victim
+        // gets a relation on the attacker immediately (legacy Fightview
+        // opens both ways) so they can select the attacker in the fight
+        // window and answer without hunting for the flower menu first.
+        let Some(vpidx) = self.world.players.iter().position(|p| p.gob == target) else {
+            return;
+        };
+        let vsid = self.world.players[vpidx].session;
+        let vname = self.world.players[vpidx].name.clone();
+        let agob = self.world.player(sid).map(|p| p.gob);
+        let aname = self.world.player(sid).map(|p| p.name.clone());
+        let Some(agob) = agob else { return };
+        if let Some(p) = self.world.player_mut(sid) {
+            p.fight_target = Some(target);
+            p.atk_cd = 0;
+        }
+        self.fight_open(sid, target);
+        self.fight_open(vsid, agob);
+        self.chat_line(sid, &format!("You attack {vname}!"), Some((255, 200, 128)));
+        if let Some(aname) = aname {
+            self.chat_line(
+                vsid,
+                &format!("{aname} attacks you!"),
+                Some((255, 128, 128)),
+            );
+        }
+        info!(sid, target, vsid, "pvp melee duel started");
     }
 
     // ------------------------------------------------------------------
@@ -8457,17 +8701,37 @@ impl Game {
                 };
                 self.world.players[pidx].stamina = (self.world.players[pidx].stamina - 2).max(0);
                 if let Some(c) = self.cluster.as_ref() {
-                    let authority = self.cell_owner(crate::visidx::cell_of(tx, ty));
                     let (dmg, chip) = relay;
-                    c.mesh.send(
-                        authority,
-                        crate::nodes::NodeMsg::RelayAttack {
-                            attacker: pgob,
-                            target,
-                            chip,
-                            dmg,
-                        },
-                    );
+                    // Guest PLAYERS take the PvP melee path (session 39):
+                    // the swing ships to the VICTIM'S HOME NODE (armor,
+                    // HP and the knockout path live with the session,
+                    // same authority split as PvpArrow) - not the cell
+                    // owner, which is where a guest ANIMAL's bars live.
+                    let guest_is_player =
+                        matches!(guest.kind, crate::nodes::GuestKind::Player { .. });
+                    if guest_is_player {
+                        let home = self.node_of_gob(target);
+                        c.mesh.send(
+                            home,
+                            crate::nodes::NodeMsg::PvpSwing {
+                                attacker: pgob,
+                                victim: target,
+                                chip,
+                                dmg,
+                            },
+                        );
+                    } else {
+                        let authority = self.cell_owner(crate::visidx::cell_of(tx, ty));
+                        c.mesh.send(
+                            authority,
+                            crate::nodes::NodeMsg::RelayAttack {
+                                attacker: pgob,
+                                target,
+                                chip,
+                                dmg,
+                            },
+                        );
+                    }
                 }
                 continue;
             }
@@ -8491,6 +8755,120 @@ impl Game {
                     // Shared movement entry point (client-consistent timing;
                     // see start_move).
                     self.start_move(pslot, (tx, ty));
+                }
+                continue;
+            }
+            // --- PvP melee (session 39): the target is another session ---
+            // --- player. The openings economy runs against the VICTIM's ---
+            // session defence bar (`own_def`) instead of an animal_fights
+            // row: identical chip arithmetic and opening threshold, and a
+            // landed hit goes through hurt_player (armor absorption, HP,
+            // knockout) exactly like an animal bite. The victim's
+            // automatic relation on the attacker (start_pvp_melee)
+            // mirrors the pressure so their fight window shows the duel.
+            if matches!(self.world.gobs.kind[tslot], Kind::Player { .. }) {
+                let Some(vpidx) = self.world.players.iter().position(|p| p.gob == target) else {
+                    self.world.players[pidx].fight_target = None;
+                    self.fight_del(sid, target);
+                    continue;
+                };
+                let vsid = self.world.players[vpidx].session;
+                // Attacker bar gen + swing decision (the same pacing as
+                // the animal path); returns the swing payload when the
+                // offence bar covered a swing this tick.
+                let swung = {
+                    let Some(out) = self.sessions.get_mut(&sid) else {
+                        continue;
+                    };
+                    out.fight.own_off =
+                        (out.fight.own_off + crate::fight::OFF_REGEN).min(crate::fight::BAR_FULL);
+                    if out.fight.atkc > 0 {
+                        out.fight.atkc -= 1;
+                    }
+                    if out.fight.own_off < crate::fight::SWING_SPEND || out.fight.atkc > 0 {
+                        None
+                    } else {
+                        out.fight.own_off -= crate::fight::SWING_SPEND;
+                        out.fight.atkc = crate::fight::ATKC_TICKS;
+                        // Attack weight scales 0.5..2.0 with advantage
+                        // (identical to the animal swing path); read the
+                        // balance immutably, bump IP mutably, then read
+                        // the spent bar - three disjoint borrows.
+                        let weight = out
+                            .fight
+                            .rel(target)
+                            .map(|rel| (rel.balance.clamp(-5, 5) as f32) * 0.1 + 1.0)
+                            .unwrap_or(1.0);
+                        if let Some(rel) = out.fight.rel_mut(target) {
+                            rel.ip_self += 1;
+                        }
+                        let def_chip = (crate::fight::SWING_DEF_DMG as f32 * weight) as i32;
+                        Some((def_chip, out.fight.own_off))
+                    }
+                };
+                let Some((def_chip, off_now)) = swung else {
+                    continue;
+                };
+                self.world.players[pidx].stamina = (self.world.players[pidx].stamina - 2).max(0);
+                let str = *self.world.players[pidx].attrs.get("str").unwrap_or(&10);
+                let dmg = (5 * str / 10).max(1);
+                // Chip the victim's session defence bar; an opening
+                // (below threshold) passes the damage through and resets
+                // the bar to full, mirroring the animal-bite policy.
+                let (landed, victim_def_after) = {
+                    let Some(vout) = self.sessions.get_mut(&vsid) else {
+                        continue;
+                    };
+                    let breaking = vout.fight.own_def <= crate::fight::OPENING_THRESHOLD;
+                    vout.fight.own_def = (vout.fight.own_def - def_chip).max(0);
+                    let landed = breaking || vout.fight.own_def <= crate::fight::OPENING_THRESHOLD;
+                    if landed {
+                        vout.fight.own_def = crate::fight::BAR_FULL;
+                    }
+                    let after = vout.fight.own_def;
+                    // Mirror the attacker's pressure into the victim's
+                    // relation view (their window shows the duel live).
+                    if let Some(rel) = vout.fight.rel_mut(pgob) {
+                        rel.ip_other += 1;
+                        rel.offence = off_now;
+                    }
+                    (landed, after)
+                };
+                // The attacker's own view of the victim's defence
+                // (victim_def_after was captured before this mutable
+                // re-borrow of the attacker's session).
+                let vdef = victim_def_after;
+                if let Some(out) = self.sessions.get_mut(&sid) {
+                    if let Some(rel) = out.fight.rel_mut(target) {
+                        rel.defence = vdef;
+                    }
+                }
+                if landed {
+                    let knocked = self.hurt_player(vpidx, dmg, pgob);
+                    let vname = self.world.players[vpidx].name.clone();
+                    let aname = self.world.players[pidx].name.clone();
+                    self.chat_line(
+                        sid,
+                        &format!("You hit {vname} for {dmg} damage."),
+                        Some((192, 255, 192)),
+                    );
+                    self.chat_line(
+                        vsid,
+                        &format!("{aname} hits you for {dmg} damage."),
+                        Some((255, 128, 128)),
+                    );
+                    self.fx_overlay_broadcast(target, "gfx/fx/hit");
+                    if knocked {
+                        self.chat_line(
+                            sid,
+                            "You have defeated your target!",
+                            Some((192, 255, 192)),
+                        );
+                        // Teardown on the attacker's side; hurt_player
+                        // already reset the victim (hp, rels, target).
+                        self.world.players[pidx].fight_target = None;
+                        self.fight_del(sid, target);
+                    }
                 }
                 continue;
             }
@@ -8604,6 +8982,13 @@ impl Game {
             let (def_ac, _) = self.armor_totals(pidx);
             // Animal offence builds; swing chips the player's defence.
             let mut bite = None;
+            // The defence bar to write back after this tick (None = no
+            // swing): the chip must ACCUMULATE across bites until an
+            // opening, not reset implicitly - the local `new_def` used
+            // to be dropped, which only worked because fresh sessions
+            // started at own_def = 0 (fixed in session 39: FightState::new
+            // starts the defence FULL).
+            let mut next_def: Option<i32> = None;
             {
                 let Some(af) = self.world.animal_fights.get_mut(&id) else {
                     continue;
@@ -8618,6 +9003,7 @@ impl Game {
                     if new_def <= crate::fight::OPENING_THRESHOLD {
                         bite = Some(dmg);
                     }
+                    next_def = Some(new_def);
                 }
             }
             if let Some(dmg) = bite {
@@ -8640,6 +9026,9 @@ impl Game {
                         .get(&id)
                         .map(|f| f.def)
                         .unwrap_or(0);
+                }
+                if let Some(nd) = next_def {
+                    out.fight.own_def = nd;
                 }
                 if bite.is_some() {
                     out.fight.own_def = crate::fight::BAR_FULL;
@@ -14990,5 +15379,393 @@ mod tests {
             }
         }
         assert!(killed_seen, "lethal answer sent");
+    }
+
+    // ------------------------------------------------------------------
+    // Session 39: melee PvP between players (local + cross-node)
+    // ------------------------------------------------------------------
+
+    /// Open the melee duel through the real click path: the flower menu
+    /// carries the Fight petal, and confirming it arms the attacker,
+    /// opens the fight window on BOTH sides, and tells both players.
+    #[tokio::test]
+    async fn melee_local_fight_menu_opens_duel() {
+        let (mut g, mut rx, _raw) = entered_game("meleemenu");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let (vidx, vgob) = second_player(&mut g, "victim", None);
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let vslot = g.world.gobs.get(vgob).unwrap();
+        g.world.gobs.set_pos(vslot, (px + 20, py));
+        // Click the victim with NO bow: the flower menu opens.
+        g.player_interact(1, pgob, vgob, (0, 0));
+        let (wid, action) = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .player_menu
+            .expect("player flower menu armed");
+        assert!(
+            matches!(action, crate::party::PlayerMenu::InviteTarget(t) if t == vgob),
+            "local player clicks arm the invite menu: {action:?}"
+        );
+        // Petal 1 is Fight (petal 0 invites).
+        g.on_party_menu_choice(1, wid, 1);
+        assert_eq!(
+            g.world.players[pidx].fight_target,
+            Some(vgob),
+            "Fight petal arms the attacker"
+        );
+        // Both sides see a fight relation.
+        let attacker_rel = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .fight
+            .rel(vgob)
+            .expect("attacker relation on the victim");
+        assert_eq!(attacker_rel.defence, crate::fight::BAR_FULL);
+        let victim_rel = g
+            .sessions
+            .get(&2)
+            .unwrap()
+            .fight
+            .rel(pgob)
+            .expect("victim relation on the attacker");
+        assert_eq!(victim_rel.offence, 0, "no pressure yet");
+        // The victim has NOT been armed - answering is their choice.
+        assert_eq!(g.world.players[vidx].fight_target, None);
+        let chat = drain_chat(&mut rx);
+        assert!(
+            chat.iter().any(|t| t.contains("You attack victim")),
+            "attacker told: {chat:?}"
+        );
+        // Self-click never arms a duel even through the direct path.
+        g.world.players[pidx].fight_target = None;
+        g.start_pvp_melee(1, pgob);
+        assert_eq!(
+            g.world.players[pidx].fight_target, None,
+            "never duel yourself"
+        );
+    }
+
+    /// The openings economy runs between two players: swings chip the
+    /// victim's session defence bar, and only an opening passes damage
+    /// through to HP (armor applies, bars reset on the break).
+    #[tokio::test]
+    async fn melee_local_swings_chip_defence_until_opening() {
+        let (mut g, mut rx, _raw) = entered_game("meleechip");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let (vidx, vgob) = second_player(&mut g, "victim", None);
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let vslot = g.world.gobs.get(vgob).unwrap();
+        g.world.gobs.set_pos(vslot, (px + 20, py));
+        g.start_pvp_melee(1, vgob);
+        // Full offence bar + no cooldown: the next tick swings once.
+        g.sessions.get_mut(&1).unwrap().fight.own_off = crate::fight::BAR_FULL;
+        g.sessions.get_mut(&1).unwrap().fight.atkc = 0;
+        let stamina_before = g.world.players[pidx].stamina;
+        g.tick();
+        assert_eq!(
+            g.sessions.get(&2).unwrap().fight.own_def,
+            crate::fight::BAR_FULL - crate::fight::SWING_DEF_DMG,
+            "one swing chips the victim's defence (weight 1.0 at balance 0)"
+        );
+        assert_eq!(
+            g.world.players[vidx].hp, 100,
+            "no damage through an intact defence"
+        );
+        assert_eq!(
+            g.world.players[pidx].stamina,
+            stamina_before - 2,
+            "each swing costs stamina"
+        );
+        assert!(g
+            .sessions
+            .get(&2)
+            .unwrap()
+            .fight
+            .rel(pgob)
+            .is_some_and(|r| r.ip_other >= 1));
+        // Wear the defence to the opening threshold, then swing again:
+        // the hit lands through the opening and the bar resets.
+        let vout = g.sessions.get_mut(&2).unwrap();
+        vout.fight.own_def = crate::fight::OPENING_THRESHOLD;
+        g.sessions.get_mut(&1).unwrap().fight.own_off = crate::fight::BAR_FULL;
+        g.sessions.get_mut(&1).unwrap().fight.atkc = 0;
+        g.tick();
+        assert_eq!(
+            g.world.players[vidx].hp,
+            100 - 5,
+            "default str 10 swing deals 5 through the opening"
+        );
+        assert_eq!(
+            g.sessions.get(&2).unwrap().fight.own_def,
+            crate::fight::BAR_FULL,
+            "a landed hit resets the defence bar"
+        );
+        let chat = drain_chat(&mut rx);
+        assert!(
+            chat.iter()
+                .any(|t| t.contains("You hit victim for 5 damage.")),
+            "attacker told about the landed hit: {chat:?}"
+        );
+    }
+
+    /// A lethal swing knocks the victim out: HP resets to the knockout
+    /// floor, both fights tear down, and the attacker's chat reports
+    /// the defeat.
+    #[tokio::test]
+    async fn melee_local_lethal_swing_knocks_out() {
+        let (mut g, mut rx, _raw) = entered_game("meleeko");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let (vidx, vgob) = second_player(&mut g, "victim", None);
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let vslot = g.world.gobs.get(vgob).unwrap();
+        g.world.gobs.set_pos(vslot, (px + 20, py));
+        g.start_pvp_melee(1, vgob);
+        // The victim answers: a mutual duel.
+        g.world.players[vidx].fight_target = Some(pgob);
+        // Open defence + 3 HP: the next swing is lethal.
+        g.sessions.get_mut(&2).unwrap().fight.own_def = crate::fight::OPENING_THRESHOLD;
+        g.world.players[vidx].hp = 3;
+        g.sessions.get_mut(&1).unwrap().fight.own_off = crate::fight::BAR_FULL;
+        g.sessions.get_mut(&1).unwrap().fight.atkc = 0;
+        g.tick();
+        assert_eq!(
+            g.world.players[vidx].hp, 50,
+            "knockout resets the victim to the 50 HP floor"
+        );
+        assert_eq!(
+            g.world.players[pidx].fight_target, None,
+            "the attacker's duel ends on the knockout"
+        );
+        assert_eq!(
+            g.world.players[vidx].fight_target, None,
+            "the victim's duel ends too (hurt_player reset)"
+        );
+        assert!(
+            g.sessions.get(&2).unwrap().fight.rels.is_empty(),
+            "the victim's relations are cleared"
+        );
+        let chat = drain_chat(&mut rx);
+        assert!(
+            chat.iter().any(|t| t.contains("You have defeated")),
+            "attacker told about the knockout: {chat:?}"
+        );
+    }
+
+    /// A mutual duel swings BOTH ways: the victim (armed through the
+    /// fight window's select) chips the attacker's defence with the
+    /// identical economy.
+    #[tokio::test]
+    async fn melee_local_mutual_duel_swings_both_ways() {
+        let (mut g, _rx, _raw) = entered_game("meleemutual");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let (vidx, vgob) = second_player(&mut g, "victim", None);
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let vslot = g.world.gobs.get(vgob).unwrap();
+        g.world.gobs.set_pos(vslot, (px + 20, py));
+        g.start_pvp_melee(1, vgob);
+        // The victim answers through the fight-window select (the frv
+        // "click" path arms fight_target without a second flower menu).
+        g.on_frv_msg(2, "click", &[hnh_proto::ListArg::Int(pgob)]);
+        assert_eq!(g.world.players[vidx].fight_target, Some(pgob));
+        // Both swing on the same tick.
+        g.sessions.get_mut(&1).unwrap().fight.own_off = crate::fight::BAR_FULL;
+        g.sessions.get_mut(&1).unwrap().fight.atkc = 0;
+        g.sessions.get_mut(&2).unwrap().fight.own_off = crate::fight::BAR_FULL;
+        g.sessions.get_mut(&2).unwrap().fight.atkc = 0;
+        g.tick();
+        assert_eq!(
+            g.sessions.get(&2).unwrap().fight.own_def,
+            crate::fight::BAR_FULL - crate::fight::SWING_DEF_DMG,
+            "attacker chipped the victim's defence"
+        );
+        assert_eq!(
+            g.sessions.get(&1).unwrap().fight.own_def,
+            crate::fight::BAR_FULL - crate::fight::SWING_DEF_DMG,
+            "victim chipped the attacker's defence"
+        );
+    }
+
+    /// Cross-node duel: the Fight petal on a GUEST player arms the
+    /// relay duel, and a full-bar swing ships exactly one PvpSwing to
+    /// the victim's home node with the openings payload.
+    #[tokio::test]
+    async fn melee_relay_guest_duel_ships_pvpswing() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("meleerelay", 0, 2);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let gid = guest_player(&mut g, 20);
+        // Click the guest with no bow: the guest Fight menu opens.
+        g.player_interact(1, pgob, gid, (0, 0));
+        let (wid, action) = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .player_menu
+            .expect("guest fight menu armed");
+        assert!(
+            matches!(action, crate::party::PlayerMenu::FightTarget(t) if t == gid),
+            "guest player clicks arm the Fight-only menu: {action:?}"
+        );
+        g.on_party_menu_choice(1, wid, 0);
+        assert_eq!(
+            g.world.players[pidx].fight_target,
+            Some(gid),
+            "the relay duel arms"
+        );
+        assert!(
+            g.world.guest_fights.contains_key(&gid),
+            "the local mirror exists"
+        );
+        // Full bar: the next tick swings and ships the relay message.
+        g.sessions.get_mut(&1).unwrap().fight.own_off = crate::fight::BAR_FULL;
+        g.sessions.get_mut(&1).unwrap().fight.atkc = 0;
+        while mesh_rx.try_recv().is_ok() {}
+        g.tick();
+        let mut swings = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::PvpSwing {
+                attacker,
+                victim,
+                chip,
+                dmg,
+            } = msg
+            {
+                swings.push((attacker, victim, chip, dmg));
+            }
+        }
+        // Default str 10, weight 1.0: chip = SWING_DEF_DMG, dmg = 5.
+        assert_eq!(
+            swings,
+            vec![(pgob, gid, crate::fight::SWING_DEF_DMG, 5)],
+            "one swing = exactly one PvpSwing to the victim's home node"
+        );
+    }
+
+    /// Authority side of the relay duel: the victim's home node chips
+    /// the session defence bar, lands the HP damage through an opening
+    /// (chat + knockout), and answers PvpSwingResult so the attacker's
+    /// mirror re-syncs.
+    #[tokio::test]
+    async fn melee_relay_authority_applies_and_answers() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("meleeauth", 0, 2);
+        let (vidx, vgob) = second_player(&mut g, "victim", Some(&mut mesh_rx));
+        let attacker = foreign_node_gob_id(0, 2, 9);
+        while mesh_rx.try_recv().is_ok() {}
+        // Non-opening swing: the bar chips, no HP damage, no chat.
+        g.on_node_msg(crate::nodes::NodeMsg::PvpSwing {
+            attacker,
+            victim: vgob,
+            chip: crate::fight::SWING_DEF_DMG,
+            dmg: 5,
+        });
+        assert_eq!(
+            g.sessions.get(&2).unwrap().fight.own_def,
+            crate::fight::BAR_FULL - crate::fight::SWING_DEF_DMG,
+            "authority chips the victim's defence"
+        );
+        assert_eq!(g.world.players[vidx].hp, 100, "no opening, no damage");
+        let mut answer: Option<(i32, bool, bool)> = None;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::PvpSwingResult {
+                def,
+                landed,
+                killed,
+                ..
+            } = msg
+            {
+                answer = Some((def, landed, killed));
+            }
+        }
+        let (def, landed, killed) = answer.expect("the home node answers");
+        assert_eq!(def, crate::fight::BAR_FULL - crate::fight::SWING_DEF_DMG);
+        assert!(!landed && !killed);
+        // Opening swing: damage lands, chat tells the victim, and a
+        // lethal blow knocks out with killed=true in the answer.
+        g.world.players[vidx].hp = 3;
+        g.sessions.get_mut(&2).unwrap().fight.own_def = crate::fight::OPENING_THRESHOLD;
+        g.on_node_msg(crate::nodes::NodeMsg::PvpSwing {
+            attacker,
+            victim: vgob,
+            chip: crate::fight::SWING_DEF_DMG,
+            dmg: 5,
+        });
+        assert_eq!(g.world.players[vidx].hp, 50, "knockout floor");
+        let mut killed_seen = false;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::PvpSwingResult { landed, killed, .. } = msg {
+                assert!(landed, "the opening swing landed");
+                assert!(killed, "the knockout is reported");
+                killed_seen = true;
+            }
+        }
+        assert!(killed_seen, "lethal answer sent");
+    }
+
+    /// The attacker's node applies a PvpSwingResult: the mirror and the
+    /// fight-window relation re-sync from the authoritative bar, a
+    /// landed hit is chatted, and a knockout tears the duel down.
+    #[tokio::test]
+    async fn melee_relay_result_resyncs_and_closes_on_knockout() {
+        let (mut g, mut rx, _raw, mut mesh_rx) = clustered_game("meleeresult", 0, 2);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let gid = guest_player(&mut g, 20);
+        g.start_pvp_melee(1, gid);
+        while mesh_rx.try_recv().is_ok() {}
+        // A chip answer re-syncs the mirror and the relation view.
+        g.on_node_msg(crate::nodes::NodeMsg::PvpSwingResult {
+            attacker: pgob,
+            victim: gid,
+            def: 4321,
+            landed: false,
+            killed: false,
+        });
+        assert_eq!(g.world.guest_fights[&gid].def, 4321, "mirror re-synced");
+        assert_eq!(
+            g.sessions
+                .get(&1)
+                .unwrap()
+                .fight
+                .rel(gid)
+                .map(|r| r.defence),
+            Some(4321),
+            "the fight window sees the authoritative bar"
+        );
+        // A landed + knockout answer closes the duel.
+        g.on_node_msg(crate::nodes::NodeMsg::PvpSwingResult {
+            attacker: pgob,
+            victim: gid,
+            def: crate::fight::BAR_FULL,
+            landed: true,
+            killed: true,
+        });
+        assert_eq!(
+            g.world.players[pidx].fight_target, None,
+            "the relay duel ends on the knockout"
+        );
+        assert!(
+            !g.world.guest_fights.contains_key(&gid),
+            "the mirror row is dropped"
+        );
+        let chat = drain_chat(&mut rx);
+        assert!(
+            chat.iter().any(|t| t.contains("You hit Rival")),
+            "attacker told about the landed hit: {chat:?}"
+        );
+        assert!(
+            chat.iter().any(|t| t.contains("You have defeated")),
+            "attacker told about the knockout: {chat:?}"
+        );
     }
 }
