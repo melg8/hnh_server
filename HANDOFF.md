@@ -1617,3 +1617,27 @@ payload + relayed widget actions (the RelayStaticAct pattern again);
 planting across nodes (a player standing on node N planting INTO a
 foreign furrow) is the remaining farming gap - same relay pattern with
 a PlantCrop act carrying the seed stack.
+
+## 2026-10-06 - Session 31 (continued): cross-node planting relay
+Commit 5a77e4c + e380daa. The planting half of the farming loop now also
+crosses nodes, completing the plant->grow->harvest cycle for a player
+homed anywhere against furrows anywhere.
+- plant_seed on a foreign-cell furrow relays RelayPlantAct{player, tx,
+  ty, spec, seed_ql}; the seed stays on the cursor until PlantAck (a
+  rejected or lost hop never destroys a seed). relay_plant on the
+  authority runs the SAME validation order and state transitions as the
+  local path and answers PlantAck ok:true; refusals stay silent (cursor
+  keeps the seed, parity with a local refusal).
+- Cross-node PLOWING is deliberately deferred: plow_tile mutates grid
+  TILES, which are per-node generated + mutated state; relaying it needs
+  a TileMutation mesh broadcast + grid resend to every holder on every
+  node + persistence placement. The furrow must exist locally on the
+  tile's authority node today (bots/players on that node plow; everyone
+  else plants/harvests cross-node).
+- 154 unit tests green (3 new), clippy clean, fmt clean.
+
+NEXT (handoff): craft pagina ad->action wiring (wiki-verified numbers
+only); carrying-pose state for bows; TileMutation broadcast protocol for
+cross-node plowing/terraforming; station menus relay (station-state
+snapshot on the guest payload + relayed widget actions); load-test story
+for the sharded save at 300+ bot cohorts per node.
