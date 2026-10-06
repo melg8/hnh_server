@@ -96,7 +96,19 @@ load-1000|all)
     sleep 1
   done
   [ "$ok_boot" = 1 ] || fail "server boot"
-  sleep 75
+  # The in-process bots log in at ~12 sessions/s (TLS auth + play +
+  # world entry each); wait until the cohort settles (last reported
+  # session count stops growing or hits 980) instead of a fixed sleep.
+  SESS=0
+  for _ in $(seq 1 30); do
+    sleep 5
+    S=$(rg -o "sessions=([0-9]+)" -r '$1' "$L0" 2>/dev/null | tail -1)
+    [ -n "$S" ] || continue
+    if [ "$S" = "$SESS" ]; then break; fi
+    if [ "$S" -ge 980 ]; then SESS=$S; break; fi
+    SESS=$S
+  done
+  sleep 20   # steady-state ticks for the max_tick_us readout
   MT=$(rg -o "max_tick_us=([0-9]+)" -r '$1' "$L0" 2>/dev/null | sort -n | tail -1)
   SESS=$(rg -o "sessions=([0-9]+)" -r '$1' "$L0" 2>/dev/null | tail -1)
   echo "single node: sessions=${SESS:-0} max_tick_us=${MT:-none}"
