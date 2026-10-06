@@ -2320,6 +2320,23 @@ impl Game {
                     }
                 }
             }
+            NodeMsg::RelayPlowAct { player, tx, ty } => {
+                self.relay_plow(player, tx, ty);
+            }
+            NodeMsg::PlowAck { player, ok } => {
+                // The authority plowed the furrow: NOW the stamina leaves
+                // the player (never before the ack - a refused or lost
+                // relay costs nothing, exactly like a local refusal).
+                if !ok {
+                    return;
+                }
+                if let Some(p) = self.world.players.iter_mut().find(|p| p.gob == player) {
+                    p.stamina = (p.stamina - 10).max(0);
+                }
+            }
+            NodeMsg::TileMutation { tx, ty, tile } => {
+                self.apply_remote_tile_mutation(tx, ty, tile);
+            }
             NodeMsg::CharQuery { from, name } => {
                 // Cluster character migration, two-phase (query -> data ->
                 // ack). A peer holding the snapshot OFFLINE re-serves it on
@@ -5008,6 +5025,38 @@ impl Game {
         let gc = (tx.div_euclid(100), ty.div_euclid(100));
         let lx = tx.rem_euclid(100) as usize;
         let ly = ty.rem_euclid(100) as usize;
+        // Cluster (session 32): a tile whose cell lives on another node is
+        // plowed THERE. The tile authority owns the grid mutation, the
+        // tilth clock and the override persistence; the home node never
+        // mutates its own copy while relaying - a shadow furrow here would
+        // render on this node's clients and then desync until the
+        // authority's TileMutation broadcast arrives.
+        let tile_gob_pos = (tx * 11 + 5, ty * 11 + 5);
+        if self.is_cluster()
+            && self.cell_owner(crate::visidx::cell_of(tile_gob_pos.0, tile_gob_pos.1))
+                != self.cluster_me()
+        {
+            let player_gob = self
+                .world
+                .players
+                .iter()
+                .find(|p| p.session == sid)
+                .map(|p| p.gob);
+            if let (Some(player_gob), Some(c)) = (player_gob, self.cluster.as_ref()) {
+                let authority =
+                    self.cell_owner(crate::visidx::cell_of(tile_gob_pos.0, tile_gob_pos.1));
+                c.mesh.send(
+                    authority,
+                    crate::nodes::NodeMsg::RelayPlowAct {
+                        player: player_gob,
+                        tx,
+                        ty,
+                    },
+                );
+                debug!(sid, tx, ty, authority, "relay plow act sent");
+            }
+            return;
+        }
         let tile = self.world.grids.grid(gc).tile(lx, ly);
         if tile != tile::GRASS {
             debug!(sid, tx, ty, tile, "plow refused: not grass");
@@ -5018,15 +5067,50 @@ impl Game {
             return;
         }
         // Drain stamina (server policy; legacy plow-by-hand cost unknown).
+        // The relay path drains on the PlowAck instead (never before).
         if let Some(p) = self.world.player_mut(sid) {
             p.stamina = (p.stamina - 10).max(0);
         }
-        self.world.grids.mutate_tile(gc, lx, ly, tile::PLOWED);
+        self.mutate_tile_local(gc, lx, ly, tx, ty, tile::PLOWED);
         let now = unix_ms();
         self.world
             .tilth
             .insert((tx, ty), now + crate::farm::tilth_decay_ms());
-        // Re-send the mutated grid to every client holding it.
+        info!(sid, tx, ty, "tile plowed");
+    }
+
+    /// Apply one local-authority tile mutation end to end (session 32):
+    /// mutate the live grid (which also records the persisted override),
+    /// re-send the whole grid as fragmented MAPDATA to every local holder,
+    /// and in cluster mode broadcast TileMutation so every peer holding
+    /// this grid converges on the new tile.
+    fn mutate_tile_local(
+        &mut self,
+        gc: (i32, i32),
+        lx: usize,
+        ly: usize,
+        tx: i32,
+        ty: i32,
+        new_tile: u8,
+    ) {
+        self.world.grids.mutate_tile(gc, lx, ly, new_tile);
+        self.resend_grid_to_holders(gc);
+        if let Some(c) = self.cluster.as_ref() {
+            c.mesh.broadcast_except(
+                c.nodes.get(),
+                c.me,
+                crate::nodes::NodeMsg::TileMutation {
+                    tx,
+                    ty,
+                    tile: new_tile,
+                },
+            );
+        }
+    }
+
+    /// Re-send one grid as fragmented MAPDATA to every session holding it
+    /// (tile-mutation path; plow, decay revert, remote TileMutation).
+    fn resend_grid_to_holders(&mut self, gc: (i32, i32)) {
         let payload = {
             let grid = self.world.grids.grid(gc);
             hnh_proto::MapGridPayload {
@@ -5053,7 +5137,29 @@ impl Game {
                 }
             }
         }
-        info!(sid, tx, ty, "tile plowed");
+    }
+
+    /// Receive side of TileMutation (session 32): apply one
+    /// authority-side tile change to the local copy. A resident grid
+    /// takes the full mutation plus a MAPDATA re-send to local holders; a
+    /// non-resident grid only records the override - never materialize a
+    /// grid nobody looks at just to shadow a mutation (the next
+    /// generation replays the override anyway).
+    fn apply_remote_tile_mutation(&mut self, tx: i32, ty: i32, tile: u8) {
+        let gc = (tx.div_euclid(100), ty.div_euclid(100));
+        let lx = tx.rem_euclid(100) as usize;
+        let ly = ty.rem_euclid(100) as usize;
+        let was_resident = self.world.grids.is_resident(gc);
+        self.world.grids.note_override_maybe(gc, lx, ly, tile);
+        if was_resident {
+            self.resend_grid_to_holders(gc);
+            debug!(
+                tx,
+                ty, tile, "remote tile mutation applied to resident grid"
+            );
+        } else {
+            debug!(tx, ty, tile, "remote tile mutation recorded as override");
+        }
     }
 
     /// Plant one seed unit from the cursor on a plowed, empty tile.
@@ -5365,9 +5471,23 @@ impl Game {
             .filter(|(_, &deadline)| deadline != 0 && deadline <= now)
             .map(|(t, _)| *t)
             .collect();
-        for tile in expired {
-            self.world.tilth.remove(&tile);
-            debug!(tx = tile.0, ty = tile.1, "tilth decayed");
+        for tile_coord in expired {
+            self.world.tilth.remove(&tile_coord);
+            // Session 32: an expired furrow reverts its tile to GRASS - the
+            // live grid, the persisted override (mutate_tile records it),
+            // every local holder (MAPDATA re-send) and, in cluster mode,
+            // every peer holding the grid (TileMutation broadcast). Before
+            // this the tile stayed PLOWED forever: it could never be
+            // re-plowed (not grass) nor planted (no tilth) - a dead end.
+            let (tx, ty) = tile_coord;
+            let gc = (tx.div_euclid(100), ty.div_euclid(100));
+            let lx = tx.rem_euclid(100) as usize;
+            let ly = ty.rem_euclid(100) as usize;
+            let cur = self.world.grids.grid(gc).tile(lx, ly);
+            if cur == tile::PLOWED {
+                self.mutate_tile_local(gc, lx, ly, tx, ty, tile::GRASS);
+            }
+            debug!(tx = tile_coord.0, ty = tile_coord.1, "tilth decayed");
         }
     }
 
@@ -7650,6 +7770,48 @@ impl Game {
                 .send(home, crate::nodes::NodeMsg::PlantAck { player, ok: true });
         }
         info!(gob, tx, ty, spec = spec_data.gob_res, "relay plant applied");
+    }
+
+    /// Authority-side application of a relayed plow act (session 32). The
+    /// tile's grid state is authoritative HERE: validate against this
+    /// node's own grid, mutate (override recorded for persistence), start
+    /// the tilth clock, answer PlowAck - the home node drains the stamina
+    /// only on the ok ack, exactly like a local plow drains it at act
+    /// time - and broadcast TileMutation so every peer holding the grid
+    /// renders the furrow. Refusals answer PlowAck ok=false (silent on
+    /// the home side, parity with a local refusal).
+    fn relay_plow(&mut self, player: GobId, tx: i32, ty: i32) {
+        let gc = (tx.div_euclid(100), ty.div_euclid(100));
+        let lx = tx.rem_euclid(100) as usize;
+        let ly = ty.rem_euclid(100) as usize;
+        let tile = self.world.grids.grid(gc).tile(lx, ly);
+        if tile != tile::GRASS {
+            debug!(tx, ty, tile, "relay plow refused: not grass");
+            self.answer_plow(player, false);
+            return;
+        }
+        if self.world.crop_at.contains_key(&(tx, ty)) {
+            debug!(tx, ty, "relay plow refused: tile occupied");
+            self.answer_plow(player, false);
+            return;
+        }
+        self.mutate_tile_local(gc, lx, ly, tx, ty, tile::PLOWED);
+        let now = unix_ms();
+        self.world
+            .tilth
+            .insert((tx, ty), now + crate::farm::tilth_decay_ms());
+        self.answer_plow(player, true);
+        info!(tx, ty, "relay plow applied");
+    }
+
+    /// Unicast PlowAck to the acting player's home node (no-op without a
+    /// cluster; the local path never goes through here).
+    fn answer_plow(&mut self, player: GobId, ok: bool) {
+        if let Some(c) = self.cluster.as_ref() {
+            let home = self.node_of_gob(player);
+            c.mesh
+                .send(home, crate::nodes::NodeMsg::PlowAck { player, ok });
+        }
     }
 
     /// Authority-side application of a relayed static interaction
@@ -11524,5 +11686,278 @@ mod tests {
             g.sessions.get(&1).unwrap().cursor.as_ref().map(|c| c.count),
             Some(2)
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Session 32: cross-node plowing (TileMutation), tilth decay revert
+    // ------------------------------------------------------------------
+
+    /// Find a grass tile whose tile-center VisIndex cell is owned by `me`
+    /// in a `nodes`-node cluster, near `from`. Probes a widening strip of
+    /// tiles from `from` until both conditions hold (ownership is a per-
+    /// cell hash, grass a per-tile roll; both are deterministic).
+    fn grass_tile_on_cell(g: &mut Game, from: (i32, i32), me: usize, nodes: usize) -> (i32, i32) {
+        let nz = std::num::NonZeroUsize::new(nodes).expect("nodes");
+        let base = (from.0.div_euclid(11), from.1.div_euclid(11));
+        for dy in -40..=40i32 {
+            for dx in -40..=40i32 {
+                let (tx, ty) = (base.0 + dx, base.1 + dy);
+                let cell = crate::visidx::cell_of(tx * 11 + 5, ty * 11 + 5);
+                if crate::grid_owner::owner_of(cell, nz) != me {
+                    continue;
+                }
+                let gc = (tx.div_euclid(100), ty.div_euclid(100));
+                let lx = tx.rem_euclid(100) as usize;
+                let ly = ty.rem_euclid(100) as usize;
+                if g.world.grids.grid(gc).tile(lx, ly) == tile::GRASS {
+                    return (tx, ty);
+                }
+            }
+        }
+        panic!("no grass tile on my cells near {from:?}");
+    }
+
+    #[tokio::test]
+    async fn foreign_plow_ships_relay_act_without_local_mutation() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("plowrelay", 0, 2);
+        let nz = std::num::NonZeroUsize::new(2).unwrap();
+        // A tile whose tile-center cell is foreign, materialized locally
+        // BEFORE the act (the realistic case: the player is looking at it).
+        let base = foreign_cell_pos(&g, 0);
+        let (mut tx, mut ty) = (base.0.div_euclid(11), base.1.div_euclid(11));
+        for d in 0..40 {
+            let cand = (base.0.div_euclid(11) + d, base.1.div_euclid(11));
+            let c = crate::visidx::cell_of(cand.0 * 11 + 5, cand.1 * 11 + 5);
+            if crate::grid_owner::owner_of(c, nz) != 0 {
+                tx = cand.0;
+                ty = cand.1;
+                break;
+            }
+        }
+        let gc = (tx.div_euclid(100), ty.div_euclid(100));
+        let lx = tx.rem_euclid(100) as usize;
+        let ly = ty.rem_euclid(100) as usize;
+        let before = g.world.grids.grid(gc).tile(lx, ly);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let stamina_before = g.world.players[pidx].stamina;
+        g.plow_tile(1, (tx, ty));
+        // The act shipped to the authority (the foreign cell owner)...
+        let mut relayed = false;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::RelayPlowAct {
+                player,
+                tx: mtx,
+                ty: mty,
+            } = msg
+            {
+                assert_eq!(player, pgob);
+                assert_eq!((mtx, mty), (tx, ty));
+                relayed = true;
+            }
+        }
+        assert!(relayed, "a foreign tile click relays the plow act");
+        // ...and NOTHING mutated locally: no tilth clock, no override, no
+        // stamina drain, the live tile value is untouched.
+        assert!(!g.world.tilth.contains_key(&(tx, ty)), "no shadow tilth");
+        assert!(
+            !g.world.grids.overrides.contains_key(&(tx, ty)),
+            "no shadow override"
+        );
+        assert_eq!(
+            g.world.grids.grid(gc).tile(lx, ly),
+            before,
+            "no shadow furrow in the local grid"
+        );
+        assert_eq!(
+            g.world.players[pidx].stamina, stamina_before,
+            "stamina drains only on the PlowAck"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_plow_plows_authority_broadcasts_and_acks() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("relayplow", 0, 2);
+        let clicker = foreign_node_gob_id(0, 2, 61);
+        // A grass tile on THIS node's cells near the player.
+        let pslot = g.world.gobs.get(pgob_of(&g)).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let (tx, ty) = grass_tile_on_cell(&mut g, (px, py), 0, 2);
+        let gc = (tx.div_euclid(100), ty.div_euclid(100));
+        let lx = tx.rem_euclid(100) as usize;
+        let ly = ty.rem_euclid(100) as usize;
+        g.on_node_msg(crate::nodes::NodeMsg::RelayPlowAct {
+            player: clicker,
+            tx,
+            ty,
+        });
+        // The furrow exists on the authority: tile, override, tilth clock.
+        assert_eq!(g.world.grids.grid(gc).tile(lx, ly), tile::PLOWED);
+        assert_eq!(g.world.grids.overrides.get(&(tx, ty)), Some(&tile::PLOWED));
+        assert!(g.world.tilth.contains_key(&(tx, ty)));
+        // The authority answered PlowAck ok and broadcast TileMutation.
+        let (mut acks_ok, mut mutations) = (0, 0);
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            match msg {
+                crate::nodes::NodeMsg::PlowAck { player, ok } => {
+                    assert_eq!((player, ok), (clicker, true));
+                    acks_ok += 1;
+                }
+                crate::nodes::NodeMsg::TileMutation {
+                    tx: mtx,
+                    ty: mty,
+                    tile,
+                } => {
+                    assert_eq!((mtx, mty, tile), (tx, ty, tile::PLOWED));
+                    mutations += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(acks_ok, 1, "exactly one ok PlowAck");
+        assert_eq!(mutations, 1, "exactly one TileMutation broadcast");
+        // A second act on the now-plowed tile is refused (not grass): a
+        // failure ack, no second mutation, the tilth clock is untouched.
+        g.on_node_msg(crate::nodes::NodeMsg::RelayPlowAct {
+            player: clicker,
+            tx,
+            ty,
+        });
+        let (mut fail_acks, mut more_mutations) = (0, 0);
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            match msg {
+                crate::nodes::NodeMsg::PlowAck { ok: false, .. } => fail_acks += 1,
+                crate::nodes::NodeMsg::TileMutation { .. } => more_mutations += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(fail_acks, 1, "the re-plow of a furrow fails loudly");
+        assert_eq!(more_mutations, 0, "a refusal broadcasts nothing");
+    }
+
+    #[tokio::test]
+    async fn plow_ack_drains_stamina_exactly_once() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("plowack", 0, 2);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let before = g.world.players[pidx].stamina;
+        g.on_node_msg(crate::nodes::NodeMsg::PlowAck {
+            player: pgob,
+            ok: true,
+        });
+        assert_eq!(
+            g.world.players[pidx].stamina,
+            before.saturating_sub(10),
+            "one ok ack drains exactly one plow's stamina"
+        );
+        // A failure ack (and an ack for an unknown player) drains nothing.
+        g.on_node_msg(crate::nodes::NodeMsg::PlowAck {
+            player: pgob,
+            ok: false,
+        });
+        g.on_node_msg(crate::nodes::NodeMsg::PlowAck {
+            player: foreign_node_gob_id(0, 2, 71),
+            ok: true,
+        });
+        assert_eq!(g.world.players[pidx].stamina, before.saturating_sub(10));
+    }
+
+    #[tokio::test]
+    async fn tile_mutation_resident_and_nonresident_paths() {
+        let (mut g, _rx, mut raw_rx, _mesh) = clustered_game("tilemut", 0, 2);
+        // Resident path: the session holds the player's grid (an explicit
+        // map request), then a TileMutation for a tile inside it mutates
+        // the live grid and re-sends MAPDATA to the holder.
+        let pslot = g.world.gobs.get(pgob_of(&g)).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let (tx, ty) = (px.div_euclid(11), py.div_euclid(11));
+        let gc = (tx.div_euclid(100), ty.div_euclid(100));
+        let (lx, ly) = (tx.rem_euclid(100) as usize, ty.rem_euclid(100) as usize);
+        g.on_mapreq(1, gc);
+        let sent_first = raw_rx.try_recv().is_ok();
+        assert!(sent_first, "on_mapreq fragments reach the raw channel");
+        while raw_rx.try_recv().is_ok() {}
+        assert!(g.world.grids.is_resident(gc));
+        g.on_node_msg(crate::nodes::NodeMsg::TileMutation {
+            tx,
+            ty,
+            tile: tile::PLOWED,
+        });
+        assert_eq!(g.world.grids.grid(gc).tile(lx, ly), tile::PLOWED);
+        let mut resent = 0;
+        while let Ok(block) = raw_rx.try_recv() {
+            if block[0] == MSG_MAPDATA {
+                resent += 1;
+            }
+        }
+        assert!(resent >= 1, "the holder receives a fresh MAPDATA stream");
+        // Non-resident path: a far grid nobody looks at only records the
+        // override; it is never materialized and nothing is re-sent.
+        g.on_node_msg(crate::nodes::NodeMsg::TileMutation {
+            tx: 907,
+            ty: 907,
+            tile: tile::PLOWED,
+        });
+        assert!(!g.world.grids.is_resident((9, 9)));
+        assert_eq!(
+            g.world.grids.overrides.get(&(907, 907)),
+            Some(&tile::PLOWED)
+        );
+        assert!(
+            raw_rx.is_empty(),
+            "a non-resident mutation re-sends nothing"
+        );
+        // Later materialization replays the override.
+        assert_eq!(g.world.grids.grid((9, 9)).tile(7, 7), tile::PLOWED);
+    }
+
+    #[tokio::test]
+    async fn tilth_decay_reverts_furrow_to_grass_and_broadcasts() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("decayrevert", 0, 2);
+        let pslot = g.world.gobs.get(pgob_of(&g)).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let (tx, ty) = grass_tile_on_cell(&mut g, (px, py), 0, 2);
+        let gc = (tx.div_euclid(100), ty.div_euclid(100));
+        let (lx, ly) = (tx.rem_euclid(100) as usize, ty.rem_euclid(100) as usize);
+        // Local plow on my own cell: furrow + tilth clock + broadcast.
+        g.plow_tile(1, (tx, ty));
+        assert_eq!(g.world.grids.grid(gc).tile(lx, ly), tile::PLOWED);
+        assert!(g.world.tilth.contains_key(&(tx, ty)));
+        let mut mutations = 0;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::TileMutation { tile, .. } = msg {
+                assert_eq!(tile, tile::PLOWED);
+                mutations += 1;
+            }
+        }
+        assert_eq!(mutations, 1, "the local plow also broadcasts");
+        // Force the deadline into the past and run the farming pass.
+        g.world.tilth.insert((tx, ty), 1);
+        for _ in 0..3 {
+            g.tick();
+        }
+        assert!(!g.world.tilth.contains_key(&(tx, ty)), "tilth decayed");
+        assert_eq!(
+            g.world.grids.grid(gc).tile(lx, ly),
+            tile::GRASS,
+            "the furrow reverted to grass"
+        );
+        assert_eq!(
+            g.world.grids.overrides.get(&(tx, ty)),
+            Some(&tile::GRASS),
+            "the persisted override reverted too"
+        );
+        let mut reverts = 0;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::TileMutation { tile, .. } = msg {
+                assert_eq!(tile, tile::GRASS);
+                reverts += 1;
+            }
+        }
+        assert_eq!(reverts, 1, "the decay revert broadcasts to peers");
+        // The tile is re-plowable: no stuck-furrow dead end.
+        g.plow_tile(1, (tx, ty));
+        assert_eq!(g.world.grids.grid(gc).tile(lx, ly), tile::PLOWED);
+        assert!(g.world.tilth.contains_key(&(tx, ty)));
     }
 }

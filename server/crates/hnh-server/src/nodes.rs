@@ -261,6 +261,27 @@ pub enum NodeMsg {
     /// consumes one seed unit from the cursor (never before the ack -
     /// a rejected or lost relay must not destroy the seed).
     PlantAck { player: i32, ok: bool },
+    /// Cross-node plowing (session 32), home -> authority. The player
+    /// aimed a plow at a grass tile whose cell is owned by the receiver;
+    /// the TILE state is authoritative THERE (the home node never mutates
+    /// its own grid while relaying, so no shadow furrow can desync the
+    /// views). The receiver validates against its own grid, mutates,
+    /// answers PlowAck and broadcasts TileMutation to every peer.
+    RelayPlowAct { player: i32, tx: i32, ty: i32 },
+    /// Authority -> home: the result of a RelayPlowAct. `ok = false`
+    /// (not grass / occupied by a crop) is silent on the home side: no
+    /// stamina drain, parity with a local refusal. A lost ack costs the
+    /// player nothing (retry works; the act is idempotent on the
+    /// authority: a second plow of a now-PLOWED tile is refused by the
+    /// not-grass check).
+    PlowAck { player: i32, ok: bool },
+    /// Authority -> every peer: one tile mutation landed (plow or the
+    /// tilth-decay revert to grass). Every node holding that grid
+    /// applies the tile to its local copy, re-sends MAPDATA to its local
+    /// holders, and records the override so a later materialization
+    /// replays it. Non-resident grids only record the override (no
+    /// materialization just to shadow a mutation nobody looks at).
+    TileMutation { tx: i32, ty: i32, tile: u8 },
     /// Cluster character migration (session 29). A node about to enter a
     /// player whose save key it does not hold broadcasts this query. A
     /// peer holding the snapshot offline answers CharData (re-serving it
@@ -641,6 +662,9 @@ fn msg_name(msg: &NodeMsg) -> &'static str {
         NodeMsg::StaticAck { .. } => "static_ack",
         NodeMsg::RelayPlantAct { .. } => "relay_plant_act",
         NodeMsg::PlantAck { .. } => "plant_ack",
+        NodeMsg::RelayPlowAct { .. } => "relay_plow_act",
+        NodeMsg::PlowAck { .. } => "plow_ack",
+        NodeMsg::TileMutation { .. } => "tile_mutation",
         NodeMsg::FightBars { .. } => "fight_bars",
         NodeMsg::CharQuery { .. } => "char_query",
         NodeMsg::CharData { .. } => "char_data",

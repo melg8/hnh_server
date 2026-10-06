@@ -107,6 +107,27 @@ impl GridStore {
         Some(new_grid)
     }
 
+    /// Record a remote tile mutation (cluster TileMutation). If the grid
+    /// is resident, this is a full `mutate_tile` (live copy + override).
+    /// If it is NOT resident, only the override is recorded - never
+    /// materialize a grid nobody looks at just to shadow a mutation;
+    /// the next `grid(gc)` generation replays the override anyway.
+    pub fn note_override_maybe(&mut self, gc: (i32, i32), x: usize, y: usize, tile: u8) {
+        if self.grids.contains_key(&gc) {
+            self.mutate_tile(gc, x, y, tile);
+        } else {
+            let tx = gc.0 * 100 + x as i32;
+            let ty = gc.1 * 100 + y as i32;
+            self.overrides.insert((tx, ty), tile);
+        }
+    }
+
+    /// True when `gc` is currently resident (used by callers that want to
+    /// know whether a mutation touched a live copy or only the overlay).
+    pub fn is_resident(&self, gc: (i32, i32)) -> bool {
+        self.grids.contains_key(&gc)
+    }
+
     fn evict(&mut self) {
         // Drop the least recently used quarter.
         let mut order: Vec<((i32, i32), u64)> =
@@ -132,5 +153,33 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(&a, &b));
         let g = s.mutate_tile((0, 0), 0, 0, 9).unwrap();
         assert_eq!(g.tile(0, 0), 9);
+    }
+
+    #[test]
+    fn note_override_maybe_resident_vs_not() {
+        let mut s = GridStore::new(42);
+        // The pure generated value for the same seed, read BEFORE any
+        // override exists (determinism anchor for the last assertion).
+        let pure_val = GridStore::new(42).grid((5, -7)).tile(3, 4);
+        // Non-resident grid: only the override is recorded; nothing is
+        // materialized and no live copy exists.
+        s.note_override_maybe((5, -7), 3, 4, 8);
+        assert!(
+            !s.is_resident((5, -7)),
+            "no materialization on a remote note"
+        );
+        assert_eq!(s.overrides.get(&(5 * 100 + 3, -7 * 100 + 4)), Some(&8));
+        // Materializing later replays the override on top of the pure
+        // generation (tile 8 must win over the generated value).
+        let g = s.grid((5, -7));
+        assert_eq!(g.tile(3, 4), 8);
+        assert!(s.is_resident((5, -7)));
+        // Resident grid: full mutation - live copy AND override.
+        s.note_override_maybe((5, -7), 3, 4, 2);
+        assert_eq!(s.grid((5, -7)).tile(3, 4), 2);
+        assert_eq!(s.overrides.get(&(5 * 100 + 3, -7 * 100 + 4)), Some(&2));
+        // A fresh store with the same seed still regenerates the pure
+        // value (overrides never leak into other stores by seed alone).
+        assert_eq!(GridStore::new(42).grid((5, -7)).tile(3, 4), pure_val);
     }
 }
