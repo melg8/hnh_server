@@ -2283,6 +2283,52 @@ impl Game {
                     self.fx_overlay_broadcast(player_gob, "gfx/fx/bite");
                 }
             }
+            NodeMsg::PvpArrow {
+                victim,
+                attacker,
+                dmg,
+            } => {
+                // Cross-node PvP arrow (session 38): one of MY session
+                // players was hit by a foreign archer. Armor absorption,
+                // HP and the knockout path live here (the same
+                // hurt_player authority split as PlayerHurt); the
+                // shooter's node gets the outcome back so its chat can
+                // report the defeat.
+                if let Some(pidx) = self.world.players.iter().position(|p| p.gob == victim) {
+                    tracing::debug!(victim, attacker, dmg, "pvp arrow applied");
+                    let vsid = self.world.players[pidx].session;
+                    let knocked = self.hurt_player(pidx, dmg, attacker);
+                    self.chat_line(
+                        vsid,
+                        &format!("An arrow hits you for {dmg} damage."),
+                        Some((255, 128, 128)),
+                    );
+                    self.fx_overlay_broadcast(victim, "gfx/fx/hit");
+                    if let Some(c) = self.cluster.as_ref() {
+                        let home = self.node_of_gob(attacker);
+                        c.mesh.send(
+                            home,
+                            crate::nodes::NodeMsg::PvpArrowResult {
+                                shooter: attacker,
+                                killed: knocked,
+                            },
+                        );
+                    }
+                }
+            }
+            NodeMsg::PvpArrowResult { shooter, killed } => {
+                // The victim's home node answered my shot.
+                if let Some(p) = self.world.players.iter().find(|p| p.gob == shooter) {
+                    if killed {
+                        let sid = p.session;
+                        self.chat_line(
+                            sid,
+                            "You have defeated your target!",
+                            Some((192, 255, 192)),
+                        );
+                    }
+                }
+            }
             NodeMsg::KillCredit { player_gob, lp } => {
                 if let Some(p) = self.world.players.iter_mut().find(|p| p.gob == player_gob) {
                     p.lp += lp;
@@ -4075,7 +4121,17 @@ impl Game {
                             return;
                         }
                     }
-                    crate::nodes::GuestKind::Player { .. } => {}
+                    // PvP archery (session 38): a bow carrier aims at a
+                    // cross-node player; the hit roll stays here (aim is
+                    // session state) and the damage relays to the VICTIM's
+                    // home node, whose hurt_player path owns armor/HP/
+                    // knockout. Without a bow there is no remote
+                    // party-invite relay yet - the click falls through.
+                    crate::nodes::GuestKind::Player { .. } => {
+                        if self.start_aim(sid, target) {
+                            return;
+                        }
+                    }
                 }
             }
             trace!(sid, target, "interact target gone");
@@ -4189,6 +4245,14 @@ impl Game {
                 self.system_line(sid, &format!("A fine {} stands here.", buildable.id));
             }
             Kind::Player { .. } => {
+                // PvP archery (session 38): a bow carrier takes the
+                // ranged path against a player target (self-clicks are
+                // refused inside start_aim and fall through to the
+                // party menu, which also ignores them). Without a bow
+                // the click stays the party-invite menu.
+                if self.start_aim(sid, target) {
+                    return;
+                }
                 self.open_party_invite_menu(sid, target);
             }
         }
@@ -4752,6 +4816,11 @@ impl Game {
     /// out of melee engagements entirely, matching the legacy split
     /// between the Shoot action and the openings fight.
     fn start_aim(&mut self, sid: SessionId, target: GobId) -> bool {
+        // PvP guard (session 38): never aim at yourself - the click
+        // falls through to the caller's default path (the party menu).
+        if self.world.player(sid).map(|p| p.gob) == Some(target) {
+            return false;
+        }
         let bow_gidx = self.world.res.intern("gfx/invobjs/bow");
         let found = self.world.player(sid).and_then(|p| {
             p.equip
@@ -4917,38 +4986,76 @@ impl Game {
         // liveness come from the guest table; the damage rides a
         // RelayAttack (chip 0 = ranged, bypasses the openings gate on
         // the authority side) instead of the local damage path.
+        // Session 38: player targets (local Kind::Player, guest
+        // GuestKind::Player) resolve to the PvP path - the victim's
+        // armor/HP/knockout live on ITS home node (hurt_player), so a
+        // cross-node hit rides a PvpArrow there.
+        enum ShotTarget {
+            Animal {
+                species: Species,
+                slot: Option<usize>,
+            },
+            Player {
+                name: String,
+                pidx: Option<usize>,
+            },
+        }
         let guest = self.world.guests.get(&target).cloned();
-        let (species, tpos, tslot) = match &guest {
-            Some(g) => {
-                let species = match g.kind {
-                    crate::nodes::GuestKind::Animal { species } => {
-                        match Species::from_index(species) {
-                            Some(sp) => sp,
-                            None => {
-                                self.world.players[pidx].aim = None;
-                                return;
-                            }
+        let (tgt, tpos) = match &guest {
+            Some(g) => match &g.kind {
+                crate::nodes::GuestKind::Animal { species } => {
+                    match Species::from_index(*species) {
+                        Some(sp) => (
+                            ShotTarget::Animal {
+                                species: sp,
+                                slot: None,
+                            },
+                            g.pos,
+                        ),
+                        None => {
+                            self.world.players[pidx].aim = None;
+                            return;
                         }
                     }
+                }
+                crate::nodes::GuestKind::Player { name, .. } => (
+                    ShotTarget::Player {
+                        name: name.clone(),
+                        pidx: None,
+                    },
+                    g.pos,
+                ),
+                _ => {
+                    self.world.players[pidx].aim = None;
+                    return;
+                }
+            },
+            None => match self.world.gobs.get(target) {
+                Some(s) => match self.world.gobs.kind[s] {
+                    crate::state::Kind::Animal { species } => (
+                        ShotTarget::Animal {
+                            species,
+                            slot: Some(s),
+                        },
+                        self.world.gobs.pos[s],
+                    ),
+                    crate::state::Kind::Player { player } => (
+                        ShotTarget::Player {
+                            name: self
+                                .world
+                                .players
+                                .get(player)
+                                .map(|p| p.name.clone())
+                                .unwrap_or_default(),
+                            pidx: Some(player),
+                        },
+                        self.world.gobs.pos[s],
+                    ),
                     _ => {
                         self.world.players[pidx].aim = None;
                         return;
                     }
-                };
-                (species, g.pos, None)
-            }
-            None => match self.world.gobs.get(target) {
-                Some(s) => (
-                    match self.world.gobs.kind[s] {
-                        crate::state::Kind::Animal { species } => species,
-                        _ => {
-                            self.world.players[pidx].aim = None;
-                            return;
-                        }
-                    },
-                    self.world.gobs.pos[s],
-                    Some(s),
-                ),
+                },
                 None => {
                     self.world.players[pidx].aim = None;
                     return;
@@ -4970,32 +5077,93 @@ impl Game {
         let chance = crate::archery::hit_chance(dist, marks);
         let dmg = crate::archery::bow_damage(aim.bow_ql);
         if roll < chance as u32 {
-            self.chat_line(
-                sid,
-                &format!("Your arrow hits the {} for {dmg} damage.", species.name()),
-                Some((192, 255, 192)),
-            );
-            match (guest.is_some(), tslot) {
-                (true, _) => {
-                    // Cross-node shot: the authority applies the damage
-                    // (chip 0 marks the ranged bypass).
+            // Destructure the target into plain data first: the
+            // damage paths below need &mut self.
+            let (is_player, tname, vidx) = match &tgt {
+                ShotTarget::Animal { species, .. } => (false, species.name().to_string(), None),
+                ShotTarget::Player { name, pidx, .. } => (true, name.clone(), *pidx),
+            };
+            match vidx {
+                // LOCAL PvP shot: armor absorption, HP and the
+                // knockout path all live on this node.
+                Some(vidx) => {
+                    let vsid = self.world.players[vidx].session;
+                    let knocked = self.hurt_player(vidx, dmg, self.world.players[pidx].gob);
+                    self.fx_overlay_broadcast(target, "gfx/fx/hit");
+                    self.chat_line(
+                        vsid,
+                        &format!("An arrow hits you for {dmg} damage."),
+                        Some((255, 128, 128)),
+                    );
+                    self.chat_line(
+                        sid,
+                        &format!("Your arrow hits {tname} for {dmg} damage."),
+                        Some((192, 255, 192)),
+                    );
+                    if knocked {
+                        self.chat_line(
+                            sid,
+                            &format!("You have defeated {tname}!"),
+                            Some((192, 255, 192)),
+                        );
+                    }
+                }
+                None if is_player => {
+                    // CROSS-NODE PvP shot: the hit roll already happened
+                    // here; the victim's armor/HP/knockout live on ITS
+                    // home node (node_of_gob from the gob id).
+                    self.chat_line(
+                        sid,
+                        &format!("Your arrow hits {tname} for {dmg} damage."),
+                        Some((192, 255, 192)),
+                    );
                     if let Some(c) = self.cluster.as_ref() {
-                        let authority = self.cell_owner(crate::visidx::cell_of(tpos.0, tpos.1));
+                        let home = self.node_of_gob(target);
                         c.mesh.send(
-                            authority,
-                            crate::nodes::NodeMsg::RelayAttack {
+                            home,
+                            crate::nodes::NodeMsg::PvpArrow {
+                                victim: target,
                                 attacker: self.world.players[pidx].gob,
-                                target,
-                                chip: 0,
                                 dmg,
                             },
                         );
                     }
                 }
-                (false, Some(ts)) => {
-                    self.damage_animal(pidx, sid, target, ts, dmg);
+                _ => {
+                    // Animal target. Cross-node shot: the authority
+                    // applies the damage (chip 0 marks the ranged
+                    // bypass).
+                    self.chat_line(
+                        sid,
+                        &format!("Your arrow hits the {tname} for {dmg} damage."),
+                        Some((192, 255, 192)),
+                    );
+                    let tslot = match &tgt {
+                        ShotTarget::Animal { slot, .. } => *slot,
+                        ShotTarget::Player { .. } => None,
+                    };
+                    match (guest.is_some(), tslot) {
+                        (true, _) => {
+                            if let Some(c) = self.cluster.as_ref() {
+                                let authority =
+                                    self.cell_owner(crate::visidx::cell_of(tpos.0, tpos.1));
+                                c.mesh.send(
+                                    authority,
+                                    crate::nodes::NodeMsg::RelayAttack {
+                                        attacker: self.world.players[pidx].gob,
+                                        target,
+                                        chip: 0,
+                                        dmg,
+                                    },
+                                );
+                            }
+                        }
+                        (false, Some(ts)) => {
+                            self.damage_animal(pidx, sid, target, ts, dmg);
+                        }
+                        (false, None) => {}
+                    }
                 }
-                (false, None) => {}
             }
         } else {
             self.chat_line(sid, "Your arrow misses.", Some((255, 200, 128)));
@@ -9224,8 +9392,11 @@ impl Game {
         (def, abs)
     }
 
-    /// Apply animal damage to a player (health quarters stream too).
-    fn hurt_player(&mut self, pidx: usize, dmg: i32, from: GobId) {
+    /// Apply HP damage to a session player after armor absorption.
+    /// Returns true when the hit knocked the victim out (the knockout
+    /// reset happened inside - session 38 PvP arrows use the flag for
+    /// the shooter's chat feedback).
+    fn hurt_player(&mut self, pidx: usize, dmg: i32, from: GobId) -> bool {
         let sid = self.world.players[pidx].session;
         let pgob = self.world.players[pidx].gob;
         // Equipment absorption shrinks the damage that reaches HP
@@ -9251,7 +9422,7 @@ impl Game {
             // live in the guest mirror); close that mirror too.
             self.world.guest_fights.remove(&from);
             info!(sid, from, "player knocked out by animal");
-            return;
+            return true;
         }
         if let Some(out) = self.sessions.get_mut(&sid) {
             let mut m = MessageBuf::new();
@@ -9264,6 +9435,7 @@ impl Game {
                 .uint8(OD_END);
             out.send_raw(m.finish());
         }
+        false
     }
 
     fn tick_vitals(&mut self) {
@@ -14532,5 +14704,291 @@ mod tests {
         let _ = hp0;
         // The kill cleared the fight teardown state.
         assert_eq!(g.world.players[pidx].fight_target, None);
+    }
+
+    // ------------------------------------------------------------------
+    // PvP archery (session 38)
+    // ------------------------------------------------------------------
+
+    /// Enter a SECOND local session player (sid 2) and return
+    /// (player index, gob). Both players spawn at the world spawn.
+    /// In cluster mode pass the mesh receiver so the character-
+    /// migration query can be answered with nacks (the same trick
+    /// `clustered_game` plays for the FIRST player).
+    fn second_player(
+        g: &mut Game,
+        name: &str,
+        mut mesh: Option<&mut tokio::sync::mpsc::UnboundedReceiver<(usize, crate::nodes::NodeMsg)>>,
+    ) -> (usize, GobId) {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw_tx, _raw_rx) = tokio::sync::mpsc::channel(512);
+        g.session_connected(2, "acct2".to_owned(), tx, raw_tx);
+        let wid = g
+            .sessions
+            .get(&2)
+            .unwrap()
+            .widgets
+            .iter()
+            .find(|(_, t)| t.as_str() == "charlist")
+            .map(|(k, _)| *k)
+            .expect("charlist widget");
+        g.on_wdgmsg(
+            2,
+            wid,
+            "play",
+            vec![hnh_proto::ListArg::Str(name.to_owned())],
+        );
+        // Cluster: answer the character-migration query with nacks
+        // from every peer so the world entry completes in one local
+        // round (the clustered_game setup does the same for sid 1).
+        if g.cluster.is_some() {
+            if let Some(mesh) = mesh.as_mut() {
+                let nodes = g.cluster.as_ref().map(|c| c.nodes.get()).unwrap_or(0);
+                let me = g.cluster.as_ref().map(|c| c.me).unwrap_or(0);
+                let mut names: Vec<String> = Vec::new();
+                while let Ok((_, msg)) = mesh.try_recv() {
+                    if let crate::nodes::NodeMsg::CharQuery { name, .. } = msg {
+                        names.push(name);
+                    }
+                }
+                for name in names {
+                    for peer in 0..nodes {
+                        if peer != me {
+                            g.on_node_msg(crate::nodes::NodeMsg::CharNack {
+                                to: me,
+                                from: peer,
+                                name: name.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        g.tick();
+        let pidx = *g.world.by_session.get(&2).expect("second player entered");
+        (pidx, g.world.players[pidx].gob)
+    }
+
+    /// Announce a cross-node GUEST player at Chebyshev distance `dx`
+    /// from the local session player and return its guest gob id.
+    fn guest_player(g: &mut Game, dx: i32) -> GobId {
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let gid = foreign_node_gob_id(0, 2, 7);
+        g.on_node_msg(crate::nodes::NodeMsg::GuestAnnounce(
+            crate::nodes::GuestState {
+                id: gid,
+                pos: (px + dx, py),
+                mv: None,
+                moving: false,
+                facing: 0,
+                kind: crate::nodes::GuestKind::Player {
+                    name: "Rival".to_owned(),
+                    equip: Vec::new(),
+                },
+                hp: 100,
+                max_hp: 100,
+                speed: 33,
+            },
+        ));
+        g.tick();
+        gid
+    }
+
+    /// Collect every chat "log" line queued for the test session.
+    fn drain_chat(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<String> {
+        let mut seen = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let Some(text) = chat_log_text(&msg) {
+                seen.push(text);
+            }
+        }
+        seen
+    }
+
+    /// Clicking another LOCAL player with an equipped bow opens the
+    /// ranged aim (PvP), not the party-invite menu; without a bow the
+    /// click keeps the party menu path, and a self-click never aims.
+    #[tokio::test]
+    async fn pvp_bow_click_opens_aim_not_party_menu() {
+        let (mut g, _rx, _raw) = entered_game("pvpaim");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        arm_bow(&mut g, pidx, 10, 10);
+        let (vidx, vgob) = second_player(&mut g, "victim", None);
+        let pgob = g.world.players[pidx].gob;
+        // Put the victim inside bow range.
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let vslot = g.world.gobs.get(vgob).unwrap();
+        g.world.gobs.set_pos(vslot, (px + 66, py));
+        g.player_interact(1, pgob, vgob, (0, 0));
+        assert_eq!(
+            g.world.players[pidx].aim.map(|a| a.target),
+            Some(vgob),
+            "bow click on a player opens the PvP aim"
+        );
+        // The victim is untouched by the mere aim.
+        assert_eq!(g.world.players[vidx].hp, 100);
+        // Self-click with a bow: no aim (falls through to the party
+        // menu, which ignores self-clicks too).
+        g.world.players[pidx].aim = None;
+        g.player_interact(1, pgob, pgob, (0, 0));
+        assert_eq!(g.world.players[pidx].aim, None, "never aim at yourself");
+        // Without a bow the click is a party invite, not an aim.
+        g.world.players[pidx].equip[0] = None;
+        g.world.players[pidx].aim = None;
+        g.player_interact(1, pgob, vgob, (0, 0));
+        assert_eq!(
+            g.world.players[pidx].aim, None,
+            "no bow, no PvP aim - the party menu owns the click"
+        );
+    }
+
+    /// A guaranteed hit on a LOCAL player applies the Fandom damage
+    /// through the victim's (empty) armor, tells both sides in chat,
+    /// and re-arms the aim while the victim lives.
+    #[tokio::test]
+    async fn pvp_arrow_hits_local_player() {
+        let (mut g, mut rx, _raw) = entered_game("pvphit");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        arm_bow(&mut g, pidx, 10, 10);
+        let (vidx, vgob) = second_player(&mut g, "victim", None);
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let vslot = g.world.gobs.get(vgob).unwrap();
+        g.world.gobs.set_pos(vslot, (px + 66, py));
+        let aim = crate::archery::RangedAim::new(vgob, 10, crate::archery::AIM_RATE_WOODBOW);
+        g.shoot_arrow(pidx, 1, aim, 0);
+        assert_eq!(
+            g.world.players[vidx].hp,
+            100 - crate::archery::bow_damage(10),
+            "q10 bow deals 75 to an unarmored player"
+        );
+        assert_eq!(arrow_count(&mut g, pidx), 9, "one arrow consumed");
+        assert_eq!(
+            g.world.players[pidx].aim.map(|a| a.target),
+            Some(vgob),
+            "aim re-arms while the victim lives"
+        );
+        let chat = drain_chat(&mut rx);
+        assert!(
+            chat.iter().any(|t| t.contains("Your arrow hits victim")),
+            "shooter told about the hit: {chat:?}"
+        );
+    }
+
+    /// A lethal arrow knocks the victim out: HP resets to the knockout
+    /// floor, the fight state tears down, and the shooter's chat
+    /// reports the defeat.
+    #[tokio::test]
+    async fn pvp_lethal_arrow_knocks_out_victim() {
+        let (mut g, mut rx, _raw) = entered_game("pvpkill");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        arm_bow(&mut g, pidx, 10, 40);
+        let (vidx, vgob) = second_player(&mut g, "victim", None);
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let vslot = g.world.gobs.get(vgob).unwrap();
+        g.world.gobs.set_pos(vslot, (px + 66, py));
+        // Weaken the victim so one q40 shot (150 dmg) is lethal.
+        g.world.players[vidx].hp = 30;
+        let aim = crate::archery::RangedAim::new(vgob, 40, crate::archery::AIM_RATE_WOODBOW);
+        g.shoot_arrow(pidx, 1, aim, 0);
+        assert_eq!(
+            g.world.players[vidx].hp, 50,
+            "knockout resets the victim to the 50 HP floor"
+        );
+        let chat = drain_chat(&mut rx);
+        assert!(
+            chat.iter().any(|t| t.contains("You have defeated victim")),
+            "shooter told about the knockout: {chat:?}"
+        );
+    }
+
+    /// A bow click on a GUEST player opens the aim, and the
+    /// auto-release ships one PvpArrow to the victim's home node
+    /// carrying the Fandom damage; the arrow is spent locally
+    /// regardless of the roll.
+    #[tokio::test]
+    async fn pvp_guest_shot_ships_pvparrow() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("pvpguest", 0, 2);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        arm_bow(&mut g, pidx, 10, 10);
+        let pgob = g.world.players[pidx].gob;
+        let gid = guest_player(&mut g, 66);
+        g.player_interact(1, pgob, gid, (0, 0));
+        assert_eq!(
+            g.world.players[pidx].aim.map(|a| a.target),
+            Some(gid),
+            "aim opens against a guest player"
+        );
+        for _ in 0..40 {
+            let aim = g.world.players[pidx].aim.expect("aim kept");
+            g.tick_aim(pidx, 1, pgob, aim);
+        }
+        assert_eq!(arrow_count(&mut g, pidx), 9, "one arrow spent on release");
+        let mut saw_arrow = false;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::PvpArrow {
+                victim,
+                attacker,
+                dmg,
+            } = msg
+            {
+                assert_eq!(victim, gid);
+                assert_eq!(attacker, pgob);
+                assert_eq!(dmg, crate::archery::bow_damage(10));
+                saw_arrow = true;
+            }
+        }
+        assert!(saw_arrow, "the release must ship one PvpArrow");
+    }
+
+    /// The authority side of a PvP arrow: a local victim takes the
+    /// damage through hurt_player, gets the chat line, and the
+    /// shooter's node receives a PvpArrowResult answer (killed=false
+    /// while the victim stands, killed=true on a knockout).
+    #[tokio::test]
+    async fn pvp_arrow_handler_hurts_victim_and_answers() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("pvpauth", 0, 2);
+        let (vidx, vgob) = second_player(&mut g, "victim", Some(&mut mesh_rx));
+        let shooter = foreign_node_gob_id(0, 2, 9);
+        // Drain announce noise, then apply a non-lethal arrow.
+        while mesh_rx.try_recv().is_ok() {}
+        g.on_node_msg(crate::nodes::NodeMsg::PvpArrow {
+            victim: vgob,
+            attacker: shooter,
+            dmg: 40,
+        });
+        assert_eq!(g.world.players[vidx].hp, 60, "40 damage through no armor");
+        let mut answered = false;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::PvpArrowResult { shooter: s, killed } = msg {
+                assert_eq!(s, shooter);
+                assert!(!killed, "the victim still stands");
+                answered = true;
+            }
+        }
+        assert!(answered, "the home node answers the shot");
+        // Lethal follow-up: the knockout reports killed=true.
+        g.world.players[vidx].hp = 10;
+        g.on_node_msg(crate::nodes::NodeMsg::PvpArrow {
+            victim: vgob,
+            attacker: shooter,
+            dmg: 40,
+        });
+        assert_eq!(g.world.players[vidx].hp, 50, "knockout floor after lethal");
+        let mut killed_seen = false;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::PvpArrowResult { killed, .. } = msg {
+                assert!(killed, "the knockout is reported back");
+                killed_seen = true;
+            }
+        }
+        assert!(killed_seen, "lethal answer sent");
     }
 }

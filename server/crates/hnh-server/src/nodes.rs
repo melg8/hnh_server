@@ -327,6 +327,21 @@ pub enum NodeMsg {
     /// Authority -> home: the guest attacker dealt the killing blow; the
     /// receiver grants the learning points (the LP wallet lives there).
     KillCredit { player_gob: i32, lp: i32 },
+    /// Cross-node PvP arrow (session 38), shooter's node -> the VICTIM's
+    /// home node. The hit roll happened on the shooter's node (aim/meter
+    /// is session state); armor absorption, HP and the knockout path all
+    /// live on the victim's home node - the same authority split as the
+    /// animal-bite PlayerHurt flow.
+    PvpArrow {
+        victim: i32,
+        attacker: i32,
+        dmg: i32,
+    },
+    /// Victim's home node -> the shooter's node: the applied outcome of a
+    /// PvpArrow. `killed` reports the knockout so the shooter's chat can
+    /// close the engagement narrative (the aim itself re-arms while the
+    /// target lives and arrows remain).
+    PvpArrowResult { shooter: i32, killed: bool },
     /// Cross-node static interaction (session 30), home -> authority.
     /// The clicking player (a session player homed on the sender) acted on
     /// the static gob `target`; the target's LIFECYCLE (drop contents, tree
@@ -810,6 +825,8 @@ fn msg_name(msg: &NodeMsg) -> &'static str {
         NodeMsg::RelayStationItem { .. } => "relay_station_item",
         NodeMsg::StationItemAck { .. } => "station_item_ack",
         NodeMsg::FightBars { .. } => "fight_bars",
+        NodeMsg::PvpArrow { .. } => "pvp_arrow",
+        NodeMsg::PvpArrowResult { .. } => "pvp_arrow_result",
         NodeMsg::CharQuery { .. } => "char_query",
         NodeMsg::CharData { .. } => "char_data",
         NodeMsg::CharAck { .. } => "char_ack",
