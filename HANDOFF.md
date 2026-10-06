@@ -2506,3 +2506,85 @@ NEXT (handoff):
 - Cross-node maneuver IP relay (extend PvpSwingResult or add a small
   ManeuverDelta message).
 - Windows smoke on a pwsh host; then the GL client e2e.
+
+## 2026-10-07 - Session 41: guest-phase optimization, batched poses, 5 Hz LINSTEP cadence
+
+The session-40 NEXT top item (profile and optimize tick_guests for the
+always-chasing duel cohort; re-run load-cluster) is CLOSED. The cluster
+regression is fixed at the median level and the node0 p95 is back inside
+the 100 ms budget; node1 still shows noisy p95 tails on the 2-CPU
+sandbox (see numbers).
+
+WHAT:
+
+- SUB-PHASE INSTRUMENTATION FIRST (perf-profile-first). `Perf` gained
+  guests_encode/fanout/pose_us plus move_blocks/move_cells. The 2x200
+  profile pinned the fan-out stage (p95 7.9 ms at 200 sessions, linear
+  in the session count; encode was 0.09 ms) - not the encode loops.
+
+- PACKED CELL-INDEXED MOVEMENT FAN-OUT (server/src/move_batch.rs, new).
+  tick_guests and tick_movement now encode blocks ONCE into one shared
+  scratch buffer (reused across ticks via clear - no per-tick allocator
+  churn), each block tagged with the VisIndex cell of the gob position.
+  broadcast_batch walks per session only the NON-EMPTY cells and rejects
+  whole cells with one rectangle test against the 2x-retract-hysteresis
+  square (FANOUT_SPAN = 2R + 8-tick drift); the exact visible.contains
+  filter stays authoritative per block. This replaces the
+  O(sessions x movers) hash-probe scan of every block per session (the
+  s34 batch_move_broadcast shape); datagrams materialize lazily per
+  session. Wire bytes are byte-identical (finalizers still land in
+  unacked for OBJACK retransmit).
+
+- BATCHED GUEST POSE STREAMING. stream_guest_pose (per (guest, viewer)
+  datagram + per-call GuestGob clone) is replaced by
+  stream_guest_poses_batched: jobs sorted per session, ONE datagram per
+  session carrying ALL of that session's finished guests' OD_LAYERS
+  blocks, guest rows read in place (no clone). The same batched path
+  serves the ingest pose-flip fan-out. leak_static is MEMOIZED
+  (OnceLock<RwLock<HashMap>>) - the pose fan-out used to Box::leak a
+  fresh copy per call, an unbounded per-tick allocation leak.
+
+- 5 Hz LINSTEP CADENCE (LINSTEP_EVERY_TICKS = 2). The client
+  interpolates the linmove locally from LINBEG (deterministic timing
+  model, c * 66.67 ms), so per-tick server progress pushes are only a
+  counter re-sync. Shipping them every 2nd tick halves the largest
+  remaining (session, mover) pair fan-out AND the progress datagram
+  traffic at the 10k scale; a lost datagram self-heals within 200 ms.
+  Finalizers always ship. Documented in network-protocol.md.
+
+- LOAD NUMBERS (2-CPU sandbox, both nodes + bot cohorts share the two
+  cores; run-to-run variance is high):
+  * cluster 2x300 dueling bots: node0 steady p95 278 -> 87.6 ms (in
+    budget), node1 278 -> 161 ms (noisy tail: fanout p95 spikes with
+    guests=767 on that node); medians 42/31 ms. pvp chains intact.
+  * single node 1000 dueling bots: steady p95 110 -> 133 ms (noisy;
+    mean 87.6 -> 77.4 ms), pvp_hits 3616, knockouts 79, zero panics.
+  The remaining single-node cost lives in phase_mv + vis at the 1000-
+  session scale and the residual (tick phases do not yet account for
+  the whole tick); the frontier stays the 1000-runner single node.
+
+EVIDENCE: 240 unit tests green (3 new move_batch: reuse-after-clear,
+cell grouping, axis rect bounds), clippy -D warnings clean, fmt clean.
+scripts/verify_session41.sh (units/full/boot/guest-opt/load):
+SESSION41 UNITS/BOOT: OK (world entry + MOVE PROBE OK under the new
+cadence), FULL: OK (240 tests). probe_walk MOVE PROBE: OK. Cluster and
+single-node load windows re-measured (numbers above).
+
+NOT DONE THIS SESSION (rolled to NEXT):
+- node1 p95 tail (fanout spikes at guests~767): the rectangle-test
+  fan-out still scales O(sessions x visible pairs); consider per-cell
+  precomputed subscriber lists or a second fan-out level.
+- Single-node vis spawn churn (vis_spawn_us p95 up to ~8 ms at 2x200,
+  larger at 1000) - spawn hysteresis/debounce on the vis boundary.
+- Residual attribution: tick phases sum to ~2/3 of tick_us at load;
+  instrument the residual (criminal expiry, clear_dirty, bookkeeping).
+- Cross-node maneuver IP relay (extend PvpSwingResult or ManeuverDelta).
+- Windows smoke on a pwsh host; then the GL client e2e (carried).
+- Unit-count reconciliation vs RoB (sources still behind Cloudflare).
+
+NEXT (handoff):
+- Re-run the load windows on a quiet multi-core host for clean numbers.
+- Vis boundary hysteresis (spawn debounce) - the single-node vis_spawn
+  p95 is the next optimization target.
+- Cross-node maneuver IP relay.
+- Windows smoke + GL client e2e when a display-capable host exists.

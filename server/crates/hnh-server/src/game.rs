@@ -293,6 +293,15 @@ const CHAR_QUERY_DEADLINE_MS: u64 = 6_000;
 /// exact `visible.contains` filter stays authoritative per block.
 const FANOUT_SPAN: i32 = 2 * VIEW_RADIUS + 8 * 50;
 
+/// LINSTEP progress frames ship every Nth tick (session 41): the client
+/// interpolates the linmove locally from LINBEG (deterministic timing
+/// model), so the per-tick server push is only a counter re-sync. At 2
+/// the correction lands at 5 Hz and the (session, mover) pair fan-out -
+/// the largest remaining fan-out cost in the duel-cohort cluster - and
+/// the progress datagram traffic both halve; a lost datagram self-heals
+/// within 2N ticks. Finalizers always ship (they end the move).
+const LINSTEP_EVERY_TICKS: u64 = 2;
+
 impl PendingJoin {
     /// True once every OTHER node answered the CharQuery.
     fn peers_answered(&self, nodes: usize) -> bool {
@@ -3548,11 +3557,10 @@ impl Game {
                 }
             }
             // Pose flip streams the new layer set (same server-side pose
-            // resolution as local movers).
+            // resolution as local movers), batched into one datagram per
+            // viewer session.
             if pose_flipped {
-                for sid in &viewers {
-                    self.stream_guest_pose(*sid, id);
-                }
+                self.stream_guest_poses_batched(viewers.iter().map(|sid| (*sid, id)).collect());
             }
         }
         if hp_changed {
@@ -3825,8 +3833,12 @@ impl Game {
                     let l = lm.step_at(now);
                     let advanced = l > lm.step;
                     g.mv = Some(LinMove { step: l, ..lm });
+                    // Progress frames ship on the LINSTEP_EVERY_TICKS
+                    // cadence only; the server-side counter still advances
+                    // every tick.
+                    let ship = self.world.tick.is_multiple_of(LINSTEP_EVERY_TICKS);
                     (
-                        if advanced {
+                        if advanced && ship {
                             GuestMove::Step(l)
                         } else {
                             GuestMove::Quiet
@@ -3893,19 +3905,18 @@ impl Game {
         self.move_scratch = batch;
         self.world.perf.guests_fanout_us = fanout_t.elapsed().as_micros() as u64;
         // Rest pose for finished movers: the standing layer block per
-        // viewer (rare - only on movement finalization; statics skip).
+        // viewer, batched into one datagram per session (rare - only on
+        // movement finalization; statics skip).
         let pose_t = Instant::now();
+        let mut pose_jobs: Vec<(SessionId, GobId)> = Vec::new();
         for id in finished_ids {
-            let viewers: Vec<SessionId> = self
-                .sessions
-                .iter()
-                .filter(|(_, o)| o.visible.contains(&id))
-                .map(|(s, _)| *s)
-                .collect();
-            for sid in viewers {
-                self.stream_guest_pose(sid, id);
+            for (sid, out) in &self.sessions {
+                if out.visible.contains(&id) {
+                    pose_jobs.push((*sid, id));
+                }
             }
         }
+        self.stream_guest_poses_batched(pose_jobs);
         self.world.perf.guests_pose_us = pose_t.elapsed().as_micros() as u64;
     }
 
@@ -4106,63 +4117,92 @@ impl Game {
         }
     }
 
-    /// Re-stream one guest's pose layers to one session (pose flip).
-    fn stream_guest_pose(&mut self, sid: SessionId, id: GobId) {
+    /// Stream the rest-pose blocks for finished guest movers, batched:
+    /// ONE OBJDATA datagram per session carries ALL of that session's
+    /// finished guests' layer blocks. The duel-cohort crowd finalizes
+    /// dozens of guests per tick with ~300 viewers each - the per-(guest,
+    /// viewer) datagram and the per-call GuestGob clone were the dominant
+    /// pose-phase cost (p50 11 ms at 300 sessions). Guest rows are read
+    /// in place (no clone); wire ids resolve through the session table.
+    fn stream_guest_poses_batched(&mut self, mut jobs: Vec<(SessionId, GobId)>) {
         use crate::nodes::GuestKind;
-        let Some(g) = self.world.guests.get(&id).cloned() else {
-            return;
-        };
-        // Statics have no pose (OD_RES alone renders them): an empty
-        // layer list would carry the same bare-0xFFFF defect the
-        // session-34 probe caught in the spawn block.
-        if matches!(g.kind, GuestKind::Static { .. }) {
+        if jobs.is_empty() {
             return;
         }
-        let Some(out) = self.sessions.get_mut(&sid) else {
-            return;
-        };
-        let mut m = MessageBuf::new();
-        m.uint8(MSG_OBJDATA)
-            .uint8(0)
-            .int32(id)
-            .int32(g.frame as i32)
-            .uint8(OD_LAYERS);
-        match &g.kind {
-            GuestKind::Player { equip, .. } => {
-                let base = "gfx/borka/body";
-                let bi = self.world.res.intern(base);
-                m.uint16(out.res.wire_named(bi, base));
-                let equip_static: Vec<&'static str> =
-                    equip.iter().map(|s| leak_static(s)).collect();
-                for part in avatar_pose_layers(g.moving, g.facing) {
-                    let gi = self.world.res.intern(part);
-                    m.uint16(out.res.wire_named(gi, part));
-                }
-                for part in crate::equip::world_layers(&equip_static, g.moving, g.facing) {
-                    let gi = self.world.res.intern(part);
-                    m.uint16(out.res.wire_named(gi, part));
-                }
-                m.uint16(65535);
+        jobs.sort_unstable();
+        let mut i = 0;
+        while i < jobs.len() {
+            let sid = jobs[i].0;
+            let mut j = i;
+            while j < jobs.len() && jobs[j].0 == sid {
+                j += 1;
             }
-            GuestKind::Animal { species } => {
-                let Some(sp) = crate::state::Species::from_index(*species) else {
-                    return;
+            let Some(out) = self.sessions.get_mut(&sid) else {
+                i = j;
+                continue;
+            };
+            // Datagram materializes lazily: sessions whose guests all
+            // vanished allocate nothing.
+            let mut m: Option<MessageBuf> = None;
+            for (_, id) in &jobs[i..j] {
+                let Some(g) = self.world.guests.get(id) else {
+                    continue;
                 };
-                let base = kritter_base(sp);
-                let bi = self.world.res.intern(base);
-                m.uint16(out.res.wire_named(bi, base));
-                let part = kritter_pose_layer(sp, g.moving, g.facing);
-                let gi = self.world.res.intern(part);
-                m.uint16(out.res.wire_named(gi, part));
-                m.uint16(65535);
+                // Statics have no pose (OD_RES alone renders them): an
+                // empty layer list would carry the same bare-0xFFFF defect
+                // the session-34 probe caught in the spawn block.
+                if matches!(g.kind, GuestKind::Static { .. }) {
+                    continue;
+                }
+                let frame = g.frame;
+                let moving = g.moving;
+                let facing = g.facing;
+                let kind = &g.kind;
+                let mm = m.get_or_insert_with(|| MessageBuf::with_capacity(256));
+                mm.uint8(MSG_OBJDATA)
+                    .uint8(0)
+                    .int32(*id)
+                    .int32(frame as i32)
+                    .uint8(OD_LAYERS);
+                match kind {
+                    GuestKind::Player { equip, .. } => {
+                        let base = "gfx/borka/body";
+                        let bi = self.world.res.intern(base);
+                        mm.uint16(out.res.wire_named(bi, base));
+                        for part in avatar_pose_layers(moving, facing) {
+                            let gi = self.world.res.intern(part);
+                            mm.uint16(out.res.wire_named(gi, part));
+                        }
+                        // equip names are leaked already; no GuestGob clone.
+                        let equip_static: Vec<&'static str> =
+                            equip.iter().map(|s| leak_static(s)).collect();
+                        for part in crate::equip::world_layers(&equip_static, moving, facing) {
+                            let gi = self.world.res.intern(part);
+                            mm.uint16(out.res.wire_named(gi, part));
+                        }
+                        mm.uint16(65535);
+                    }
+                    GuestKind::Animal { species } => {
+                        let Some(sp) = crate::state::Species::from_index(*species) else {
+                            continue;
+                        };
+                        let base = kritter_base(sp);
+                        let bi = self.world.res.intern(base);
+                        mm.uint16(out.res.wire_named(bi, base));
+                        let part = kritter_pose_layer(sp, moving, facing);
+                        let gi = self.world.res.intern(part);
+                        mm.uint16(out.res.wire_named(gi, part));
+                        mm.uint16(65535);
+                    }
+                    GuestKind::Static { .. } => {}
+                }
+                mm.uint8(OD_END);
             }
-            GuestKind::Static { .. } => {
-                m.uint16(65535);
+            if let Some(m) = m {
+                out.send_raw(m.finish());
             }
+            i = j;
         }
-        m.uint8(OD_END);
-        let block = m.finish();
-        out.send_raw(block);
     }
 
     // Player commands
@@ -8276,21 +8316,26 @@ impl Game {
                     let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
                     let frame = self.world.gobs.frame[slot];
                     self.world.gobs.mv[slot] = Some(LinMove { step: l, ..lm });
-                    let mut m = MessageBuf::new();
-                    m.uint8(MSG_OBJDATA)
-                        .uint8(0)
-                        .int32(id)
-                        .int32(frame as i32)
-                        .uint8(OD_LINSTEP)
-                        .int32(l)
-                        .uint8(OD_END);
-                    batch.push(
-                        id,
-                        frame,
-                        crate::visidx::cell_of(cx, cy),
-                        false,
-                        &m.finish(),
-                    );
+                    // Progress frames ship on the LINSTEP_EVERY_TICKS
+                    // cadence (see tick_guests); the client interpolates
+                    // locally between corrections.
+                    if self.world.tick.is_multiple_of(LINSTEP_EVERY_TICKS) {
+                        let mut m = MessageBuf::new();
+                        m.uint8(MSG_OBJDATA)
+                            .uint8(0)
+                            .int32(id)
+                            .int32(frame as i32)
+                            .uint8(OD_LINSTEP)
+                            .int32(l)
+                            .uint8(OD_END);
+                        batch.push(
+                            id,
+                            frame,
+                            crate::visidx::cell_of(cx, cy),
+                            false,
+                            &m.finish(),
+                        );
+                    }
                 }
             }
         }
@@ -10434,7 +10479,21 @@ enum AnimalAction {
 
 /// ResTable stores &'static str; runtime names from items need leaking.
 fn leak_static(name: &str) -> &'static str {
-    Box::leak(name.to_owned().into_boxed_str())
+    // Memoized leak: repeated calls with the same content return the same
+    // pointer. The pose fan-out used to Box::leak a fresh copy per call -
+    // an unbounded per-tick allocation leak under the duel-cohort load
+    // (the equip layer names are re-derived on every guest pose block).
+    static MEMO: std::sync::OnceLock<std::sync::RwLock<HashMap<Box<str>, &'static str>>> =
+        std::sync::OnceLock::new();
+    let memo = MEMO.get_or_init(|| std::sync::RwLock::new(HashMap::new()));
+    if let Some(leaked) = memo.read().map(|m| m.get(name).copied()).ok().flatten() {
+        return leaked;
+    }
+    let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
+    if let Ok(mut m) = memo.write() {
+        m.entry(leaked.into()).or_insert(leaked);
+    }
+    leaked
 }
 
 /// Unix time in milliseconds: the shared clock for crop stage deadlines

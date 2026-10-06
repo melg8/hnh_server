@@ -565,7 +565,11 @@ Details that are easy to get wrong:
   a LinMove from `s` to `t` split into `c` steps; LINSTEP advances to
   step `l` and, when `l` is outside `[0, c)`, removes the Moving
   attribute, ending the move (src/haven/OCache.java lines 160-191;
-  src/haven/LinMove.java).
+  src/haven/LinMove.java). The client interpolates the move locally from
+  the LINBEG timing model (`c * 66.67 ms`), so LINSTEP frames are a
+  counter re-sync, not a position push: the server ships them on a 5 Hz
+  cadence (every 2nd tick, `LINSTEP_EVERY_TICKS = 2`) instead of every
+  tick, halving the progress fan-out; finalizers always ship.
 - OD_MOVE and LINBEG/LINSTEP coordinates are in absolute world pixel
   coordinates (tile * 11 pixels per axis; src/haven/MCache.java line 53).
 
