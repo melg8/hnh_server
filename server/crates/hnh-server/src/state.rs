@@ -648,6 +648,13 @@ pub struct SessionOut {
     pub cursor_wid: Option<u16>,
     /// Map grids this client already holds (MAPDATA re-send targeting).
     pub grids_seen: HashSet<(i32, i32)>,
+    /// Last visibility scan result (session 30 result caching). Valid
+    /// only while the player position is unchanged; a session standing
+    /// still then patches this list from the per-tick touched records
+    /// instead of rescanning the whole view square.
+    pub vis_cache: Option<Vec<GobId>>,
+    /// The exact player position the cached list is valid for.
+    pub vis_cache_pos: Option<(i32, i32)>,
     /// Last tick's player cell (dirty-cell skip decision; None = first
     /// tick, which always scans).
     pub vis_cell: Option<(i32, i32)>,
@@ -821,6 +828,9 @@ pub struct Perf {
     /// live cell count. Log-time proof the index is active.
     pub vis_gob_scans: u64,
     pub vis_skipped: u64,
+    /// Session-ticks served from the cached scan result (patch or clean
+    /// skip) instead of a full view rescan (session 30).
+    pub vis_cached: u64,
     pub vis_cells: usize,
     /// Node-link publishes sent (cumulative) and guest rows ingested
     /// (cumulative) - cluster-mode counters for the perf report.

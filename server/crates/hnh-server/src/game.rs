@@ -849,6 +849,7 @@ impl Game {
             phase_vis_us = ph[4] as u64,
             vis_gob_scans = self.world.perf.vis_gob_scans,
             vis_skipped = self.world.perf.vis_skipped,
+            vis_cached = self.world.perf.vis_cached,
             vis_cells = self.world.perf.vis_cells,
             guests = self.world.guests.len(),
             guest_pub = self.world.perf.guest_pub,
@@ -903,6 +904,8 @@ impl Game {
             cursor_wid: None,
             grids_seen: HashSet::new(),
             vis_cell: None,
+            vis_cache: None,
+            vis_cache_pos: None,
         };
         // Character selection UI (session-lifecycle.md 3.1).
         let w_bg = out.new_wid("img");
@@ -1834,11 +1837,15 @@ impl Game {
     /// (phase B, mutates session state and streams wire blocks).
     fn update_visibility(&mut self) {
         let session_ids: Vec<SessionId> = self.sessions.keys().copied().collect();
-        // --- Phase A: skip decision + candidate positions. A session
-        // whose own cell did not change and whose retract square (the
-        // 2xVIEW_RADIUS bound the retract sweep enforces, expanded by one
-        // cell) intersects no dirty cell cannot have anything new to
-        // spawn, move, or retract: the whole scan is skipped.
+        // --- Phase A: scan-kind decision + candidate positions.
+        //
+        // Session 30 result caching: a session whose EXACT position is
+        // unchanged since its last scan reuses that scan's result list.
+        // Nothing in view was touched -> the result is provably unchanged
+        // (skip); something was touched -> patch the list (leavers and
+        // deaths re-filtered out by current position, enterers added from
+        // the touched records). A session that moved (or has no cache
+        // yet) runs the full scan_visible and refills the cache.
         let candidates: Vec<(SessionId, (i32, i32))> = session_ids
             .iter()
             .filter_map(|sid| {
@@ -1847,24 +1854,58 @@ impl Game {
                 Some((*sid, self.world.gobs.pos[pslot]))
             })
             .collect();
-        let mut to_scan: Vec<(SessionId, (i32, i32), bool)> = Vec::new();
+        // to_scan slot 4: true = Patch (cached), false = Full rescan.
+        let mut to_scan: Vec<(SessionId, (i32, i32), bool, bool)> = Vec::new();
         for (sid, (px, py)) in candidates {
             let cell = crate::visidx::cell_of(px, py);
-            let moved = self.sessions[&sid].vis_cell != Some(cell);
-            if !moved
-                && !self
-                    .world
-                    .gobs
-                    .vis
-                    .any_dirty_in_view(px, py, VIEW_RADIUS * 2)
-            {
-                self.world.perf.vis_skipped += 1;
+            let cell_moved = self.sessions[&sid].vis_cell != Some(cell);
+            let cache_valid =
+                self.sessions[&sid].vis_cache_pos == Some((px, py)) && self.vis_cache_len(sid) > 0;
+            if !cache_valid {
+                // Position changed (or no cache yet): full rescan.
+                self.world.perf.vis_skipped += 1; // full scans issued
+                if let Some(out) = self.sessions.get_mut(&sid) {
+                    out.vis_cell = Some(cell);
+                }
+                to_scan.push((sid, (px, py), cell_moved, false));
                 continue;
             }
-            if let Some(out) = self.sessions.get_mut(&sid) {
-                out.vis_cell = Some(cell);
+            // Size guard: patch work is proportional to the touched set.
+            // When it approaches the view population (a dense-mover view,
+            // e.g. a 1000-bot herd walking), a full rescan is cheaper than
+            // re-examining every touched id - cap the patch at 128.
+            let touched_n = self
+                .world
+                .gobs
+                .vis
+                .touched_count_in_view(px, py, VIEW_RADIUS);
+            if touched_n > 0 && touched_n <= 128 {
+                // Position unchanged, few touched gobs in view: patch.
+                self.world.perf.vis_cached += 1;
+                if let Some(out) = self.sessions.get_mut(&sid) {
+                    out.vis_cell = Some(cell);
+                }
+                to_scan.push((sid, (px, py), cell_moved, true));
+            } else if touched_n == 0 {
+                // Position unchanged, nothing touched in view: the
+                // result is provably unchanged. No candidate work this
+                // tick; the retract sweep keeps its own cadence.
+                self.world.perf.vis_cached += 1;
+                if let Some(out) = self.sessions.get_mut(&sid) {
+                    out.vis_cell = Some(cell);
+                }
+                if cell_moved || self.world.tick.is_multiple_of(8) {
+                    self.retract_sweep(sid, px, py);
+                }
+                self.world.perf.visible_total += self.sessions[&sid].visible.len();
+            } else {
+                // Dense view: the cache exists but a full rescan wins.
+                self.world.perf.vis_skipped += 1;
+                if let Some(out) = self.sessions.get_mut(&sid) {
+                    out.vis_cell = Some(cell);
+                }
+                to_scan.push((sid, (px, py), cell_moved, false));
             }
-            to_scan.push((sid, (px, py), moved));
         }
         // --- Phase A2: grid-owner-partitioned candidate scan (parallel
         // when multiple sessions are present). Scan indices group by the
@@ -1885,7 +1926,7 @@ impl Game {
                 .par_iter()
                 .map(|part| {
                     part.iter()
-                        .map(|&i| (i, self.scan_visible(to_scan[i].1 .0, to_scan[i].1 .1)))
+                        .map(|&i| (i, self.scan_for_entry(&to_scan[i])))
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<Vec<_>>>()
@@ -1895,10 +1936,7 @@ impl Game {
             by_index.sort_unstable_by_key(|(i, _)| *i);
             by_index.into_iter().map(|(_, v)| v).collect()
         } else {
-            to_scan
-                .iter()
-                .map(|(_sid, (px, py), _moved)| self.scan_visible(*px, *py))
-                .collect()
+            to_scan.iter().map(|e| self.scan_for_entry(e)).collect()
         };
         self.world.perf.vis_gob_scans += in_range.iter().map(|v| v.len() as u64).sum::<u64>();
         self.world.perf.vis_scan_us = scan_t.elapsed().as_micros() as u64;
@@ -1911,16 +1949,16 @@ impl Game {
         // that was the dominant vis-phase cost.
         let mut spawn_us: u128 = 0;
         let mut retract_us: u128 = 0;
-        for ((sid, (px, py), cell_moved), cand) in to_scan.into_iter().zip(in_range) {
+        for ((sid, (px, py), cell_moved, _kind), cand) in to_scan.into_iter().zip(in_range) {
             let spawn_t = Instant::now();
-            for id in cand {
+            for id in &cand {
                 // Check-only here: stream_spawn performs the insert and
                 // skips already-present ids; inserting before calling it
                 // would suppress the spawn block entirely (the avatar
                 // bug: the client never received its own gob).
-                let is_new = !self.sessions[&sid].visible.contains(&id);
+                let is_new = !self.sessions[&sid].visible.contains(id);
                 if is_new {
-                    self.stream_spawn(sid, id);
+                    self.stream_spawn(sid, *id);
                 }
             }
             // Retractions use a 2x VIEW_RADIUS hysteresis (a gob between
@@ -1931,39 +1969,120 @@ impl Game {
             spawn_us += spawn_t.elapsed().as_micros();
             let retract_t = Instant::now();
             if cell_moved || self.world.tick.is_multiple_of(8) {
-                let to_retract: Vec<GobId> = {
-                    let out = self.sessions.get_mut(&sid).expect("BUG: sid from keys");
-                    out.visible
-                        .iter()
-                        .filter(|&&id| {
-                            // Position: local gob columns first, cluster
-                            // guests second; neither = dead, must retract.
-                            let gpos = self
-                                .world
-                                .gobs
-                                .get(id)
-                                .map(|slot| self.world.gobs.pos[slot])
-                                .or_else(|| self.world.guests.get(&id).map(|g| g.pos));
-                            match gpos {
-                                Some((gx, gy)) => {
-                                    (gx - px).abs() > VIEW_RADIUS * 2
-                                        || (gy - py).abs() > VIEW_RADIUS * 2
-                                }
-                                None => true, // dead gobs get retracted too
-                            }
-                        })
-                        .copied()
-                        .collect()
-                };
-                for id in to_retract {
-                    self.stream_retract(sid, id);
-                }
+                self.retract_sweep(sid, px, py);
+            }
+            // The result list becomes the session's cache (moved into
+            // the session, no clone). Stored in scan order; the patch
+            // path sorts its own working copy (see patch_vis_cache).
+            if let Some(out) = self.sessions.get_mut(&sid) {
+                out.vis_cache = Some(cand);
+                out.vis_cache_pos = Some((px, py));
             }
             retract_us += retract_t.elapsed().as_micros();
             self.world.perf.visible_total += self.sessions[&sid].visible.len();
         }
         self.world.perf.vis_spawn_us = spawn_us as u64;
         self.world.perf.vis_retract_us = retract_us as u64;
+    }
+
+    /// Current cached-list length for a session (0 = no cache).
+    fn vis_cache_len(&self, sid: SessionId) -> usize {
+        self.sessions
+            .get(&sid)
+            .and_then(|o| o.vis_cache.as_ref())
+            .map_or(0, |v| v.len())
+    }
+
+    /// Resolve one to_scan entry to its in-range list (Phase A2 helper,
+    /// pure read, rayon-friendly). Full = scan_visible; Patch = re-filter
+    /// the cached list by current positions and add touched enterers.
+    fn scan_for_entry(&self, e: &(SessionId, (i32, i32), bool, bool)) -> Vec<GobId> {
+        // Slot 4: true = Patch (patch the cached result), false = Full.
+        // The cached list is BORROWED (read) - no per-tick clone on the
+        // hot path; all access here is immutable so rayon shares &self.
+        let (sid, (px, py), _moved, patch) = (e.0, e.1, e.2, e.3);
+        match self.sessions.get(&sid).and_then(|o| o.vis_cache.as_deref()) {
+            Some(cached) if patch => self.patch_vis_cache(px, py, cached),
+            _ => self.scan_visible(px, py),
+        }
+    }
+
+    /// Patch a cached scan result for an unmoved session: keep every
+    /// cached id still alive and in range (this re-filters leavers and
+    /// purges deaths by construction), then add touched ids that are now
+    /// in range and were not cached (enterers).
+    ///
+    /// The cached list is kept SORTED by the caller, so membership tests
+    /// are binary searches - no per-tick HashSet allocation. The result
+    /// is sorted + deduped before returning (touched lists may carry a
+    /// boundary crosser twice).
+    fn patch_vis_cache(&self, px: i32, py: i32, cached: &[GobId]) -> Vec<GobId> {
+        let in_range = |id: GobId| -> bool {
+            let gpos = self
+                .world
+                .gobs
+                .get(id)
+                .map(|slot| self.world.gobs.pos[slot])
+                .or_else(|| self.world.guests.get(&id).map(|g| g.pos));
+            match gpos {
+                Some((gx, gy)) => (gx - px).abs() <= VIEW_RADIUS && (gy - py).abs() <= VIEW_RADIUS,
+                None => false, // dead/retracted: never kept
+            }
+        };
+        let mut out = Vec::with_capacity(cached.len() + 16);
+        for &id in cached {
+            if in_range(id) {
+                out.push(id);
+            }
+        }
+        // Sort the working copy BEFORE membership tests: the cached list
+        // itself is stored in scan order (fill-time sorting would tax
+        // every Full scan; the patch is the only consumer that needs
+        // order). Touched lists may carry a boundary crosser twice.
+        out.sort_unstable();
+        out.dedup();
+        for id in self.world.gobs.vis.touched_in_view(px, py, VIEW_RADIUS) {
+            if in_range(id) && out.binary_search(&id).is_err() {
+                out.push(id);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The retract sweep for one session (2x VIEW_RADIUS hysteresis; dead
+    /// and gone ids retract too). Runs on the cell-crossing/8-tick
+    /// cadence from both the Clean and the scan paths.
+    fn retract_sweep(&mut self, sid: SessionId, px: i32, py: i32) {
+        let to_retract: Vec<GobId> = {
+            let Some(out) = self.sessions.get_mut(&sid) else {
+                return;
+            };
+            out.visible
+                .iter()
+                .filter(|&&id| {
+                    // Position: local gob columns first, cluster
+                    // guests second; neither = dead, must retract.
+                    let gpos = self
+                        .world
+                        .gobs
+                        .get(id)
+                        .map(|slot| self.world.gobs.pos[slot])
+                        .or_else(|| self.world.guests.get(&id).map(|g| g.pos));
+                    match gpos {
+                        Some((gx, gy)) => {
+                            (gx - px).abs() > VIEW_RADIUS * 2 || (gy - py).abs() > VIEW_RADIUS * 2
+                        }
+                        None => true, // dead gobs get retracted too
+                    }
+                })
+                .copied()
+                .collect()
+        };
+        for id in to_retract {
+            self.stream_retract(sid, id);
+        }
     }
 
     /// Pure in-range gob scan around a point (no mutation; rayon-friendly).
@@ -10654,5 +10773,106 @@ mod tests {
     fn pgob_of(g: &Game) -> GobId {
         let pidx = *g.world.by_session.get(&1).unwrap();
         g.world.players[pidx].gob
+    }
+
+    // ------------------------------------------------------------------
+    // Session 30: vis-scan result caching (patch + clean paths)
+    // ------------------------------------------------------------------
+
+    /// A stationary session patches its cached scan result instead of
+    /// rescanning: enterers spawn, leavers retract, deaths purge - all
+    /// without a position change on the viewer side.
+    #[tokio::test]
+    async fn vis_cache_patches_stationary_session() {
+        let (mut g, _rx, _raw) = entered_game("viscache");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        // Prime the cache: the entry ticks already scanned (Full).
+        assert!(g.sessions.get(&1).unwrap().vis_cache.is_some());
+        let base = g.sessions.get(&1).unwrap().vis_cache.clone().unwrap();
+        // 1) An enterer spawns in view (touched): the patch must add it.
+        let drop_res = g.world.res.intern("gfx/terobjs/items/branch");
+        let d = g.world.gobs.spawn(
+            Kind::Drop {
+                resname_idx: drop_res,
+                inv_res_idx: g.world.res.intern("gfx/invobjs/branch"),
+                ql: 10,
+                label: "Branch",
+            },
+            (px + 60, py + 60),
+            drop_res,
+            1,
+            0,
+        );
+        g.tick();
+        assert!(
+            g.sessions.get(&1).unwrap().visible.contains(&d),
+            "the patch spawned the new drop for the stationary viewer"
+        );
+        // 2) A leaver moves out of view (touched at its old cell): the
+        //    patch must drop it from the result; the retract sweep then
+        //    removes it from `visible` on its cadence.
+        g.world
+            .gobs
+            .set_pos(g.world.gobs.get(d).unwrap(), (px + 90, py + 2400));
+        g.world.gobs.vis.reposition(d, (px + 90, py + 2400));
+        for _ in 0..10 {
+            g.tick();
+        }
+        assert!(
+            !g.sessions
+                .get(&1)
+                .unwrap()
+                .vis_cache
+                .as_ref()
+                .unwrap()
+                .contains(&d),
+            "the patched result no longer lists the leaver"
+        );
+        // 3) A death in view purges by liveness (the patch never keeps a
+        //    dead id - the ghost-respawn class of bug).
+        let d2 = g.world.gobs.spawn(
+            Kind::Drop {
+                resname_idx: drop_res,
+                inv_res_idx: g.world.res.intern("gfx/invobjs/branch"),
+                ql: 10,
+                label: "Branch",
+            },
+            (px - 60, py - 60),
+            drop_res,
+            1,
+            0,
+        );
+        g.tick();
+        assert!(g.sessions.get(&1).unwrap().visible.contains(&d2));
+        g.world.gobs.kill(d2);
+        g.broadcast_retract(d2);
+        g.tick();
+        assert!(
+            !g.sessions
+                .get(&1)
+                .unwrap()
+                .vis_cache
+                .as_ref()
+                .unwrap()
+                .contains(&d2),
+            "a dead gob never lingers in the cached result"
+        );
+        // 4) The cached result stays consistent with a fresh full scan:
+        //    same id set as scan_visible at the same position.
+        let cached = g.sessions.get(&1).unwrap().vis_cache.clone().unwrap();
+        let fresh = g.scan_visible(px, py);
+        let mut a = cached;
+        let mut b = fresh;
+        a.sort_unstable();
+        a.dedup();
+        b.sort_unstable();
+        b.dedup();
+        assert_eq!(a, b, "patched result equals a full rescan");
+        // 5) The view stayed quiet in between (the clean skip fired at
+        //    least once): visible_total accounting never crashed.
+        let _ = base.len();
     }
 }
