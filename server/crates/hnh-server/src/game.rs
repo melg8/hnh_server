@@ -2507,6 +2507,45 @@ impl Game {
                     }
                 }
             }
+            NodeMsg::ManeuverDelta {
+                attacker,
+                victim,
+                ip_opp,
+            } => {
+                // The foreign attacker's node relayed a maneuver's
+                // opponent-pool delta (session 42): my session player's
+                // IP pool is authoritative here, keyed by the attacker's
+                // guest gob. Fold and re-stream the victim's window; the
+                // attacker's own window already applied the mirror
+                // prediction.
+                if ip_opp == 0 {
+                    return;
+                }
+                let Some(pidx) = self.world.players.iter().position(|p| p.gob == victim) else {
+                    return;
+                };
+                let vsid = self.world.players[pidx].session;
+                let vupd = self.sessions.get_mut(&vsid).and_then(|vout| {
+                    let rel = vout.fight.rel_mut(attacker)?;
+                    rel.ip_self = (rel.ip_self + ip_opp).max(0);
+                    Some(vec![
+                        rel.gob,
+                        rel.balance,
+                        rel.intensity,
+                        rel.give,
+                        rel.ip_self,
+                        rel.ip_other,
+                    ])
+                });
+                if let Some(vupd) = vupd {
+                    if let Some(vout) = self.sessions.get_mut(&vsid) {
+                        if let Some(w) = vout.fight.widget {
+                            let b = crate::fight::uimsg(w, "upd", &vupd);
+                            vout.send(b);
+                        }
+                    }
+                }
+            }
             NodeMsg::PvpSwingResult {
                 attacker,
                 victim,
@@ -5758,6 +5797,23 @@ impl Game {
                             vout.send(b);
                         }
                     }
+                }
+            } else if let Some(c) = self.cluster.as_ref() {
+                // The victim is a foreign session player (a guest gob
+                // here): her IP pool is authoritative on her home node.
+                // Relay the opponent-pool delta so her fight window stays
+                // truthful (session 42 ManeuverDelta; the attacker's own
+                // window below applies the mirror prediction).
+                let home = self.node_of_gob(target);
+                if home != c.me {
+                    c.mesh.send(
+                        home,
+                        crate::nodes::NodeMsg::ManeuverDelta {
+                            attacker: pgob,
+                            victim: target,
+                            ip_opp: m.ip_opp,
+                        },
+                    );
                 }
             }
         }
@@ -16505,6 +16561,68 @@ mod tests {
             vec![(pgob, gid, crate::fight::SWING_DEF_DMG, 5)],
             "one swing = exactly one PvpSwing to the victim's home node"
         );
+    }
+
+    /// Cross-node maneuver IP relay (session 42): the foreign attacker's
+    /// node relays a ManeuverDelta; the victim's home node folds the
+    /// opponent-pool delta into her authoritative relation row keyed by
+    /// the attacker's guest gob and re-streams her fight window. A zero
+    /// delta is a no-op (no rel creation, no wire traffic).
+    #[tokio::test]
+    async fn maneuver_delta_relay_folds_and_streams() {
+        let (mut g, mut rx, _raw, mut mesh_rx) = clustered_game("maneuverdelta", 0, 2);
+        let (vidx, vgob) = second_player(&mut g, "victim", Some(&mut mesh_rx));
+        let attacker = foreign_node_gob_id(0, 2, 9);
+        // The victim is already dueling the foreign attacker: a relation
+        // row keyed by the attacker's gob exists.
+        g.sessions
+            .get_mut(&2)
+            .unwrap()
+            .fight
+            .rels
+            .push(crate::fight::FightRel::new(attacker));
+        g.on_node_msg(crate::nodes::NodeMsg::ManeuverDelta {
+            attacker,
+            victim: vgob,
+            ip_opp: -20,
+        });
+        let rel = g
+            .sessions
+            .get(&2)
+            .unwrap()
+            .fight
+            .rel(attacker)
+            .expect("relation row survives the delta")
+            .clone();
+        assert_eq!(rel.ip_self, 0, "the delta clamps at zero, never below");
+        // A positive fold raises the victim's own pool.
+        g.on_node_msg(crate::nodes::NodeMsg::ManeuverDelta {
+            attacker,
+            victim: vgob,
+            ip_opp: 30,
+        });
+        let rel = g
+            .sessions
+            .get(&2)
+            .unwrap()
+            .fight
+            .rel(attacker)
+            .unwrap()
+            .clone();
+        assert_eq!(rel.ip_self, 30);
+        // The victim's fight window re-streamed (an upd frame on her
+        // widget queue).
+        let got_upd = rx.try_recv().is_ok();
+        assert!(got_upd, "the victim's window re-streams after the delta");
+        assert_eq!(g.world.players[vidx].session, 2, "victim session intact");
+        // Zero delta: no rel creation for an unknown row, no crash.
+        let stranger = foreign_node_gob_id(0, 2, 21);
+        g.on_node_msg(crate::nodes::NodeMsg::ManeuverDelta {
+            attacker: stranger,
+            victim: vgob,
+            ip_opp: 0,
+        });
+        assert!(g.sessions.get(&2).unwrap().fight.rel(stranger).is_none());
     }
 
     /// Authority side of the relay duel: the victim's home node chips

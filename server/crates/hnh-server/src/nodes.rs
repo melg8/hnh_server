@@ -379,6 +379,18 @@ pub enum NodeMsg {
         landed: bool,
         killed: bool,
     },
+    /// Attacker-home -> victim-home: the opponent-pool delta of a
+    /// fight-window maneuver (session 42). The victim's IP pool is
+    /// authoritative on her home node; when the attacker is a foreign
+    /// session player the delta must cross the mesh (the attacker's own
+    /// window only mirrors the prediction). The receiver folds `ip_opp`
+    /// into the victim's relation row keyed by the attacker's gob and
+    /// re-streams her fight window.
+    ManeuverDelta {
+        attacker: i32,
+        victim: i32,
+        ip_opp: i32,
+    },
     /// Cross-node static interaction (session 30), home -> authority.
     /// The clicking player (a session player homed on the sender) acted on
     /// the static gob `target`; the target's LIFECYCLE (drop contents, tree
@@ -866,6 +878,7 @@ fn msg_name(msg: &NodeMsg) -> &'static str {
         NodeMsg::PvpArrowResult { .. } => "pvp_arrow_result",
         NodeMsg::PvpSwing { .. } => "pvp_swing",
         NodeMsg::PvpSwingResult { .. } => "pvp_swing_result",
+        NodeMsg::ManeuverDelta { .. } => "maneuver_delta",
         NodeMsg::CharQuery { .. } => "char_query",
         NodeMsg::CharData { .. } => "char_data",
         NodeMsg::CharAck { .. } => "char_ack",
@@ -1001,6 +1014,11 @@ mod tests {
             def: 7000,
             landed: false,
             killed: false,
+        });
+        msg_roundtrip(NodeMsg::ManeuverDelta {
+            attacker: 0x0001_0007,
+            victim: 0x0002_0003,
+            ip_opp: -20,
         });
         msg_roundtrip(NodeMsg::RelayStaticAct {
             player: 0x0002_0007,
