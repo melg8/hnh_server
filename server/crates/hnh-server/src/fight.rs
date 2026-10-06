@@ -35,6 +35,36 @@ pub const OPENING_THRESHOLD: i32 = 2000;
 /// Attack cooldown ticks sent in `atkc` (legacy reads them as 1/60 s).
 pub const ATKC_TICKS: i32 = 8;
 
+/// Melee weapon base damage per equipped resource (server policy).
+///
+/// Legacy only documents the Soldier's Sword base damage (400, RoB
+/// worked example - an item this resource pack does not ship) and its
+/// linear `basedamage * ql * str / 10` formula does not reproduce its
+/// own example arithmetically (items-and-quality.md Open questions).
+/// This server therefore reuses the scaling every other quality system
+/// in the pack already applies (armor QM, Fandom bow damage):
+/// `dmg = base * sqrt(q/10) * (str/10)`.
+///
+/// The stone axe (the craftable melee weapon of this pack) sits at 15:
+/// three unarmed blows at q10/str10, still far under the bow's 75.
+pub const WEAPONS: &[(&str, i32)] = &[("gfx/invobjs/axe", 15)];
+
+/// Unarmed melee damage: the strength-only legacy variant
+/// `(5 * str / 10).max(1)` (Punch family, Combat_Actions).
+pub fn unarmed_dmg(str_: i32) -> i32 {
+    (5 * str_ / 10).max(1)
+}
+
+/// Equipped melee weapon damage, or None when the resource is not a
+/// weapon (the unarmed model applies). Quality and strength scale as
+/// documented on [`WEAPONS`].
+pub fn weapon_dmg(resname: &str, ql: i32, str_: i32) -> Option<i32> {
+    let &(_, base) = WEAPONS.iter().find(|(r, _)| *r == resname)?;
+    let qm = ((ql.max(1) as f64) / 10.0).sqrt();
+    let sm = (str_.max(1) as f64) / 10.0;
+    Some(((base as f64) * qm * sm).max(1.0) as i32)
+}
+
 /// Build one uimsg payload for the frv widget.
 ///
 /// Arguments are encoded as typed list ints, matching Fightview.uimsg.
@@ -132,5 +162,30 @@ mod tests {
         let r = FightRel::new(9);
         assert_eq!(r.defence, BAR_FULL);
         assert_eq!(r.balance, 0);
+    }
+
+    #[test]
+    fn unarmed_damage_is_strength_only() {
+        // Punch family: (5 * str / 10).max(1).
+        assert_eq!(unarmed_dmg(10), 5);
+        assert_eq!(unarmed_dmg(30), 15);
+        assert_eq!(unarmed_dmg(1), 1, "minimum one point");
+    }
+
+    #[test]
+    fn weapon_damage_scales_with_quality_and_strength() {
+        // Stone axe base 15: q10/str10 = 15 (three unarmed blows).
+        assert_eq!(weapon_dmg("gfx/invobjs/axe", 10, 10), Some(15));
+        // Quality doubles from 10 to 40 (sqrt scaling, the same QM the
+        // armor and bow systems apply).
+        assert_eq!(weapon_dmg("gfx/invobjs/axe", 40, 10), Some(30));
+        // Strength enters linearly: str 20 doubles the q10 blow.
+        assert_eq!(weapon_dmg("gfx/invobjs/axe", 10, 20), Some(30));
+        // Floor: a q1 axe still swings for at least the unarmed minimum.
+        assert!(weapon_dmg("gfx/invobjs/axe", 1, 1).is_some_and(|d| d >= 1));
+        // Non-weapons fall through to the unarmed model (None).
+        assert_eq!(weapon_dmg("gfx/invobjs/woodbow", 10, 10), None);
+        assert_eq!(weapon_dmg("gfx/invobjs/stonearrow", 10, 10), None);
+        assert_eq!(weapon_dmg("gfx/invobjs/branch", 10, 10), None);
     }
 }

@@ -8696,8 +8696,11 @@ impl Game {
                         .get(&target)
                         .map(|f| f.def)
                         .unwrap_or(0);
-                    let str = *self.world.players[pidx].attrs.get("str").unwrap_or(&10);
-                    ((5 * str / 10).max(1), def_chip)
+                    // The attacker's equipped melee weapon replaces the
+                    // unarmed model on the relay path too (game.rs
+                    // melee_dmg: first weapon in the equipment slots).
+                    let dmg = self.melee_dmg(pidx);
+                    (dmg, def_chip)
                 };
                 self.world.players[pidx].stamina = (self.world.players[pidx].stamina - 2).max(0);
                 if let Some(c) = self.cluster.as_ref() {
@@ -8810,8 +8813,7 @@ impl Game {
                     continue;
                 };
                 self.world.players[pidx].stamina = (self.world.players[pidx].stamina - 2).max(0);
-                let str = *self.world.players[pidx].attrs.get("str").unwrap_or(&10);
-                let dmg = (5 * str / 10).max(1);
+                let dmg = self.melee_dmg(pidx);
                 // Chip the victim's session defence bar; an opening
                 // (below threshold) passes the damage through and resets
                 // the bar to full, mirroring the animal-bite policy.
@@ -8915,8 +8917,7 @@ impl Game {
                     (breaking, landed)
                 };
                 if landed {
-                    let str = *self.world.players[pidx].attrs.get("str").unwrap_or(&10);
-                    swing = Some((5 * str / 10).max(1));
+                    swing = Some(self.melee_dmg(pidx));
                 }
             }
             self.world.players[pidx].stamina = (self.world.players[pidx].stamina - 2).max(0);
@@ -9780,6 +9781,23 @@ impl Game {
             }
         }
         (def, abs)
+    }
+
+    /// The player's melee swing damage: the FIRST weapon found in the
+    /// 16 equipment slots (hand items live at 3/4; slot addressing is
+    /// server-side policy, docs/mechanics/items/items-and-quality.md),
+    /// else the unarmed strength model (fight.rs). Used by every swing
+    /// path - local PvP, animal fights, and the cross-node relays.
+    fn melee_dmg(&self, pidx: usize) -> i32 {
+        let str_ = *self.world.players[pidx].attrs.get("str").unwrap_or(&10);
+        for slot in &self.world.players[pidx].equip {
+            let Some(s) = slot else { continue };
+            let name = self.world.res.name(s.res).unwrap_or("");
+            if let Some(d) = crate::fight::weapon_dmg(name, i32::from(s.ql), str_) {
+                return d.max(1);
+            }
+        }
+        crate::fight::unarmed_dmg(str_)
     }
 
     /// Apply HP damage to a session player after armor absorption.
@@ -15595,6 +15613,88 @@ mod tests {
             crate::fight::BAR_FULL - crate::fight::SWING_DEF_DMG,
             "victim chipped the attacker's defence"
         );
+    }
+
+    /// An equipped melee weapon replaces the unarmed model on every
+    /// local swing path: the stone axe at q10/str10 deals 15 through an
+    /// opening (fight.rs WEAPONS table) instead of the unarmed 5.
+    #[tokio::test]
+    async fn melee_local_weapon_swing_deals_axe_damage() {
+        let (mut g, mut rx, _raw) = entered_game("meleeaxe");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let (vidx, vgob) = second_player(&mut g, "victim", None);
+        // Equip the stone axe in the hand slot (slot 3, q10).
+        let axe = g.world.res.intern("gfx/invobjs/axe");
+        g.world.players[pidx].equip[3] = Some(InvStack {
+            res: axe,
+            count: 1,
+            ql: 10,
+            label: "",
+        });
+        g.start_pvp_melee(1, vgob);
+        // Wear the defence to the opening, then land one swing.
+        g.sessions.get_mut(&2).unwrap().fight.own_def = crate::fight::OPENING_THRESHOLD;
+        g.sessions.get_mut(&1).unwrap().fight.own_off = crate::fight::BAR_FULL;
+        g.sessions.get_mut(&1).unwrap().fight.atkc = 0;
+        g.tick();
+        assert_eq!(
+            g.world.players[vidx].hp,
+            100 - 15,
+            "q10 stone axe at str 10 deals 15 through the opening (base 15)"
+        );
+        let chat = drain_chat(&mut rx);
+        assert!(
+            chat.iter()
+                .any(|t| t.contains("You hit victim for 15 damage.")),
+            "attacker told about the weapon damage: {chat:?}"
+        );
+        // Unequip: the next opening falls back to the unarmed model.
+        g.world.players[pidx].equip[3] = None;
+        g.sessions.get_mut(&2).unwrap().fight.own_def = crate::fight::OPENING_THRESHOLD;
+        g.sessions.get_mut(&1).unwrap().fight.own_off = crate::fight::BAR_FULL;
+        g.sessions.get_mut(&1).unwrap().fight.atkc = 0;
+        g.tick();
+        assert_eq!(
+            g.world.players[vidx].hp,
+            100 - 15 - 5,
+            "bare hands deal the unarmed 5 again"
+        );
+    }
+
+    /// The relay path carries the weapon too: a cross-node PvpSwing
+    /// ships the axe damage (15) instead of the unarmed 5.
+    #[tokio::test]
+    async fn melee_relay_weapon_ships_axe_damage() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("meleerelayaxe", 0, 2);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let gid = guest_player(&mut g, 20);
+        let axe = g.world.res.intern("gfx/invobjs/axe");
+        g.world.players[pidx].equip[3] = Some(InvStack {
+            res: axe,
+            count: 1,
+            ql: 10,
+            label: "",
+        });
+        g.player_interact(1, pgob, gid, (0, 0));
+        let (wid, _) = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .player_menu
+            .expect("guest fight menu armed");
+        g.on_party_menu_choice(1, wid, 0);
+        g.sessions.get_mut(&1).unwrap().fight.own_off = crate::fight::BAR_FULL;
+        g.sessions.get_mut(&1).unwrap().fight.atkc = 0;
+        while mesh_rx.try_recv().is_ok() {}
+        g.tick();
+        let mut swings = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::PvpSwing { dmg, .. } = msg {
+                swings.push(dmg);
+            }
+        }
+        assert_eq!(swings, vec![15], "the relay swing carries the axe damage");
     }
 
     /// Cross-node duel: the Fight petal on a GUEST player arms the
