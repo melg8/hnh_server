@@ -853,6 +853,9 @@ impl Game {
             guests = self.world.guests.len(),
             guest_pub = self.world.perf.guest_pub,
             guest_ingests = self.world.perf.guest_ingests,
+            vis_scan_us = self.world.perf.vis_scan_us,
+            vis_spawn_us = self.world.perf.vis_spawn_us,
+            vis_retract_us = self.world.perf.vis_retract_us,
             "perf"
         );
     }
@@ -1870,6 +1873,7 @@ impl Game {
         // deployment hands to its owning node processes. Results reorder
         // back into to_scan order before phase B; the exact distance
         // filter is unchanged. ---
+        let scan_t = Instant::now();
         let in_range: Vec<Vec<GobId>> = if self.workers > 1 && to_scan.len() > 8 {
             let nodes = std::num::NonZeroUsize::new(self.workers).expect("workers >= 1");
             let parts = crate::grid_owner::partition_by_owner(
@@ -1897,6 +1901,7 @@ impl Game {
                 .collect()
         };
         self.world.perf.vis_gob_scans += in_range.iter().map(|v| v.len() as u64).sum::<u64>();
+        self.world.perf.vis_scan_us = scan_t.elapsed().as_micros() as u64;
         self.world.perf.vis_cells = self.world.gobs.vis.cell_count();
         // --- Phase B: serial application per session. ---
         // Movement deltas are NOT re-sent here: LINSTEP progress streams
@@ -1904,7 +1909,10 @@ impl Game {
         // a per-session needs_move rescan duplicated every progress frame
         // AND re-cloned it into unacked - at 800 sessions x ~200 movers
         // that was the dominant vis-phase cost.
+        let mut spawn_us: u128 = 0;
+        let mut retract_us: u128 = 0;
         for ((sid, (px, py), cell_moved), cand) in to_scan.into_iter().zip(in_range) {
+            let spawn_t = Instant::now();
             for id in cand {
                 // Check-only here: stream_spawn performs the insert and
                 // skips already-present ids; inserting before calling it
@@ -1920,6 +1928,8 @@ impl Game {
             // is wasted work: run it every 8th tick and whenever the
             // session crossed a vis cell. Deaths retract immediately via
             // broadcast_retract.
+            spawn_us += spawn_t.elapsed().as_micros();
+            let retract_t = Instant::now();
             if cell_moved || self.world.tick.is_multiple_of(8) {
                 let to_retract: Vec<GobId> = {
                     let out = self.sessions.get_mut(&sid).expect("BUG: sid from keys");
@@ -1949,8 +1959,11 @@ impl Game {
                     self.stream_retract(sid, id);
                 }
             }
+            retract_us += retract_t.elapsed().as_micros();
             self.world.perf.visible_total += self.sessions[&sid].visible.len();
         }
+        self.world.perf.vis_spawn_us = spawn_us as u64;
+        self.world.perf.vis_retract_us = retract_us as u64;
     }
 
     /// Pure in-range gob scan around a point (no mutation; rayon-friendly).

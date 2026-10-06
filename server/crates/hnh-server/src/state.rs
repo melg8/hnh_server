@@ -807,6 +807,12 @@ pub struct Perf {
     /// (cumulative) - cluster-mode counters for the perf report.
     pub guest_pub: u64,
     pub guest_ingests: u64,
+    /// Last-tick visibility sub-phase attribution (microseconds):
+    /// candidate scan (phase A/A2), spawn application, retract sweep.
+    /// Load-test hot-loop attribution inside the visibility phase.
+    pub vis_scan_us: u64,
+    pub vis_spawn_us: u64,
+    pub vis_retract_us: u64,
 }
 
 impl World {
