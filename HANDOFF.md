@@ -2226,3 +2226,93 @@ damage through a full bar kills a 60 HP wolf). 195 tests green,
 clippy/fmt clean, SESSION37 VERIFY: OK (engagement battery now 15).
 Remaining from the NEXT list: player-vs-player archery, unit-count
 reconciliation vs RoB, Windows launcher smoke after resource regen.
+
+## 2026-10-06 - Session 38: player-versus-player archery end to end (local + cross-node + wire probe)
+
+The session-37 NEXT items "player-vs-player archery" and "Windows
+launcher smoke" are CLOSED; the unit-count reconciliation against RoB
+stays open (sources still blocked).
+
+WHAT:
+
+- PVP ENGAGEMENT (game.rs player_interact). Clicking another player
+  with an equipped bow opens the ranged aim: local Kind::Player
+  targets take the ranged path BEFORE the party-invite menu; guest
+  GuestKind::Player targets (previously a no-op click) aim too; a
+  SELF-click never aims (start_aim guard, falls through to the party
+  menu which ignores self-clicks); without a bow the click keeps the
+  party-invite menu - melee PvP between players remains unimplemented
+  and the old "melee relay fight between players exists" doc claim
+  was WRONG (corrected in combat-system.md: only the animal relay
+  fight exists).
+
+- SHOT RESOLUTION (game.rs shoot_arrow). Target resolution became a
+  ShotTarget match over guest/local x animal/player. A LOCAL player
+  hit applies hurt_player directly (armor absorption armor.rs
+  dmg*K/(K+abs), HP, stamina, knockout reset to 50), streams
+  gfx/fx/hit on the victim's avatar, and chats both sides ("Your
+  arrow hits <name> for N damage." / "An arrow hits you for N
+  damage."). A CROSS-NODE hit ships NodeMsg::PvpArrow { victim,
+  attacker, dmg } to the VICTIM's home node - node_of_gob derives it
+  from the gob id's slot range, the same authority split as the
+  animal-bite PlayerHurt flow - and the victim's node applies
+  hurt_player + victim chat + hit FX, answering PvpArrowResult {
+  shooter, killed } so the shooter's chat can report "You have
+  defeated your target!" on a knockout. hurt_player now returns the
+  knockout flag. The aim re-arms while the victim lives and arrows
+  remain (players do not die as gobs - the knockout keeps the avatar
+  in the world).
+
+- WIRE PROBE (server/scripts/probe_pvp.py). The full chain against a
+  live server, the exact path the Java client drives: two clients
+  enter, the shooter crafts a Wooden Bow and a 10-arrow Stone Arrow
+  batch from the starter kit through the menugrid act/make widgets,
+  equips the bow through the paperdoll (the epry "ava" uimsg is the
+  reliable self-identity - OD_BUDDY does NOT stream for a fresh
+  character, found by debugging), gob-clicks the victim, and the
+  probe observes the "Aiming at 25%..." progress line, the
+  auto-release, "Your arrow hits pvpvictim-... for 75 damage." on
+  the shooter, "An arrow hits you..." on the victim, and the victim's
+  OD_HEALTH quarters dropping to 1/4 (100-75 q10). PVP WIRE: OK.
+
+- WINDOWS LAUNCHER SMOKE. windows/make-gameres.ps1 gained the
+  wipe-first semantics of make-gameres.sh (files removed from the jar
+  never linger) and extracts the jar fully BEFORE wiping so a failed
+  extraction leaves the served pack intact.
+  server/scripts/verify_windows_gameres.sh runs the REAL ps1 under
+  PowerShell Core 7.4 on Linux (backslash path literals converted,
+  $env:TEMP mapped) - 6382 files generated, hair.res/bow.res
+  verified, .genrev correctly wiped: WIN GAMERES SMOKE: OK. The
+  structural gates verify_windows_launch.sh leaf1-g1/g2 stay green.
+  UiProbe re-run after the regeneration: run/equip/charlist all OK.
+
+EVIDENCE: 200 unit tests green (5 new PvP: aim-vs-party click,
+local hit through armor + arrow economy + re-arm, lethal knockout +
+defeat chat, guest shot ships PvpArrow at Fandom damage, authority
+apply + PvpArrowResult answer non-lethal and lethal). clippy -D
+warnings clean, fmt clean. scripts/verify_session38.sh (pvp-units/
+full/lint/boot): SESSION38 VERIFY: OK. probe_pvp.py against a live
+server: PVP WIRE: OK. verify_windows_gameres.sh: WIN GAMERES SMOKE:
+OK (6382 files). Unlazy gates session38: G1-G5 automatic PASS,
+G6/G7 manual (this entry + push).
+
+NOT DONE THIS SESSION (rolled to NEXT):
+- Melee PvP between players (unarmed duel between two players; the
+  openings economy currently only engages players vs animals).
+- LP/murder consequences for PvP kills (no LP grant, no criminal
+  state - a knockout chat is all; legacy policy undocumented).
+- Unit-count reconciliation of the bow chain vs RoB (sources still
+  behind Cloudflare).
+- GL-client run on a display-capable host (the wire probe + UiProbe
+  cover the protocol path only).
+
+NEXT (handoff):
+- melee PvP between players (openings duel across two session
+  players, local first, then the PvpArrow-style relay split).
+- PvP consequences: LP policy or criminal/murder state if a legacy
+  source surfaces.
+- remaining craft paginae with pack resources (none fully resourced
+  beyond the bow chain + quiver - basket/bowl paginae do NOT exist
+  in this pack, verified session 37).
+- re-run scripts/jogl/run-real-client-e2e.sh on a display-capable
+  host when one is available (carried since session 34).
