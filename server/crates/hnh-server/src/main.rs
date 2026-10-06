@@ -258,11 +258,28 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         (Some(c), Some(k)) => (c.clone(), k.clone()),
         (None, None) => {
             // Default dev pair: keep one cert per repo regardless of cwd.
+            // Cluster nodes suffix the pair with their node index: two
+            // nodes booted from the same repo (the verify scripts, the
+            // start scripts) would otherwise both regenerate the SHARED
+            // file at once, and a node can parse a half-written PEM and
+            // die at the auth self-check (observed as "auth tcp/N not
+            // reachable" on the second node).
             let dir = default_repo_dir("certs");
-            (
-                dir.join("authsrv.crt.pem").display().to_string(),
-                dir.join("authsrv.key.pem").display().to_string(),
-            )
+            if args.cluster.is_some() {
+                (
+                    dir.join(format!("authsrv-n{}.crt.pem", args.node))
+                        .display()
+                        .to_string(),
+                    dir.join(format!("authsrv-n{}.key.pem", args.node))
+                        .display()
+                        .to_string(),
+                )
+            } else {
+                (
+                    dir.join("authsrv.crt.pem").display().to_string(),
+                    dir.join("authsrv.key.pem").display().to_string(),
+                )
+            }
         }
         _ => return Err(anyhow::anyhow!("--cert and --key must be set together")),
     };
