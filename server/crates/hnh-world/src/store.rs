@@ -17,6 +17,13 @@ pub struct GridStore {
     /// Applied after on-demand generation so mutations survive LRU
     /// eviction and process restarts (persisted by the game task).
     pub overrides: HashMap<(i32, i32), u8>,
+    /// Cumulative grid generations (get-or-generate misses). Perf
+    /// attribution: a chase `start_move` into an ungenerated grid pays
+    /// gen_grid + apply_overrides inline in the combat phase (session 43).
+    pub gen_count: u64,
+    /// Cumulative last-use bookkeeping inserts (cache hits) - pairs with
+    /// `gen_count` to split hits from misses cheaply.
+    pub hit_count: u64,
 }
 
 impl GridStore {
@@ -27,6 +34,8 @@ impl GridStore {
             tick_clock: 0,
             last_use: HashMap::new(),
             overrides: HashMap::new(),
+            gen_count: 0,
+            hit_count: 0,
         }
     }
 
@@ -41,11 +50,13 @@ impl GridStore {
         self.tick_clock += 1;
         if let Some(g) = self.grids.get(&gc) {
             self.last_use.insert(gc, self.tick_clock);
+            self.hit_count += 1;
             return std::sync::Arc::clone(g);
         }
         let grid = std::sync::Arc::new(self.gen.gen_grid(gc.0, gc.1));
         self.grids.insert(gc, std::sync::Arc::clone(&grid));
         self.last_use.insert(gc, self.tick_clock);
+        self.gen_count += 1;
         let grid = self.apply_overrides(gc);
         if self.grids.len() > MAX_CACHED_GRIDS {
             self.evict();

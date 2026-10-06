@@ -923,6 +923,29 @@ pub struct Perf {
     pub combat_players_us: u64,
     pub combat_animals_us: u64,
     pub combat_relay_us: u64,
+    /// Combat player-phase event counters (last tick): chase `start_move`
+    /// calls (count + accumulated microseconds), in-reach swing-path
+    /// entries, and landed PvP hits (count + accumulated hit-tail
+    /// microseconds: hurt + chat + FX broadcast + log). Splits the 18 ms
+    /// player-phase mean the session-43 load run measured.
+    pub combat_chase_n: u64,
+    pub combat_chase_us: u64,
+    pub combat_swing_n: u64,
+    pub combat_hit_n: u64,
+    pub combat_hit_us: u64,
+    /// Last-tick `start_move` sub-attribution (microseconds, cumulative
+    /// over the tick's calls): path check (interpolated_pos, path_clear,
+    /// terrain read), viewer fan-out (LINBEG scan, send, unacked) and the
+    /// pose layer stream. `mv_calls` splits per-call averages.
+    pub mv_path_us: u64,
+    pub mv_viewers_us: u64,
+    pub mv_pose_us: u64,
+    pub mv_calls: u64,
+    /// Last-tick viewer-index diagnostics: mean visible set size across
+    /// sessions (visible_total / sessions) and the total candidate count
+    /// the cell-index fan-outs probed (`ix_cand_n`). Decides whether the
+    /// fan-out cost is the candidate walk or the pair work.
+    pub ix_cand_n: u64,
     /// Last-tick packed movement batch: block count and distinct cell
     /// count (the fan-out probe width). Zero with no movers.
     pub move_blocks: u64,

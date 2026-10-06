@@ -266,6 +266,13 @@ pub struct Game {
     ///   player index + 1, first (lowest) player index wins - the same
     ///   "first engaged player" semantics the linear `find` had.
     combat_ix: CombatIndex,
+    /// Cell-indexed viewer candidates (see `ViewerIndex`); rebuilt once
+    /// per tick before the movement phase, read by the LINBEG, pose and
+    /// FX fan-outs instead of a full `sessions` scan per event.
+    viewer_ix: ViewerIndex,
+    /// Scratch session-id list for the viewer fan-outs (taken/restored
+    /// across helper calls; `viewers_of_slot` fills it).
+    viewer_scratch: Vec<SessionId>,
     /// Milliseconds of online time per granted LP (skills.rs accrual;
     /// precomputed once from HNH_LP_RATE, u64::MAX = disabled).
     lp_ms_per_lp: u64,
@@ -321,6 +328,20 @@ struct CombatIndex {
     /// Scratch snapshot of session ids for the 5 Hz fight-bar streaming
     /// pass (rows mutate mid-loop through `sessions.get_mut`).
     bar_sids: Vec<SessionId>,
+}
+
+/// Viewer fan-out index (session 43): session id -> the VisIndex cell of
+/// its player's position. Rebuilt ONCE per tick in a single O(sessions)
+/// pass; a gob's viewer candidates are the sessions in the 5x5 cell
+/// neighborhood of the gob position (VIEW_RADIUS 300 + at most one
+/// tick's 50-subtile drift fit inside two 250-tile cells on each axis),
+/// and the exact `visible.contains` filter stays authoritative per
+/// candidate. Replaces the per-event full `sessions` scan in the
+/// LINBEG / pose / FX fan-outs (measured 600-1100 us per event at the
+/// 1000-bot load scale: cache-miss traversal of every large SessionOut).
+#[derive(Default)]
+struct ViewerIndex {
+    by_cell: HashMap<(i32, i32), Vec<SessionId>>,
 }
 
 /// Movement fan-out square half-width (subtiles): a still-visible mover
@@ -609,6 +630,8 @@ impl Game {
             workers: 1,
             move_scratch: crate::move_batch::MoveBatch::default(),
             combat_ix: CombatIndex::default(),
+            viewer_ix: ViewerIndex::default(),
+            viewer_scratch: Vec::new(),
             lp_ms_per_lp: {
                 // HNH_LP_RATE scales the passive accrual (skills.rs);
                 // malformed values disable accrual rather than wedge boot.
@@ -935,8 +958,20 @@ impl Game {
             combat_players_us = self.world.perf.combat_players_us,
             combat_animals_us = self.world.perf.combat_animals_us,
             combat_relay_us = self.world.perf.combat_relay_us,
+            combat_chase_n = self.world.perf.combat_chase_n,
+            combat_chase_us = self.world.perf.combat_chase_us,
+            combat_swing_n = self.world.perf.combat_swing_n,
+            combat_hit_n = self.world.perf.combat_hit_n,
+            combat_hit_us = self.world.perf.combat_hit_us,
+            mv_path_us = self.world.perf.mv_path_us,
+            mv_viewers_us = self.world.perf.mv_viewers_us,
+            mv_pose_us = self.world.perf.mv_pose_us,
+            mv_calls = self.world.perf.mv_calls,
+            ix_cand_n = self.world.perf.ix_cand_n,
             move_blocks = self.world.perf.move_blocks,
             move_cells = self.world.perf.move_cells,
+            grid_gens = self.world.grids.gen_count,
+            grid_hits = self.world.grids.hit_count,
             "perf"
         );
     }
@@ -8318,10 +8353,62 @@ impl Game {
     // Simulation tick
     // ------------------------------------------------------------------
 
+    /// Rebuild the cell-indexed viewer candidates (one O(sessions) pass;
+    /// see `ViewerIndex`). Sessions whose player is not in the world see
+    /// nothing and are skipped.
+    fn rebuild_viewer_index(&mut self) {
+        let mut ix = std::mem::take(&mut self.viewer_ix);
+        ix.by_cell.clear();
+        for (&sid, out) in self.sessions.iter() {
+            let Some(pslot) = out.player_gob.and_then(|g| self.world.gobs.get(g)) else {
+                continue;
+            };
+            let (x, y) = self.world.gobs.pos[pslot];
+            ix.by_cell
+                .entry(crate::visidx::cell_of(x, y))
+                .or_default()
+                .push(sid);
+        }
+        self.viewer_ix = ix;
+    }
+
+    /// Collect the exact viewer session ids of the gob at `slot` into
+    /// `out` (scratch reuse; clear + fill). Candidates come from the 5x5
+    /// cell neighborhood of the gob position, the authoritative filter is
+    /// the candidate's own `visible.contains`. `cand_out` accumulates the
+    /// candidate count for the perf diagnostics.
+    fn viewers_of_slot(&self, slot: usize, out: &mut Vec<SessionId>, cand_out: &mut u64) {
+        out.clear();
+        let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
+        let (gx, gy) = self.world.gobs.pos[slot];
+        let (cgx, cgy) = crate::visidx::cell_of(gx, gy);
+        for dx in -2..=2 {
+            for dy in -2..=2 {
+                let Some(sids) = self.viewer_ix.by_cell.get(&(cgx + dx, cgy + dy)) else {
+                    continue;
+                };
+                for &sid in sids {
+                    *cand_out += 1;
+                    if let Some(o) = self.sessions.get(&sid) {
+                        if o.visible.contains(&id) {
+                            out.push(sid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn tick(&mut self) {
         self.world.tick += 1;
         self.world.perf.move_blocks = 0;
         self.world.perf.move_cells = 0;
+        self.world.perf.mv_path_us = 0;
+        self.world.perf.mv_viewers_us = 0;
+        self.world.perf.mv_pose_us = 0;
+        self.world.perf.mv_calls = 0;
+        self.world.perf.ix_cand_n = 0;
+        self.rebuild_viewer_index();
         // Cluster character migrations: re-broadcast unanswered queries on
         // a fixed cadence (a link still negotiating buffers the retry and
         // answers once the mesh converges); past the deadline, enter with
@@ -8614,13 +8701,10 @@ impl Game {
         // client-side overlay id (15-bit sequence keeps it comfortably
         // positive).
         let olid = ((self.overlay_seq & 0x7FFF) << 1) as i32;
-        let viewers: Vec<SessionId> = self
-            .sessions
-            .iter()
-            .filter(|(_, o)| o.visible.contains(&id))
-            .map(|(s, _)| *s)
-            .collect();
-        for v in viewers {
+        let mut viewers = std::mem::take(&mut self.viewer_scratch);
+        let mut cand = 0u64;
+        self.viewers_of_slot(slot, &mut viewers, &mut cand);
+        for &v in viewers.iter() {
             let Some(out) = self.sessions.get_mut(&v) else {
                 continue;
             };
@@ -8642,6 +8726,8 @@ impl Game {
             out.send_raw(block.clone());
             Self::record_unacked(out, id, frame, block);
         }
+        self.viewer_scratch = viewers;
+        self.world.perf.ix_cand_n += cand;
     }
 
     /// Resolve and stream one composited-drawable pose (OD_LAYERS) to
@@ -8677,13 +8763,10 @@ impl Game {
         };
         let base_global = self.world.res.intern(base_name);
         let frame_i32 = self.world.gobs.frame[slot] as i32;
-        let viewers: Vec<SessionId> = self
-            .sessions
-            .iter()
-            .filter(|(_, o)| o.visible.contains(&id))
-            .map(|(s, _)| *s)
-            .collect();
-        for v in viewers {
+        let mut viewers = std::mem::take(&mut self.viewer_scratch);
+        let mut cand = 0u64;
+        self.viewers_of_slot(slot, &mut viewers, &mut cand);
+        for &v in viewers.iter() {
             let Some(out) = self.sessions.get_mut(&v) else {
                 continue;
             };
@@ -8722,6 +8805,8 @@ impl Game {
                 .or_default()
                 .insert(self.world.gobs.frame[slot], block);
         }
+        self.viewer_scratch = viewers;
+        self.world.perf.ix_cand_n += cand;
     }
 
     /// Stream the Equipment-doll avatar attribute (OD_AVATAR) of the
@@ -8812,6 +8897,10 @@ impl Game {
     /// the CURRENTLY INTERPOLATED position - never from the old
     /// destination, which is what teleported the avatar on rapid clicks.
     fn start_move(&mut self, slot: usize, target: (i32, i32)) -> bool {
+        // Sub-phase attribution (session 43): the combat chase path pays
+        // ~3 ms per start at the 1000-bot scale; these counters split
+        // path check, viewer fan-out, pose stream and publish.
+        let t0 = Instant::now();
         let (sx, sy) = self.interpolated_pos(slot);
         self.world.gobs.set_pos(slot, (sx, sy));
         let (tx, ty) = (
@@ -8819,6 +8908,9 @@ impl Game {
             target.1.clamp(sy - 5000, sy + 5000),
         );
         if !path_clear(&mut self.world, sx, sy, tx, ty) {
+            let perf = &mut self.world.perf;
+            perf.mv_path_us += t0.elapsed().as_micros() as u64;
+            perf.mv_calls += 1;
             return false;
         }
         let dist = ((tx - sx).abs() + (ty - sy).abs()).max(1);
@@ -8845,13 +8937,13 @@ impl Game {
         self.world.gobs.frame[slot] += 1;
         let frame = self.world.gobs.frame[slot];
         let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
-        let viewers: Vec<SessionId> = self
-            .sessions
-            .iter()
-            .filter(|(_, o)| o.visible.contains(&id))
-            .map(|(s, _)| *s)
-            .collect();
-        for v in viewers {
+        let t_v = Instant::now();
+        // Viewer candidates from the per-tick cell index (was a full
+        // sessions scan per start: 636 us mean at the 1000-bot scale).
+        let mut viewers = std::mem::take(&mut self.viewer_scratch);
+        let mut cand = 0u64;
+        self.viewers_of_slot(slot, &mut viewers, &mut cand);
+        for &v in viewers.iter() {
             if let Some(out) = self.sessions.get_mut(&v) {
                 let mut m = MessageBuf::new();
                 m.uint8(MSG_OBJDATA)
@@ -8868,6 +8960,12 @@ impl Game {
                 Self::record_unacked(out, id, frame, block);
             }
         }
+        self.viewer_scratch = viewers;
+        {
+            let perf = &mut self.world.perf;
+            perf.mv_viewers_us += t_v.elapsed().as_micros() as u64;
+            perf.ix_cand_n += cand;
+        }
         trace!(id, sx, sy, tx, ty, steps, total_ms, "move started");
         // Face the travel direction and swap to the walking pose set.
         // One layer stream per pose+direction: each directional resource
@@ -8880,12 +8978,19 @@ impl Game {
         self.world.gobs.facing[slot] = dir;
         if self.world.gobs.pose_streamed[slot] != walking {
             self.world.gobs.pose_streamed[slot] = walking;
+            let t_p = Instant::now();
             self.stream_pose(slot);
+            let perf = &mut self.world.perf;
+            perf.mv_pose_us += t_p.elapsed().as_micros() as u64;
         }
         // Cluster: the move start/retarget is a guest update for subscribed
         // peers (and the cell owner, for players standing abroad).
         let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
         self.publish(id, GuestEv::Update);
+        {
+            let perf = &mut self.world.perf;
+            perf.mv_calls += 1;
+        }
         true
     }
 
@@ -9104,6 +9209,15 @@ impl Game {
         let combat_index_us = t_ix.elapsed().as_micros() as u64;
 
         // --- player side: offence gen, swings, bar streaming ---
+        // Event counters split the phase cost inside the loop (the
+        // session-43 load run measured an 18 ms player-phase mean; these
+        // decide between chase starts, swing bookkeeping and the landed
+        // hit tail: hurt + chat + FX + log).
+        let mut chase_n = 0u64;
+        let mut chase_us = 0u64;
+        let mut swing_n = 0u64;
+        let mut hit_n = 0u64;
+        let mut hit_us = 0u64;
         let t_pl = Instant::now();
         'player: for pidx in 0..self.world.players.len() {
             let (target, aim, sid, pgob) = {
@@ -9144,7 +9258,10 @@ impl Game {
                 if (px - tx).abs() > REACH || (py - ty).abs() > REACH {
                     // In engagement range but not swinging: chase instead.
                     if self.world.gobs.mv[pslot].is_none() {
+                        let t_c = Instant::now();
                         self.start_move(pslot, (tx, ty));
+                        chase_us += t_c.elapsed().as_micros() as u64;
+                        chase_n += 1;
                     }
                     continue;
                 }
@@ -9254,7 +9371,10 @@ impl Game {
                 if self.world.gobs.mv[pslot].is_none() {
                     // Shared movement entry point (client-consistent timing;
                     // see start_move).
+                    let t_c = Instant::now();
                     self.start_move(pslot, (tx, ty));
+                    chase_us += t_c.elapsed().as_micros() as u64;
+                    chase_n += 1;
                 }
                 continue;
             }
@@ -9281,6 +9401,7 @@ impl Game {
                 // Attacker bar gen + swing decision (the same pacing as
                 // the animal path); returns the swing payload when the
                 // offence bar covered a swing this tick.
+                swing_n += 1;
                 let swung = {
                     let Some(out) = self.sessions.get_mut(&sid) else {
                         continue;
@@ -9348,6 +9469,8 @@ impl Game {
                     }
                 }
                 if landed {
+                    hit_n += 1;
+                    let t_h = Instant::now();
                     let knocked = self.hurt_player(vpidx, dmg, pgob);
                     let vname = self.world.players[vpidx].name.clone();
                     let aname = self.world.players[pidx].name.clone();
@@ -9379,6 +9502,7 @@ impl Game {
                         self.world.players[pidx].fight_target = None;
                         self.fight_del(sid, target);
                     }
+                    hit_us += t_h.elapsed().as_micros() as u64;
                 }
                 continue;
             }
@@ -9676,12 +9800,17 @@ impl Game {
         }
 
         // Session-43 sub-attribution: combat p95 spikes were the top NEXT
-        // target; these four counters decide where the next cut goes.
+        // target; these counters decide where the next cut goes.
         let perf = &mut self.world.perf;
         perf.combat_index_us = combat_index_us;
         perf.combat_players_us = combat_players_us;
         perf.combat_animals_us = combat_animals_us;
         perf.combat_relay_us = combat_relay_us;
+        perf.combat_chase_n = chase_n;
+        perf.combat_chase_us = chase_us;
+        perf.combat_swing_n = swing_n;
+        perf.combat_hit_n = hit_n;
+        perf.combat_hit_us = hit_us;
     }
 
     /// Apply player damage to an animal, handling death + loot.
