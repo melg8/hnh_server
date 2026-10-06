@@ -2588,3 +2588,30 @@ NEXT (handoff):
   p95 is the next optimization target.
 - Cross-node maneuver IP relay.
 - Windows smoke + GL client e2e when a display-capable host exists.
+
+### Session 41 addendum: open UiProbe PaginaException (top NEXT item)
+
+The headless UI probe (verify_ui_probe.sh run) fails on the session-40
+maneuver paginae with `MenuGrid$PaginaException: Invalid pagina:
+paginae/atk/blk`, preceded by a delayed resource error `Wrong res
+version (1 != 28484)` from the HTTP res source. Established facts:
+
+- The wire stream is CORRECT: the new test_client PAGINAE parser shows
+  every paginae/atk/* entry with its true file version (blk=1, exactly
+  the version of gameres/paginae/atk/blk.res; no file in the pack or
+  the jar carries 28484; grep finds no such constant in the tree).
+- The same server + wire path passes WORLD ENTRY via test_client.
+- The 28484 value appears ONLY inside the real-client probe (real
+  Glob/MenuGrid/Resource pipeline), reproducibly, on a fresh server
+  and fresh save. Per-entry PAGINAE frames did not fix it.
+- Session 40 shipped the maneuver paginae but did not re-run UiProbe;
+  session 38 was the last green probe run. This is a session-40
+  regression visible only through the real client pipeline.
+
+NEXT: reproduce with the real jar (java -cp build/haven.jar:lib/*
+haven.MainFrame) and trace which caller loads blk with ver 28484
+(Resource.load call sites: Glob.paginae vs MenuGrid.getSubResources vs
+the fightview frv atk/blk uimsg payloads - the frv 'atk'/'blk' uimsgs
+carry resource-id ints, check fight.rs uimsg(w, "blk", &[wb]) against
+the client FightView.java parse). The fightview path is the only other
+place the blk pagina resource is referenced and is session-40 new.
