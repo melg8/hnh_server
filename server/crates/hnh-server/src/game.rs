@@ -4033,9 +4033,9 @@ impl Game {
                 GuestMove::Finish => {
                     let g = self.world.guests.get_mut(&id).expect("checked above");
                     g.moving = false;
+                    // Headerless block (see broadcast_batch).
                     let mut m = MessageBuf::new();
-                    m.uint8(MSG_OBJDATA)
-                        .uint8(0)
+                    m.uint8(0)
                         .int32(id)
                         .int32(frame as i32)
                         .uint8(OD_MOVE)
@@ -4054,8 +4054,7 @@ impl Game {
                 }
                 GuestMove::Step(l) => {
                     let mut m = MessageBuf::new();
-                    m.uint8(MSG_OBJDATA)
-                        .uint8(0)
+                    m.uint8(0)
                         .int32(id)
                         .int32(frame as i32)
                         .uint8(OD_LINSTEP)
@@ -8577,9 +8576,13 @@ impl Game {
                     // cadence (see tick_guests); the client interpolates
                     // locally between corrections.
                     if self.world.tick.is_multiple_of(LINSTEP_EVERY_TICKS) {
+                        // Block layout: [fl][id i32][frame i32][ops..OD_END]
+                        // - NO per-block MSG header. The fan-out datagram
+                        // carries ONE MSG_OBJDATA type byte followed by
+                        // consecutive blocks (Session.getobjdata loops
+                        // exactly this shape).
                         let mut m = MessageBuf::new();
-                        m.uint8(MSG_OBJDATA)
-                            .uint8(0)
+                        m.uint8(0)
                             .int32(id)
                             .int32(frame as i32)
                             .uint8(OD_LINSTEP)
@@ -8609,8 +8612,7 @@ impl Game {
             // "walks then rubber-bands home" defect).
             let frame = self.world.gobs.frame[slot];
             let mut m = MessageBuf::new();
-            m.uint8(MSG_OBJDATA)
-                .uint8(0)
+            m.uint8(0)
                 .int32(id)
                 .int32(frame as i32)
                 .uint8(OD_MOVE)
@@ -8684,6 +8686,14 @@ impl Game {
                         continue;
                     }
                     let bytes = batch.block_bytes(i);
+                    // One MSG_OBJDATA type byte opens the datagram; the
+                    // blocks inside are headerless ([fl][id][frame][ops])
+                    // - exactly what Session.getobjdata loops over.
+                    let m = m.get_or_insert_with(|| {
+                        let mut m = MessageBuf::with_capacity(512);
+                        m.uint8(MSG_OBJDATA);
+                        m
+                    });
                     if let Some((global, patch_off)) = batch.block_patch(i) {
                         // Session-local wire id: resolve the name from the
                         // game-global table, allocate the session wire id
@@ -8699,15 +8709,13 @@ impl Game {
                             let mut patched = bytes.to_vec();
                             let o = patch_off as usize;
                             patched[o..o + 2].copy_from_slice(&w.to_le_bytes());
-                            m.get_or_insert_with(|| MessageBuf::with_capacity(512))
-                                .bytes(&patched);
+                            m.bytes(&patched);
                             if fin {
                                 Self::record_unacked(out, id, frame, patched);
                             }
                         }
                     } else {
-                        m.get_or_insert_with(|| MessageBuf::with_capacity(512))
-                            .bytes(bytes);
+                        m.bytes(bytes);
                         if fin {
                             Self::record_unacked(out, id, frame, bytes.to_vec());
                         }
@@ -8765,12 +8773,11 @@ impl Game {
         let olid = ((self.overlay_seq & 0x7FFF) << 1) as i32;
         // Encode with the global index as the wire placeholder; record the
         // byte offset of that uint16 so the fan-out can patch it per
-        // session. Layout: MSG, seq, id(4), frame(4), OD_OVERLAY, olid(4),
-        // wire(2) <- patch offset, OD_END.
-        let patch_off = 1 + 1 + 4 + 4 + 1 + 4;
+        // session. Headerless block layout: [fl][id(4)][frame(4)]
+        // [OD_OVERLAY][olid(4)][wire(2) <- patch offset][OD_END].
+        let patch_off = 1 + 4 + 4 + 1 + 4;
         let mut m = MessageBuf::new();
-        m.uint8(MSG_OBJDATA)
-            .uint8(0)
+        m.uint8(0)
             .int32(id)
             .int32(frame_i32)
             .uint8(OD_OVERLAY)
@@ -9004,9 +9011,11 @@ impl Game {
         let t_v = Instant::now();
         {
             let cell = crate::visidx::cell_of(sx, sy);
+            // Headerless block: [fl][id][frame][OD_LINBEG][coords][ff] -
+            // the fan-out datagram carries the single MSG_OBJDATA type
+            // byte (see broadcast_batch).
             let mut m = MessageBuf::new();
-            m.uint8(MSG_OBJDATA)
-                .uint8(0)
+            m.uint8(0)
                 .int32(id)
                 .int32(frame as i32)
                 .uint8(OD_LINBEG)
@@ -12212,19 +12221,20 @@ mod tests {
             "start batch counter recorded"
         );
         // Exactly one combined OBJDATA datagram carrying the LINBEG block.
+        // Headerless block layout: [fl][id i32][frame i32][OD ops..][ff].
         let mut linbeg_n = 0u8;
         let mut saw_block = false;
         while let Ok(p) = raw.try_recv() {
-            // Walk the datagram's gob blocks: [MSG][seq][id i32][frame i32]
-            // [OD_LINBEG]...
-            let mut off = 0usize;
-            while off + 11 <= p.len() {
-                let id = i32::from_le_bytes(p[off + 2..off + 6].try_into().unwrap());
-                let fr = i32::from_le_bytes(p[off + 6..off + 10].try_into().unwrap());
-                let od = p[off + 10];
-                if id == pgob && fr == frame as i32 && od == hnh_proto::consts::OD_LINBEG {
-                    linbeg_n += 1;
-                    saw_block = true;
+            assert_eq!(p[0], MSG_OBJDATA, "one type byte opens the datagram");
+            let mut off = 1usize;
+            while off + 9 <= p.len() {
+                if p[off + 9] == hnh_proto::consts::OD_LINBEG {
+                    let id = i32::from_le_bytes(p[off + 1..off + 5].try_into().unwrap());
+                    let fr = i32::from_le_bytes(p[off + 5..off + 9].try_into().unwrap());
+                    if id == pgob && fr == frame as i32 {
+                        linbeg_n += 1;
+                        saw_block = true;
+                    }
                 }
                 // Advance to the next block: each block ends with OD_END.
                 off = match p[off..]
@@ -12236,7 +12246,9 @@ mod tests {
                 };
             }
         }
-        assert!(saw_block, "LINBEG block reached the viewer");
+        if !saw_block {
+            panic!("LINBEG block lost on the wire");
+        }
         assert_eq!(linbeg_n, 1, "one LINBEG per tick, not per viewer");
         // The frame is retransmittable: recorded in `unacked`.
         let out = g.sessions.get(&1).unwrap();
@@ -12278,20 +12290,23 @@ mod tests {
             }
         }
         assert!(announced, "first-use RESID announcement was queued");
-        // The OBJDATA datagram carries the patched wire id at offset 15.
+        // The OBJDATA datagram carries the patched wire id at block
+        // offset 14 ([fl][id 4][frame 4][OD_OVERLAY][olid 4] -> wire).
         let mut found = false;
         while let Ok(p) = raw.try_recv() {
-            let mut off = 0usize;
-            while off + 17 <= p.len() {
-                let id = i32::from_le_bytes(p[off + 2..off + 6].try_into().unwrap());
-                let od = p[off + 10];
-                if id == pgob && od == hnh_proto::consts::OD_OVERLAY {
-                    let wire = u16::from_le_bytes(p[off + 15..off + 17].try_into().unwrap());
-                    assert_eq!(
-                        wire, w,
-                        "overlay wire id patched to the session-local value"
-                    );
-                    found = true;
+            assert_eq!(p[0], MSG_OBJDATA);
+            let mut off = 1usize;
+            while off + 16 <= p.len() {
+                if p[off + 9] == hnh_proto::consts::OD_OVERLAY {
+                    let id = i32::from_le_bytes(p[off + 1..off + 5].try_into().unwrap());
+                    if id == pgob {
+                        let wire = u16::from_le_bytes(p[off + 14..off + 16].try_into().unwrap());
+                        assert_eq!(
+                            wire, w,
+                            "overlay wire id patched to the session-local value"
+                        );
+                        found = true;
+                    }
                 }
                 off = match p[off..]
                     .iter()
@@ -12308,7 +12323,7 @@ mod tests {
         let rec = out.unacked.get(&pgob).and_then(|m| m.get(&frame));
         assert!(rec.is_some(), "FX block recorded for OBJACK");
         assert_eq!(
-            rec.unwrap()[15..17],
+            rec.unwrap()[14..16],
             w.to_le_bytes(),
             "unacked copy carries the PATCHED wire id"
         );
