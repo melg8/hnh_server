@@ -8506,11 +8506,16 @@ impl Game {
         // overlays (chase, hit tails, click handling) through the packed
         // cell-indexed batch - ONE combined datagram per session per tick,
         // encoded once per block. Visibility is fresh from the pass above,
-        // so the fan-out filter sees the exact post-update view.
+        // so the fan-out filter sees the exact post-update view. The batch
+        // MUST be cleared after the fan-out: the restore keeps its
+        // capacity for reuse, and stale blocks would be re-sent (and
+        // re-fanned) every following tick - an O(tick^2) datagram
+        // explosion measured at +100 ms/tick before this fix.
         if !self.start_scratch.is_empty() {
             self.world.perf.start_blocks = self.start_scratch.len() as u64;
-            let batch = std::mem::take(&mut self.start_scratch);
+            let mut batch = std::mem::take(&mut self.start_scratch);
             self.broadcast_batch(&batch);
+            batch.clear();
             self.start_scratch = batch;
         }
         let perf = &mut self.world.perf;
