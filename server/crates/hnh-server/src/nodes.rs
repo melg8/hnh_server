@@ -129,7 +129,28 @@ pub enum GuestKind {
         station: Option<StationView>,
         #[serde(default)]
         stage: Option<u8>,
+        #[serde(default)]
+        drop: Option<DropView>,
     },
+}
+
+/// Full drop payload for authority transfer (session 35): a node that
+/// spawns a `Kind::Drop` onto a cell it does not own (e.g. a station
+/// output drop whose spawn jitter crossed a cell boundary) hands the
+/// WHOLE drop state to the cell's owner so it can claim it into its
+/// sim tables with the same id. The world render shape is NOT carried:
+/// it is derived deterministically from the inventory resource name on
+/// the receiving side (`game::drop_world_res`), the same derivation the
+/// spawner used.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DropView {
+    /// The INVENTORY resource name (gfx/invobjs/...): the stack the
+    /// picker receives, and the seed for the deterministic world shape.
+    pub inv_res: String,
+    /// Stack quality.
+    pub ql: u8,
+    /// Display label (food fep.conf identity).
+    pub label: String,
 }
 
 /// Snapshot of a production station's authority state, piggybacked on
@@ -887,6 +908,7 @@ mod tests {
                 crop: None,
                 station: None,
                 stage: None,
+                drop: None,
             },
             hp: 1,
             max_hp: 1,

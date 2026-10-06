@@ -2600,12 +2600,26 @@ impl Game {
             // is the gob's world shape (res_idx); the class tag is stable
             // for the gob's lifetime, so subscribers never need an update
             // to pick the right relay act.
-            Kind::Drop { .. } => GuestKind::Static {
+            // Session 35: the Drop arm carries the FULL drop payload
+            // (DropView) so an authority transfer can rebuild Kind::Drop on
+            // the receiving node; plain guest publishes leave it None
+            // (subscribers render from res_name and relay Pickup acts).
+            Kind::Drop {
+                inv_res_idx,
+                ql,
+                label,
+                ..
+            } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Drop,
                 crop: None,
                 station: None,
                 stage: None,
+                drop: Some(crate::nodes::DropView {
+                    inv_res: self.world.res.name(inv_res_idx).unwrap_or("").to_owned(),
+                    ql,
+                    label: label.to_owned(),
+                }),
             },
             Kind::Tree { .. } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
@@ -2613,6 +2627,7 @@ impl Game {
                 crop: None,
                 station: None,
                 stage: None,
+                drop: None,
             },
             Kind::Stone => GuestKind::Static {
                 res_name: self.static_res_name(slot),
@@ -2620,6 +2635,7 @@ impl Game {
                 crop: None,
                 station: None,
                 stage: None,
+                drop: None,
             },
             // Plans/structures: renderable but no relay act today (their
             // menus are session UI on the authority side).
@@ -2654,6 +2670,7 @@ impl Game {
                         has_input: false,
                     })),
                     stage: None,
+                    drop: None,
                 }
             }
             // Plans publish their construction stage (session 34) so a
@@ -2668,6 +2685,7 @@ impl Game {
                 crop: None,
                 station: None,
                 stage: Some(stage),
+                drop: None,
             },
             Kind::Structure { .. } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
@@ -2675,6 +2693,7 @@ impl Game {
                 crop: None,
                 station: None,
                 stage: None,
+                drop: None,
             },
             Kind::Crop { spec, stage } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
@@ -2682,6 +2701,7 @@ impl Game {
                 crop: Some((spec, stage)),
                 station: None,
                 stage: None,
+                drop: None,
             },
         };
         Some(GuestState {
@@ -3040,6 +3060,73 @@ impl Game {
             tracing::debug!(id, owner, "animal authority transferred");
         }
 
+        // --- Drop authority transfer (session 35): a drop spawned by
+        // THIS node onto a cell it does not own (a station output drop
+        // whose spawn jitter crossed the cell boundary, stone rubble,
+        // loot) is invisible to every player homed on the owner - peers
+        // only subscribe to OUR cells, never their own. Mirror the
+        // animal path: hand the full drop state (GuestTransfer with the
+        // DropView payload) to the cell's owner and demote the local
+        // copy to a guest. The owner claims it via promote_transfer and
+        // publishes it back to everyone subscribed to that cell - so
+        // both sides' players see and can pick up the same drop, with
+        // ONE authority deciding the pickup race.
+        let mut foreign_drops: Vec<GobId> = Vec::new();
+        for slot in 0..self.world.gobs.kind.len() {
+            if !self.world.gobs.alive[slot]
+                || !matches!(self.world.gobs.kind[slot], Kind::Drop { .. })
+            {
+                continue;
+            }
+            let id = crate::state::gob_id_from_slot(slot, self.world.gobs.gen[slot]);
+            let cell =
+                crate::visidx::cell_of(self.world.gobs.pos[slot].0, self.world.gobs.pos[slot].1);
+            if self.cell_owner(cell) != me {
+                foreign_drops.push(id);
+            }
+        }
+        for id in foreign_drops {
+            let Some(slot) = self.world.gobs.get(id) else {
+                continue;
+            };
+            let Some(st) = self.guest_state_from_slot(id, slot) else {
+                continue;
+            };
+            let owner = crate::grid_owner::owner_of(
+                crate::visidx::cell_of(st.pos.0, st.pos.1),
+                self.cluster.as_ref().expect("cluster").nodes,
+            );
+            // The drop is static: no mv, no walking pose, one hit point.
+            let frame = self.world.gobs.frame[slot];
+            let res_idx = self.world.gobs.res_idx[slot];
+            let cell = crate::visidx::cell_of(st.pos.0, st.pos.1);
+            self.cluster
+                .as_ref()
+                .expect("cluster")
+                .mesh
+                .send(owner, crate::nodes::NodeMsg::GuestTransfer(st.clone()));
+            self.world.guests.insert(
+                id,
+                crate::state::GuestGob {
+                    pos: st.pos,
+                    mv: None,
+                    frame,
+                    moving: false,
+                    facing: st.facing,
+                    kind: st.kind,
+                    res_idx,
+                    hp: 1,
+                    max_hp: 1,
+                    cell,
+                    territory: false,
+                    last_seen_tick: self.world.tick,
+                },
+            );
+            self.world.gobs.kill(id);
+            self.world.gobs.vis.insert(id, st.pos);
+            tracing::debug!(id, owner, "drop authority transferred");
+        }
+
         // --- Guest GC (every 50 ticks): a guest nobody renders and
         // nobody subscribes can never come back on its own (its owner
         // only streams to subscribed cells) — retract and drop it.
@@ -3343,31 +3430,55 @@ impl Game {
             max_hp,
             speed,
         } = st;
-        // Only animals transfer (players stay homed; stationary gobs never
-        // leave their spawn cell). Anything else arriving here is a peer
-        // bug — reject rather than corrupt local tables.
-        let species = match kind {
+        // Only animals and drops transfer (players stay homed; trees and
+        // stones never spawn on a foreign cell - the world generator
+        // places statics inside their own cell). Anything else arriving
+        // here is a peer bug — reject rather than corrupt local tables.
+        let (spawn_kind, res_idx) = match kind {
             GuestKind::Animal { species } => match crate::state::Species::from_index(species) {
-                Some(sp) => sp,
+                Some(sp) => (
+                    Kind::Animal { species: sp },
+                    self.world.res.intern(sp.resname()),
+                ),
                 None => {
                     tracing::warn!(id, species, "transfer species out of range");
                     return;
                 }
             },
+            // Session 35 drop transfer: the cell's owner claims a drop
+            // spawned by a peer (station output jitter across the cell
+            // boundary, stone rubble, loot). The world render shape is
+            // re-derived from the inventory resource name with the SAME
+            // deterministic function the spawner used (drop_world_res),
+            // so both nodes agree on the sprite without carrying it.
+            GuestKind::Static {
+                class: crate::nodes::StaticClass::Drop,
+                drop: Some(view),
+                ..
+            } => {
+                let inv_res_idx = self.world.res.intern(leak_static(&view.inv_res));
+                let world_res = drop_world_res(&view.inv_res);
+                let res_idx = self.world.res.intern(world_res);
+                let label = leak_static(&view.label);
+                (
+                    Kind::Drop {
+                        resname_idx: res_idx,
+                        inv_res_idx,
+                        ql: view.ql,
+                        label,
+                    },
+                    res_idx,
+                )
+            }
             other => {
-                tracing::warn!(?other, id, "transfer of a non-animal guest rejected");
+                tracing::warn!(?other, id, "transfer of a non-transferable guest rejected");
                 return;
             }
         };
-        let res_idx = self.world.res.intern(species.resname());
         let was_guest = self.world.guests.remove(&id).is_some();
-        self.world.gobs.spawn_with_id(
-            id,
-            Kind::Animal { species },
-            pos,
-            res_idx,
-            Vitals { hp, max_hp, speed },
-        );
+        self.world
+            .gobs
+            .spawn_with_id(id, spawn_kind, pos, res_idx, Vitals { hp, max_hp, speed });
         if let Some(slot) = self.world.gobs.get(id) {
             self.world.gobs.facing[slot] = facing;
             self.world.gobs.pose_streamed[slot] = if moving { 8 + facing } else { facing };
@@ -3384,11 +3495,17 @@ impl Game {
                 });
             }
         }
-        if !self.world.animal_gobs.contains(&id) {
-            self.world.animal_gobs.push(id);
+        match spawn_kind {
+            Kind::Animal { .. } => {
+                if !self.world.animal_gobs.contains(&id) {
+                    self.world.animal_gobs.push(id);
+                }
+                tracing::debug!(id, "animal authority claimed");
+            }
+            Kind::Drop { .. } => tracing::debug!(id, "drop authority claimed"),
+            _ => unreachable!("the match above only yields Animal or Drop"),
         }
         let _ = was_guest;
-        tracing::debug!(id, "animal authority claimed");
         // My subscribers may already render this gob (border viewers):
         // announce so their sessions re-acquire it if it left their view
         // while it was a guest elsewhere.
@@ -10780,6 +10897,144 @@ mod tests {
         assert!(moved, "the claimed animal must resume AI on the new owner");
     }
 
+    /// Session 35 (drop authority transfer): a drop spawned onto a cell
+    /// this node does NOT own (station output jitter across the cell
+    /// boundary) sends GuestTransfer with the FULL DropView payload to
+    /// the cell's owner and demotes the local copy to a guest under the
+    /// same id - the wire mirror of the animal authority transfer.
+    #[tokio::test]
+    async fn drop_transfer_sends_to_cell_owner_and_demotes() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("dropxfer0", 0, 2);
+        let (fx, fy) = foreign_cell_pos(&g, 0);
+        let inv_res_idx = g.world.res.intern("gfx/invobjs/branch");
+        let world_res_idx = g.world.res.intern("gfx/terobjs/items/branch");
+        let id = g.world.gobs.spawn(
+            Kind::Drop {
+                resname_idx: world_res_idx,
+                inv_res_idx,
+                ql: 7,
+                label: "",
+            },
+            (fx, fy),
+            world_res_idx,
+            1,
+            0,
+        );
+        g.tick();
+        let mut transferred = None;
+        while let Ok((peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::GuestTransfer(st) = msg {
+                transferred = Some((peer, st));
+            }
+        }
+        let (peer, st) = transferred.expect("the foreign drop must transfer to the cell owner");
+        assert_eq!(peer, 1, "the foreign cell's owner receives the transfer");
+        assert_eq!(st.id, id, "transfer preserves the gob id");
+        let crate::nodes::GuestKind::Static { class, drop, .. } = &st.kind else {
+            panic!("drop transfer must carry the Static kind");
+        };
+        assert_eq!(*class, crate::nodes::StaticClass::Drop);
+        let view = drop
+            .as_ref()
+            .expect("transfer carries the DropView payload");
+        assert_eq!(view.inv_res, "gfx/invobjs/branch");
+        assert_eq!(view.ql, 7);
+        assert!(
+            g.world.guests.contains_key(&id) && g.world.gobs.get(id).is_none(),
+            "the spawner demotes the drop to a guest"
+        );
+    }
+
+    /// Session 35 (drop authority transfer): the receiving owner claims
+    /// the exact id back into Kind::Drop with the deterministic world
+    /// shape and a working pickup payload (drop_info round-trips the
+    /// inventory resource, quality and label).
+    #[tokio::test]
+    async fn drop_transfer_receiver_claims_pickup_payload() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("dropxfer1", 0, 2);
+        let (fx, fy) = foreign_cell_pos(&g, 0);
+        let inv_res_idx = g.world.res.intern("gfx/invobjs/meatroast");
+        let world_res_idx = g.world.res.intern(drop_world_res("gfx/invobjs/meatroast"));
+        let id = g.world.gobs.spawn(
+            Kind::Drop {
+                resname_idx: world_res_idx,
+                inv_res_idx,
+                ql: 12,
+                label: "Meat roast",
+            },
+            (fx, fy),
+            world_res_idx,
+            1,
+            0,
+        );
+        let slot = g.world.gobs.get(id).unwrap();
+        let st = g.guest_state_from_slot(id, slot).unwrap();
+        // Receiver side: a fresh node-1 game claims the exact id.
+        let (mut g1, _rx1, _raw1, _mesh1) = clustered_game("dropxfer1b", 1, 2);
+        g1.on_node_msg(crate::nodes::NodeMsg::GuestTransfer(st));
+        let slot1 = g1
+            .world
+            .gobs
+            .get(id)
+            .expect("the claimed drop is alive on the new owner");
+        assert!(g1.world.gobs.alive[slot1]);
+        let (res, count, ql, label) = g1.world.gobs.kind[slot1]
+            .drop_info()
+            .expect("pickup payload intact after the transfer");
+        assert_eq!(
+            g1.world.res.name(res),
+            Some("gfx/invobjs/meatroast"),
+            "the inventory resource round-trips"
+        );
+        assert_eq!(count, 1);
+        assert_eq!(ql, 12);
+        assert_eq!(label, "Meat roast");
+        assert_eq!(
+            g1.world.res.name(g1.world.gobs.res_idx[slot1]),
+            Some(drop_world_res("gfx/invobjs/meatroast")),
+            "the deterministic world shape is re-derived on the receiver"
+        );
+    }
+
+    /// Session 35 (drop authority transfer, negative control): a drop on
+    /// a cell this node OWNS never transfers - no GuestTransfer on the
+    /// mesh and the gob stays in the sim tables.
+    #[tokio::test]
+    async fn drop_transfer_local_cell_drop_stays() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("dropstay", 0, 2);
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let inv_res_idx = g.world.res.intern("gfx/invobjs/branch");
+        let world_res_idx = g.world.res.intern("gfx/terobjs/items/branch");
+        let id = g.world.gobs.spawn(
+            Kind::Drop {
+                resname_idx: world_res_idx,
+                inv_res_idx,
+                ql: 3,
+                label: "",
+            },
+            (px + 11, py + 11),
+            world_res_idx,
+            1,
+            0,
+        );
+        g.tick();
+        let mut saw_transfer = false;
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if matches!(msg, crate::nodes::NodeMsg::GuestTransfer(_)) {
+                saw_transfer = true;
+            }
+        }
+        assert!(!saw_transfer, "own-cell drops never transfer");
+        assert!(
+            g.world.gobs.get(id).is_some(),
+            "the local drop stays authoritative on its owner"
+        );
+        assert!(!g.world.guests.contains_key(&id));
+    }
+
     /// G5 (player territory): a player entering a foreign cell is
     /// announced to that cell's owner; returning home retracts.
     #[tokio::test]
@@ -11583,6 +11838,7 @@ mod tests {
                     crop: None,
                     station: None,
                     stage: None,
+                    drop: None,
                 },
                 hp: 1,
                 max_hp: 1,
@@ -12822,6 +13078,7 @@ mod tests {
                 has_input: true,
             }),
             stage: None,
+            drop: None,
         };
         g.on_node_msg(crate::nodes::NodeMsg::GuestUpdate(st));
         // Wire proof: the raw stream carries an OD_RES re-render with
