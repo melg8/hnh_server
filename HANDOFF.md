@@ -1487,3 +1487,80 @@ state for bows; cursor pickup redirection (merge stacks); relay
 pickup/build against guest STATIC gobs (RelayAttack pattern with an
 action enum); load-test story for the sharded save (per-node bot
 cohorts persisting across a cluster restart).
+
+---
+
+## 2026-10-06 - Session 30: relay static acts, cursor merge, vis cache, sharded load story
+
+Continuation under .unlazy/session30 (PLAN + GATES there). Sandbox was
+wiped again (no cargo/ant/JOGL, save/ artifacts gone) - re-provisioned
+via rustup + scripts/jogl/deploy-agent-env.sh (which also regenerated
+gameres, 6382 files). Session-29 recovery recipe confirmed end to end.
+
+WHAT (all landed on master, one commit per leaf):
+
+1) RELAY STATIC ACTS (cross-node pickup/chop/mine, session-29 NEXT #5):
+   - GuestKind::Static gained a STABLE StaticClass tag (Drop/Tree/Stone/
+     Structure); statics now PUBLISH across nodes (guest_state_from_slot
+     previously filtered them out - drops near cell boundaries were
+     invisible AND unclickable on the far node).
+   - New mesh messages RelayStaticAct{player,target,act} (home ->
+     authority) and StaticAck{player,stack,lp} (authority -> home). The
+     authority re-validates the act against its own Kind; a stale guest
+     view (class vs kind drift) is dropped, never trusted.
+   - Pickup acks carry the removed stack as resource NAME + count + ql +
+     fep label; the home node grants it through grant_pickup (cursor
+     redirection included). Chop acks carry lp; exhausted trees leave a
+     stump exactly like the local path.
+   - BUG FOUND+FIXED by the leaf's tests: publish(Retract) after kill()
+     never fired (Gobs::get requires alive) - remote retracts relied on
+     the subscriber GC sweep. publish() now resolves dead-gob retracts
+     through the split id with a generation check.
+2) CURSOR PICKUP REDIRECTION + STACK MERGING (NEXT #4):
+   - InvStack::absorb: counts add, quality re-averages count-weighted
+     (integer, loftar convention; stacking policy is server policy per
+     items-and-quality.md - policy choice documented in code).
+   - grant_pickup: same-resource cursor absorbs the pickup (one drag
+     stack, num sync via sync_cursor_widget); otherwise merges into the
+     first same-resource inventory stack. Applied to: ground-drop clicks,
+     inventory releases (inv_drop), craft outputs (recipe + roast),
+     crop harvests; teardown merges the dangling cursor stack. Different
+     resources never merge (unit-proven).
+3) VIS-SCAN RESULT CACHING (NEXT #3):
+   - VisIndex now records per-tick TOUCHED lists (insert/remove/
+     reposition/mark_mover record the gob under every relevant cell).
+   - A position-stable session reuses its last scan result: nothing
+     touched in view -> provably unchanged (skip); few touched (<=128
+     size guard) -> patch (leavers re-filtered by current position,
+     enterers added, deaths purged by liveness); dense views route to a
+     full rescan (patch would cost more than the scan).
+   - Worst-case measured parity at 1000 walking bots (p50 21.6ms vs
+     20.7ms baseline, this 2-core box, both well inside the 100ms
+     budget); 600-bot window in the verify script: p50 8.4ms,
+     max 50ms. Patch correctness unit-proven (patched result == fresh
+     rescan; bsearch-on-unsorted found and fixed during the session).
+4) SHARDED-SAVE LOAD STORY (NEXT #6): server/scripts/verify_session30.sh
+   - Phases: relay-static (5 unit tests), cursor-merge (3), vis-cache
+     (unit + 600-bot budget window), cluster load (2 nodes x 60-bot
+     cohorts through the real UDP path, perf-checked), graceful SIGTERM
+     flush, both shard files carry the cohorts, FULL CLUSTER RESTART ->
+     60+60 bot logins restore their snapshots ("restoring persisted
+     character"). SESSION30 E2E: OK.
+   - Cargo invocations run from server/ (workspace root); test-pass
+     counts sum across suites.
+
+EVIDENCE: 160 unit tests green (9 new: 3 pickup-merge, 5 relay-static,
+1 vis-cache), clippy -D warnings clean, fmt clean; wire e2e regression
+(test_client WORLD ENTRY + test_craft EAT FLOW) re-run green on the
+final tree.
+
+NEXT (handoff): craft pagina ad->action wiring for remaining recipes
+(needs verified recipe data from the wiki - do not invent numbers);
+carrying-pose state for bows (depends on a bow being craftable); relay
+SessionRelay for session-targeted UI on foreign nodes (crop/station
+menus); vis-cache: cheapen the Full path (bucket pos storage instead of
+per-id lookups) if 10k sessions on one node becomes a real target -
+today the cluster split carries that goal.
+
+Real-client e2e: attempted after re-provisioning; see the session-30
+commit trail for the verdict recorded below.
