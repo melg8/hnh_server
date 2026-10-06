@@ -1539,14 +1539,19 @@ impl Game {
         if let Some(out) = self.sessions.get_mut(&sid) {
             out.grids_seen.insert(gc);
         }
-        // Populate the grid the first time anyone looks at it.
+        // Populate the grid the first time anyone looks at it (session
+        // 33: owner-filtered - my cells' content only; foreign-cell
+        // statics/animals arrive as guests from the cell owner through
+        // the Sub-driven populate, so no shadow copies ever spawn here).
         let mut spawned = Vec::new();
         let first_touch = !self.populated.contains(&gc);
         if first_touch {
             self.populated.insert(gc);
-            self.world.populate_grid(gc, &mut spawned);
+            let filter = self.cluster.as_ref().map(|c| (c.me, c.nodes));
+            self.world.populate_grid(gc, filter, &mut spawned);
             let animals = if self.saturated { 40 } else { 4 };
-            self.world.populate_animals(gc, animals, &mut spawned);
+            self.world
+                .populate_animals(gc, filter, animals, &mut spawned);
         }
         let payload = {
             let grid = self.world.grids.grid(gc);
@@ -2191,15 +2196,24 @@ impl Game {
             NodeMsg::Ping => {}
             NodeMsg::Hello { .. } => {} // handshake handled by the mesh
             NodeMsg::Sub { from, cells } => {
-                let Some(c) = self.cluster.as_mut() else {
-                    return;
+                let owned: Vec<(i32, i32)> = {
+                    let Some(c) = self.cluster.as_mut() else {
+                        return;
+                    };
+                    let owned: Vec<(i32, i32)> = cells
+                        .into_iter()
+                        .filter(|&cell| crate::grid_owner::owner_of(cell, c.nodes) == c.me)
+                        .collect();
+                    tracing::debug!(from, cells = owned.len(), "peer subscribed");
+                    c.peer_subs.insert(from, owned.iter().copied().collect());
+                    owned
                 };
-                let owned: Vec<(i32, i32)> = cells
-                    .into_iter()
-                    .filter(|&cell| crate::grid_owner::owner_of(cell, c.nodes) == c.me)
-                    .collect();
-                tracing::debug!(from, cells = owned.len(), "peer subscribed");
-                c.peer_subs.insert(from, owned.into_iter().collect());
+                // Session 33 (Sub-driven populate): the subscriber's own
+                // MAPREQ never materialized MY content for these cells
+                // (owner-filtered populate) - materialize it now and
+                // announce everything I hold there, so the subscriber
+                // renders one authoritative copy per gob.
+                self.populate_for_subscriber(from, owned);
             }
             NodeMsg::Unsub { from, cells } => {
                 let Some(c) = self.cluster.as_mut() else {
@@ -2680,6 +2694,73 @@ impl Game {
             }
         }
         targets
+    }
+
+    /// The grids a VisIndex cell touches (session 33). A cell spans 250
+    /// subtiles, a grid 1100 (100 tiles x 11), so one cell touches one
+    /// or two grids per axis - at most four grids total.
+    fn grids_touching_cell(cell: (i32, i32)) -> Vec<(i32, i32)> {
+        let (cx, cy) = cell;
+        let gx0 = (cx * 250).div_euclid(1100);
+        let gx1 = (cx * 250 + 249).div_euclid(1100);
+        let gy0 = (cy * 250).div_euclid(1100);
+        let gy1 = (cy * 250 + 249).div_euclid(1100);
+        let mut out = Vec::with_capacity(4);
+        for gx in gx0..=gx1 {
+            for gy in gy0..=gy1 {
+                out.push((gx, gy));
+            }
+        }
+        out
+    }
+
+    /// Sub-driven populate on the authority (session 33). The subscriber
+    /// materialized the TILES of the grids it looks at (deterministic,
+    /// identical on every node) but spawned no content for MY cells
+    /// (owner-filtered populate). Here I materialize my part of every
+    /// touched grid (idempotent per grid) and announce every gob I hold
+    /// in the subscribed cells - freshly spawned AND pre-existing - so
+    /// the subscriber's view starts from the one authoritative copy.
+    fn populate_for_subscriber(&mut self, from: usize, cells: Vec<(i32, i32)>) {
+        if cells.is_empty() {
+            return;
+        }
+        // (a) Materialize my part of every grid the cells touch.
+        let filter = self.cluster.as_ref().map(|c| (c.me, c.nodes));
+        let mut fresh: Vec<GobId> = Vec::new();
+        let mut touched: HashSet<(i32, i32)> = HashSet::new();
+        for cell in &cells {
+            for gc in Self::grids_touching_cell(*cell) {
+                if touched.insert(gc) && !self.populated.contains(&gc) {
+                    self.populated.insert(gc);
+                    self.world.populate_grid(gc, filter, &mut fresh);
+                    let animals = if self.saturated { 40 } else { 4 };
+                    self.world.populate_animals(gc, filter, animals, &mut fresh);
+                }
+            }
+        }
+        // (b) Announce everything I hold in the subscribed cells: the
+        // freshly spawned content plus anything that existed earlier
+        // (stations, structures, previously populated statics). The cell
+        // center +/- 124 subtiles spans exactly one VisIndex cell.
+        let mut announce: Vec<GobId> = fresh;
+        for &(cx, cy) in &cells {
+            let ids = self
+                .world
+                .gobs
+                .vis
+                .gobs_in_view(cx * 250 + 125, cy * 250 + 125, 124);
+            for id in ids {
+                if !announce.contains(&id) {
+                    announce.push(id);
+                }
+            }
+        }
+        let count = announce.len();
+        for id in announce {
+            self.publish(id, GuestEv::Announce);
+        }
+        tracing::debug!(from, gobs = count, "subscriber populate announced");
     }
 
     /// Publish one local gob event to interested peers. Announce = full
@@ -12755,6 +12836,125 @@ mod tests {
             Some(2),
             "a refusal keeps the whole stack"
         );
+    }
+
+    /// Owner-filtered populate (session 33): on_mapreq materializes the
+    /// grid's TILES (deterministic, identical on every node) but spawns
+    /// statics/animals only for cells THIS node owns - no shadow copies
+    /// of the cell owner's content. Before this fix every node carried
+    /// its own copy of the same grid's statics (and its rng placed
+    /// DIFFERENT animals than the owner's roll).
+    #[tokio::test]
+    async fn owner_filtered_populate_spawns_only_my_cells() {
+        let (mut g, _rx, _raw, _mesh) = clustered_game("ownpop", 0, 2);
+        let pslot = g.world.gobs.get(pgob_of(&g)).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        // A grid near spawn: touches both nodes' cells (a grid spans
+        // 5x5 VisIndex cells, rendezvous-hashed between 2 nodes).
+        let gc = (px.div_euclid(1100), py.div_euclid(1100));
+        g.on_mapreq(1, gc);
+        let nodes = g.cluster.as_ref().unwrap().nodes;
+        let me = g.cluster.as_ref().unwrap().me;
+        let mut mine = 0usize;
+        let mut foreign = 0usize;
+        for id in g.world.gobs.vis.gobs_in_view(px + 2000, py + 2000, 6000) {
+            let Some(slot) = g.world.gobs.get(id) else {
+                continue;
+            };
+            if matches!(g.world.gobs.kind[slot], Kind::Player { .. }) {
+                continue; // players are homed, not cell-owned
+            }
+            let pos = g.world.gobs.pos[slot];
+            let cell = crate::visidx::cell_of(pos.0, pos.1);
+            if crate::grid_owner::owner_of(cell, nodes) == me {
+                mine += 1;
+            } else {
+                foreign += 1;
+            }
+        }
+        assert!(mine > 0, "the grid's my-cells content spawned");
+        assert_eq!(foreign, 0, "no static/animal may spawn on a non-owner node");
+    }
+
+    /// Sub-driven populate (session 33): a peer's Sub materializes the
+    /// authority's part of every touched grid and announces EVERY gob it
+    /// holds in the subscribed cells (fresh + pre-existing), so the
+    /// subscriber's view starts from the single authoritative copy.
+    #[tokio::test]
+    async fn sub_driven_populate_announces_to_subscriber() {
+        let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("subpop", 0, 2);
+        let nodes = g.cluster.as_ref().unwrap().nodes;
+        let me = g.cluster.as_ref().unwrap().me;
+        // Pre-existing content: an oven near spawn (my cell by the
+        // clustered_game layout).
+        let pslot = g.world.gobs.get(pgob_of(&g)).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let my_cell = crate::visidx::cell_of(px, py);
+        assert_eq!(
+            crate::grid_owner::owner_of(my_cell, nodes),
+            me,
+            "fixture: the player spawns on a home cell"
+        );
+        let _oven = built_oven(&mut g, 1, None);
+        // A peer subscribes to my cell.
+        g.on_node_msg(crate::nodes::NodeMsg::Sub {
+            from: 1,
+            cells: vec![my_cell],
+        });
+        let mut announced = Vec::new();
+        while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+            if let crate::nodes::NodeMsg::GuestAnnounce(st) = msg {
+                announced.push((st.id, st.pos));
+            }
+        }
+        assert!(
+            announced.len() >= 2,
+            "the player gob AND the oven (and populated statics) announce to the subscriber, got {}",
+            announced.len()
+        );
+        // Everything announced actually stands in the subscribed cell.
+        for (_, pos) in &announced {
+            assert_eq!(
+                crate::visidx::cell_of(pos.0, pos.1),
+                my_cell,
+                "announces stay inside the subscribed cell"
+            );
+        }
+        // The touched grid materialized my part (populated set grew).
+        let touched: Vec<(i32, i32)> = Game::grids_touching_cell(my_cell);
+        for gc in touched {
+            assert!(g.populated.contains(&gc), "grid {gc:?} materialized");
+        }
+    }
+
+    /// grids_touching_cell arithmetic: a VisIndex cell (250 subtiles)
+    /// touches one or two grids (1100 subtiles) per axis, never more,
+    /// and the covered subtile span always lands inside the returned
+    /// grids.
+    #[test]
+    fn grids_touching_cell_covers_the_cell() {
+        for cell in [
+            (0i32, 0i32),
+            (4, 4),
+            (-1, -1),
+            (5, -3),
+            (-7, 9),
+            (100, -100),
+        ] {
+            let grids = Game::grids_touching_cell(cell);
+            assert!(!grids.is_empty() && grids.len() <= 4);
+            let (cx, cy) = cell;
+            for u in [cx * 250, cx * 250 + 124, cx * 250 + 249] {
+                for v in [cy * 250, cy * 250 + 124, cy * 250 + 249] {
+                    let gx = u.div_euclid(1100);
+                    let gy = v.div_euclid(1100);
+                    assert!(
+                        grids.contains(&(gx, gy)),
+                        "cell {cell:?} subtile ({u},{v}) grid ({gx},{gy}) missing"
+                    );
+                }
+            }
+        }
     }
 
     /// Home side of the act ack: the refusal results render the exact

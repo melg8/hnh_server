@@ -890,10 +890,18 @@ impl World {
         self.start_instant.elapsed().as_secs_f64()
     }
 
-    /// Spawn deterministic world content for one grid: trees on forest
-    /// tiles, stones elsewhere; density derived from tile + seeded rng.
-    /// Called when a grid is first touched by gameplay.
-    pub fn populate_grid(&mut self, gc: (i32, i32), out: &mut Vec<GobId>) {
+    /// Populate statics for a grid. `filter` (cluster mode, session 33)
+    /// spawns only content whose VisIndex cell belongs to this node -
+    /// foreign-cell content is the owning node's to spawn and announce
+    /// (Sub-driven populate on the authority), so no node carries shadow
+    /// copies of the same tree/stone/boulder. Single-node mode passes
+    /// None and materializes everything.
+    pub fn populate_grid(
+        &mut self,
+        gc: (i32, i32),
+        filter: Option<(usize, std::num::NonZeroUsize)>,
+        out: &mut Vec<GobId>,
+    ) {
         let grid = self.grids.grid(gc);
         let mut spawned = 0usize;
         for y in (0..100usize).step_by(1) {
@@ -939,6 +947,16 @@ impl World {
                 // Object sits at tile corner subtile (tile * 11), matching
                 // client flavor placement convention.
                 let pos = ((tx as i32) * 11, (ty as i32) * 11);
+                // Owner-filtered populate (session 33): foreign-cell
+                // statics belong to the cell owner - never spawn a local
+                // shadow copy of them.
+                if let Some((me, nodes)) = filter {
+                    if crate::grid_owner::owner_of(crate::visidx::cell_of(pos.0, pos.1), nodes)
+                        != me
+                    {
+                        continue;
+                    }
+                }
                 let kind = if res.contains("trees/") {
                     Kind::Tree { harvests: 5 }
                 } else {
@@ -952,8 +970,19 @@ impl World {
         self.perf.spawned_objects += spawned;
     }
 
-    /// Spawn wildlife for a grid.
-    pub fn populate_animals(&mut self, gc: (i32, i32), count: usize, out: &mut Vec<GobId>) {
+    /// Spawn wildlife for a grid. `filter` mirrors populate_grid's
+    /// owner rule (session 33): animals in foreign cells are spawned by
+    /// the cell owner and cross the wire as guests - a non-owner node
+    /// never spawns them (its rng would place a DIFFERENT animal at a
+    /// different spot than the owner's roll, and the two copies would
+    /// desync every boundary view).
+    pub fn populate_animals(
+        &mut self,
+        gc: (i32, i32),
+        filter: Option<(usize, std::num::NonZeroUsize)>,
+        count: usize,
+        out: &mut Vec<GobId>,
+    ) {
         let grid = self.grids.grid(gc);
         for _ in 0..count {
             // Find a walkable tile.
@@ -977,6 +1006,11 @@ impl World {
                 };
                 let px = (gc.0 as i64 * 100 + x) as i32 * 11 + 5;
                 let py = (gc.1 as i64 * 100 + y) as i32 * 11 + 5;
+                if let Some((me, nodes)) = filter {
+                    if crate::grid_owner::owner_of(crate::visidx::cell_of(px, py), nodes) != me {
+                        continue;
+                    }
+                }
                 let res_idx = self.res.intern(species.resname());
                 let id = self.gobs.spawn(
                     Kind::Animal { species },
