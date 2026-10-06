@@ -1569,3 +1569,51 @@ NO TELEPORT OK, RAPID CLICKS: GLIDING, PORTRAIT layers present, EQUIPVIS
 OK (doll recomposites linenpants), CURSOR OK (drag + ground drop +
 pickup restored through the REAL widget chain - covers the session-30
 pickup-merge changes), GROUNDDROP OK.
+
+## 2026-10-06 - Session 31: cross-node crop harvest relay (farming loop closes across nodes)
+Continuation after another sandbox wipe (full re-clone; recovery: deploy-
+agent-env.sh + ant jar + cargo build - all scripted, ~10 min).
+
+WHAT (commit e9de696): the LAST cluster interaction gap for the farming
+loop - a player homed on node N can now harvest a crop that grows on
+node M's cell.
+- Crops publish with a stable StaticClass::Crop tag + a (spec, stage)
+  payload; the farming scheduler re-publishes GuestUpdate on every stage
+  advance; the subscriber renders the new stage from the sdt byte in the
+  re-encoded guest block (OD_RES | 0x8000 shape - identical to the local
+  plant path's wire).
+- Click on a guest crop: the harvest flower menu opens on the HOME node
+  from the guest view (open_crop_menu split into a local wrapper +
+  show_crop_menu shared with the guest path; unripe crops open nothing,
+  same as local). Acting on the menu relays StaticAct::HarvestCrop.
+- Authority: re-validates the Kind (stale-view acts are dropped), decides
+  mature vs unripe from ITS crop state, rolls the SAME quality/yield
+  tables as the local path, kills the crop, restores tilth, and answers
+  one StaticAck PER yielded stack (relay_static legs return stack vecs
+  now; LP rides the first ack only). The home node grants every ack via
+  grant_pickup - cursor redirection and stack merging apply unchanged.
+- verify_session30.sh now exports ~/.cargo/bin into PATH: a
+  non-interactive shell without cargo made all three unit-test phases
+  count 0 (phases 4-5 were unaffected - they use the release binary).
+
+EVIDENCE: 154 unit tests green (6 new: payload shape, stage-advance
+publish, menu gating ripe/unripe, mature acks = one per yield table
+entry with zero LP, mismatch drop, multi-ack home grants), clippy/fmt
+clean. SESSION30 E2E fully OK on this tree (relay-static 5/5,
+cursor-merge 3/3, vis-cache unit + 600-bot p50 10.8 ms, cluster load
+n0 11.5 ms / n1 7.9 ms max ticks, 60+60 shard persistence, restart
+restore 60+60). Real-client e2e after re-provisioning: MOVEMENT MOVED,
+five WALKDIR legs ARRIVED, NO TELEPORT OK, RAPID CLICKS GLIDING,
+PORTRAIT layers, EQUIPVIS OK, CURSOR + GROUNDDROP OK.
+
+NEXT (handoff): craft pagina ad->action wiring for remaining recipes
+(needs verified recipe data from the wiki - do not invent numbers);
+carrying-pose state for bows (depends on a bow being craftable); relay
+SessionRelay for session-targeted UI on foreign nodes is now only
+needed for STATION menus (crop menus are session-local by design) -
+station fuel/input/progress widgets read authority state, so the
+cleanest shape is a station-state snapshot piggybacked on the guest
+payload + relayed widget actions (the RelayStaticAct pattern again);
+planting across nodes (a player standing on node N planting INTO a
+foreign furrow) is the remaining farming gap - same relay pattern with
+a PlantCrop act carrying the seed stack.
