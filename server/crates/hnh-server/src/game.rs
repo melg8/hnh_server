@@ -247,6 +247,11 @@ pub struct Game {
     /// Number of parallel grid-owner workers used by the tick (data-parallel
     /// intent computation over SoA columns; apply stays on the game task).
     pub workers: usize,
+    /// Packed movement-block scratch (session 41): one shared byte buffer
+    /// + cell index for both the local-mover and the guest fan-out.
+    ///
+    /// Reused across ticks via `clear` (no hot-path allocator churn).
+    move_scratch: crate::move_batch::MoveBatch,
     /// Milliseconds of online time per granted LP (skills.rs accrual;
     /// precomputed once from HNH_LP_RATE, u64::MAX = disabled).
     lp_ms_per_lp: u64,
@@ -279,6 +284,14 @@ const CHAR_QUERY_RETRY_TICKS: u64 = 7;
 /// A pending join gives up after 6 s and enters fresh (a downed cluster
 /// must not block logins forever).
 const CHAR_QUERY_DEADLINE_MS: u64 = 6_000;
+
+/// Movement fan-out square half-width (subtiles): a still-visible mover
+/// sits inside the 2x VIEW_RADIUS retract hysteresis; the retract sweep
+/// runs at most every 8 ticks, so an inter-sweep full-speed drift (8 x 50
+/// subtile/tick) must be covered too. The rectangle test against this
+/// span decides whether a cell can contain any still-visible mover; the
+/// exact `visible.contains` filter stays authoritative per block.
+const FANOUT_SPAN: i32 = 2 * VIEW_RADIUS + 8 * 50;
 
 impl PendingJoin {
     /// True once every OTHER node answered the CharQuery.
@@ -543,6 +556,7 @@ impl Game {
             pending_joins: HashMap::new(),
             fep,
             workers: 1,
+            move_scratch: crate::move_batch::MoveBatch::default(),
             lp_ms_per_lp: {
                 // HNH_LP_RATE scales the passive accrual (skills.rs);
                 // malformed values disable accrual rather than wedge boot.
@@ -861,6 +875,11 @@ impl Game {
             vis_scan_us = self.world.perf.vis_scan_us,
             vis_spawn_us = self.world.perf.vis_spawn_us,
             vis_retract_us = self.world.perf.vis_retract_us,
+            guests_encode_us = self.world.perf.guests_encode_us,
+            guests_fanout_us = self.world.perf.guests_fanout_us,
+            guests_pose_us = self.world.perf.guests_pose_us,
+            move_blocks = self.world.perf.move_blocks,
+            move_cells = self.world.perf.move_cells,
             "perf"
         );
     }
@@ -3757,13 +3776,15 @@ impl Game {
     /// no per-tick streaming from the owner is needed — each subscriber
     /// derives LINSTEP locally for its viewing sessions.
     ///
-    /// Session 34 batch shape (the batch_move_broadcast pattern): blocks
-    /// are encoded once per moving guest, then ONE pass over the sessions
-    /// merges every visible block into ONE datagram per session. The
-    /// per-guest full-session scan this replaces (a viewers Vec built by
-    /// filtering ALL sessions per guest, every tick) measured 56-67
-    /// ms/tick at 600 clustered walking bots - O(guests x sessions)
-    /// HashSet lookups plus one datagram per (guest, viewer) pair.
+    /// Session 34 batch shape: blocks are encoded once per moving guest,
+    /// then ONE pass over the sessions merges every visible block into
+    /// ONE datagram per session. Session 41 packs the blocks into one
+    /// shared buffer indexed by vis cell (`move_batch`): the per-session
+    /// fan-out iterates only the non-empty cells (a few dozen for a
+    /// moving crowd) and rejects whole cells with one rectangle test —
+    /// the O(sessions x movers) hash-probe fan-out this replaces was the
+    /// dominant guests-phase cost in the 2x300 duel-cohort cluster
+    /// (p95 7.9 ms at 200 sessions, linear in the session count).
     /// LINSTEP progress frames are deliberately NOT recorded in
     /// `unacked`: each frame is superseded next tick, so a lost datagram
     /// self-heals within 100 ms.
@@ -3772,12 +3793,22 @@ impl Game {
             return;
         }
         let now = self.world.now_ms;
+        let encode_t = Instant::now();
         let ids: Vec<GobId> = self.world.guests.keys().copied().collect();
-        let mut linsteps: Vec<(GobId, u32, Vec<u8>)> = Vec::new();
-        let mut fin_blocks: Vec<(GobId, u32, Vec<u8>)> = Vec::new();
+        let mut batch = std::mem::take(&mut self.move_scratch);
+        batch.clear();
         let mut finished_ids: Vec<GobId> = Vec::new();
+        // Progress outcome for one guest this tick.
+        enum GuestMove {
+            /// Move finished this tick (finalizer block).
+            Finish,
+            /// Still moving, LINSTEP counter advanced to `i32`.
+            Step(i32),
+            /// Still moving within the same LINSTEP index: no block.
+            Quiet,
+        }
         for id in ids {
-            let (mv, finished, pos, frame) = {
+            let (mv, pos, frame) = {
                 let Some(g) = self.world.guests.get_mut(&id) else {
                     continue;
                 };
@@ -3788,15 +3819,18 @@ impl Game {
                 let frame = g.frame;
                 let elapsed = now.saturating_sub(lm.started_ms);
                 if elapsed >= u64::from(lm.total_ms) {
-                    (None, true, (lm.tx, lm.ty), frame)
+                    (GuestMove::Finish, (lm.tx, lm.ty), frame)
                 } else {
                     let (cx, cy) = lm.pos_at(now);
                     let l = lm.step_at(now);
-                    let linstep = l > lm.step;
+                    let advanced = l > lm.step;
                     g.mv = Some(LinMove { step: l, ..lm });
                     (
-                        if linstep { Some((l, lm.steps)) } else { None },
-                        false,
+                        if advanced {
+                            GuestMove::Step(l)
+                        } else {
+                            GuestMove::Quiet
+                        },
                         (cx, cy),
                         frame,
                     )
@@ -3808,60 +3842,59 @@ impl Game {
                 g.pos = pos;
             }
             self.world.gobs.vis.reposition(id, pos);
-            if finished {
-                let g = self.world.guests.get_mut(&id).expect("checked above");
-                g.moving = false;
-                let mut m = MessageBuf::new();
-                m.uint8(MSG_OBJDATA)
-                    .uint8(0)
-                    .int32(id)
-                    .int32(frame as i32)
-                    .uint8(OD_MOVE)
-                    .coord(pos.0, pos.1)
-                    .uint8(OD_LINSTEP)
-                    .int32(0)
-                    .uint8(OD_END);
-                fin_blocks.push((id, frame, m.finish()));
-                finished_ids.push(id);
-            } else if let Some((l, _steps)) = mv {
-                let mut m = MessageBuf::new();
-                m.uint8(MSG_OBJDATA)
-                    .uint8(0)
-                    .int32(id)
-                    .int32(frame as i32)
-                    .uint8(OD_LINSTEP)
-                    .int32(l)
-                    .uint8(OD_END);
-                linsteps.push((id, frame, m.finish()));
+            match mv {
+                GuestMove::Finish => {
+                    let g = self.world.guests.get_mut(&id).expect("checked above");
+                    g.moving = false;
+                    let mut m = MessageBuf::new();
+                    m.uint8(MSG_OBJDATA)
+                        .uint8(0)
+                        .int32(id)
+                        .int32(frame as i32)
+                        .uint8(OD_MOVE)
+                        .coord(pos.0, pos.1)
+                        .uint8(OD_LINSTEP)
+                        .int32(0)
+                        .uint8(OD_END);
+                    batch.push(
+                        id,
+                        frame,
+                        crate::visidx::cell_of(pos.0, pos.1),
+                        true,
+                        &m.finish(),
+                    );
+                    finished_ids.push(id);
+                }
+                GuestMove::Step(l) => {
+                    let mut m = MessageBuf::new();
+                    m.uint8(MSG_OBJDATA)
+                        .uint8(0)
+                        .int32(id)
+                        .int32(frame as i32)
+                        .uint8(OD_LINSTEP)
+                        .int32(l)
+                        .uint8(OD_END);
+                    batch.push(
+                        id,
+                        frame,
+                        crate::visidx::cell_of(pos.0, pos.1),
+                        false,
+                        &m.finish(),
+                    );
+                }
+                GuestMove::Quiet => {}
             }
         }
-        // One pass over the sessions: merge every visible block into one
+        self.world.perf.guests_encode_us = encode_t.elapsed().as_micros() as u64;
+        // Fan-out: each session merges its visible blocks into one
         // datagram; finalizers also land in `unacked` (retransmittable).
-        let sids: Vec<SessionId> = self.sessions.keys().copied().collect();
-        for sid in sids {
-            let Some(out) = self.sessions.get_mut(&sid) else {
-                continue;
-            };
-            let mut m = MessageBuf::with_capacity(256);
-            for (id, frame, block) in &fin_blocks {
-                if !out.visible.contains(id) {
-                    continue;
-                }
-                m.bytes(block);
-                Self::record_unacked(out, *id, *frame, block.clone());
-            }
-            for (id, _frame, block) in &linsteps {
-                if !out.visible.contains(id) {
-                    continue;
-                }
-                m.bytes(block);
-            }
-            if !m.is_empty() {
-                out.send_raw(m.finish());
-            }
-        }
+        let fanout_t = Instant::now();
+        self.broadcast_batch(&batch);
+        self.move_scratch = batch;
+        self.world.perf.guests_fanout_us = fanout_t.elapsed().as_micros() as u64;
         // Rest pose for finished movers: the standing layer block per
         // viewer (rare - only on movement finalization; statics skip).
+        let pose_t = Instant::now();
         for id in finished_ids {
             let viewers: Vec<SessionId> = self
                 .sessions
@@ -3873,6 +3906,7 @@ impl Game {
                 self.stream_guest_pose(sid, id);
             }
         }
+        self.world.perf.guests_pose_us = pose_t.elapsed().as_micros() as u64;
     }
 
     /// Spawn block for a guest (mirrors `encode_gob_block`'s player/animal
@@ -8102,6 +8136,8 @@ impl Game {
 
     fn tick(&mut self) {
         self.world.tick += 1;
+        self.world.perf.move_blocks = 0;
+        self.world.perf.move_cells = 0;
         // Cluster character migrations: re-broadcast unanswered queries on
         // a fixed cadence (a link still negotiating buffers the retry and
         // answers once the mesh converges); past the deadline, enter with
@@ -8194,13 +8230,15 @@ impl Game {
 
     fn tick_movement(&mut self) {
         let now = self.world.now_ms;
-        // Encoded OD blocks for this tick's progress and finalization, sent
-        // as ONE OBJDATA datagram per viewing session (see
-        // batch_move_broadcast) - the per-block per-session fan-out that
-        // used to live here dominated the tick budget at the 400+ mover
-        // scale (68 ms of movement phase measured at 426 players).
-        let mut linsteps: Vec<(GobId, u32, Vec<u8>)> = Vec::new();
-        let mut fin_blocks: Vec<(GobId, u32, Vec<u8>)> = Vec::new();
+        // Encoded OD blocks for this tick's progress and finalization go
+        // into the packed cell-indexed batch (see `move_batch` and
+        // `broadcast_batch`): blocks are encoded once, then each session
+        // probes only the non-empty cells - the O(sessions x movers)
+        // per-session scan this replaces dominated the tick budget at the
+        // 400+ mover scale (68 ms of movement phase measured at 426
+        // players) and re-appeared at the duel-cohort load scale.
+        let mut batch = std::mem::take(&mut self.move_scratch);
+        batch.clear();
         let mut finished: Vec<(usize, i32, i32)> = Vec::new();
         for slot in 0..self.world.gobs.alive.len() {
             if !self.world.gobs.alive[slot] {
@@ -8246,7 +8284,13 @@ impl Game {
                         .uint8(OD_LINSTEP)
                         .int32(l)
                         .uint8(OD_END);
-                    linsteps.push((id, frame, m.finish()));
+                    batch.push(
+                        id,
+                        frame,
+                        crate::visidx::cell_of(cx, cy),
+                        false,
+                        &m.finish(),
+                    );
                 }
             }
         }
@@ -8272,7 +8316,7 @@ impl Game {
                 .uint8(OD_LINSTEP)
                 .int32(steps)
                 .uint8(OD_END);
-            fin_blocks.push((id, frame, m.finish()));
+            batch.push(id, frame, crate::visidx::cell_of(tx, ty), true, &m.finish());
             // Rest pose: the standing set of the current facing (players
             // and animals both composite directional pose parts).
             let dir = self.world.gobs.facing[slot];
@@ -8284,47 +8328,63 @@ impl Game {
             // cell owner, for players standing abroad).
             self.publish(id, GuestEv::Update);
         }
-        self.batch_move_broadcast(linsteps, fin_blocks);
+        self.broadcast_batch(&batch);
+        self.move_scratch = batch;
     }
 
-    /// Movement fan-out: send every LINSTEP progress block and every move
-    /// finalizer to each viewing session as ONE combined OBJDATA datagram
+    /// Movement fan-out for one packed batch: every viewing session
+    /// receives ONE combined OBJDATA datagram carrying its visible blocks
     /// (the wire format allows consecutive gob blocks per datagram; the
-    /// client's recv_objdata loops them). Blocks land in `unacked` per gob
-    /// exactly like the old per-block path so OBJACK retransmission keeps
-    /// working. O(sessions x movers) hash probes, one datagram and one
-    /// channel send per session per tick.
-    fn batch_move_broadcast(
-        &mut self,
-        linsteps: Vec<(GobId, u32, Vec<u8>)>,
-        fin_blocks: Vec<(GobId, u32, Vec<u8>)>,
-    ) {
-        let sids: Vec<SessionId> = self.sessions.keys().copied().collect();
-        for sid in sids {
+    /// client's recv_objdata loops them). The session walks only the
+    /// batch's non-empty cells and rejects whole cells with one rectangle
+    /// test against its 2x-retract-hysteresis square (`FANOUT_SPAN`);
+    /// `visible.contains` stays the exact per-block filter. Finalizer
+    /// blocks land in `unacked` per gob exactly like the old per-block
+    /// path so OBJACK retransmission keeps working; progress frames are
+    /// deliberately NOT recorded (each is superseded by the next tick's
+    /// frame, a lost datagram self-heals within 100 ms).
+    fn broadcast_batch(&mut self, batch: &crate::move_batch::MoveBatch) {
+        if batch.is_empty() {
+            return;
+        }
+        self.world.perf.move_blocks += batch.len() as u64;
+        self.world.perf.move_cells += batch.cell_count() as u64;
+        // Session anchor positions (avatar gob slot -> SoA position).
+        let sids_pos: Vec<(SessionId, (i32, i32))> = self
+            .sessions
+            .iter()
+            .filter_map(|(sid, out)| {
+                let pg = out.player_gob?;
+                let slot = self.world.gobs.get(pg)?;
+                Some((*sid, self.world.gobs.pos[slot]))
+            })
+            .collect();
+        for (sid, (px, py)) in sids_pos {
             let Some(out) = self.sessions.get_mut(&sid) else {
                 continue;
             };
-            let mut m = MessageBuf::with_capacity(256);
-            for (id, frame, block) in &fin_blocks {
-                if !out.visible.contains(id) {
+            // Datagram is materialized lazily: sessions with no visible
+            // blocks allocate nothing.
+            let mut m: Option<MessageBuf> = None;
+            for (cell, idxs) in batch.cells() {
+                if !crate::move_batch::cell_intersects_axis(cell.0, px, FANOUT_SPAN)
+                    || !crate::move_batch::cell_intersects_axis(cell.1, py, FANOUT_SPAN)
+                {
                     continue;
                 }
-                m.bytes(block);
-                Self::record_unacked(out, *id, *frame, block.clone());
-            }
-            for (id, _frame, block) in &linsteps {
-                if !out.visible.contains(id) {
-                    continue;
+                for &i in idxs {
+                    let (id, frame, fin) = batch.block_info(i);
+                    if !out.visible.contains(&id) {
+                        continue;
+                    }
+                    m.get_or_insert_with(|| MessageBuf::with_capacity(512))
+                        .bytes(batch.block_bytes(i));
+                    if fin {
+                        Self::record_unacked(out, id, frame, batch.block_bytes(i).to_vec());
+                    }
                 }
-                m.bytes(block);
-                // Progress frames are deliberately NOT recorded in
-                // `unacked`: each LINSTEP is superseded by the next tick's
-                // frame, so a lost datagram self-heals within 100 ms and
-                // per-session block clones would dominate the tick at the
-                // 600+ mover scale (measured: 400+ ms of clone traffic per
-                // second before this change).
             }
-            if !m.is_empty() {
+            if let Some(m) = m {
                 out.send_raw(m.finish());
             }
         }

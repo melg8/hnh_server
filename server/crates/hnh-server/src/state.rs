@@ -898,6 +898,16 @@ pub struct Perf {
     pub vis_scan_us: u64,
     pub vis_spawn_us: u64,
     pub vis_retract_us: u64,
+    /// Last-tick guest-phase sub-attribution (microseconds): guest row
+    /// progress + block encode, per-session fan-out, rest-pose streaming.
+    /// Load-test attribution inside the guests phase.
+    pub guests_encode_us: u64,
+    pub guests_fanout_us: u64,
+    pub guests_pose_us: u64,
+    /// Last-tick packed movement batch: block count and distinct cell
+    /// count (the fan-out probe width). Zero with no movers.
+    pub move_blocks: u64,
+    pub move_cells: u64,
 }
 
 impl World {

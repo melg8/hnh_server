@@ -16,6 +16,7 @@ mod farm;
 mod fight;
 mod game;
 mod grid_owner;
+mod move_batch;
 mod net;
 mod nodes;
 mod party;
