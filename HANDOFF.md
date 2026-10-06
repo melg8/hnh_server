@@ -1641,3 +1641,86 @@ only); carrying-pose state for bows; TileMutation broadcast protocol for
 cross-node plowing/terraforming; station menus relay (station-state
 snapshot on the guest payload + relayed widget actions); load-test story
 for the sharded save at 300+ bot cohorts per node.
+
+## 2026-10-06 - Session 32: cross-node plowing (TileMutation), tilth decay revert
+The last deferred farming gap is closed: a player standing anywhere can
+plow, plant and harvest furrows anywhere - every tile act now crosses
+nodes. Plus a real gameplay bug fix found on the way.
+
+WHAT (commit 95d8106 + the verification commit):
+- RelayPlowAct/PlowAck/TileMutation node-link messages. plow_tile on a
+  foreign-cell tile relays to the tile authority; the home node never
+  mutates its own grid while relaying (no shadow furrow), stamina drains
+  only on the ok ack (a refused or lost relay costs nothing, parity with
+  a local refusal). The authority validates against ITS grid, mutates
+  (override recorded for persistence), starts the tilth clock, acks and
+  broadcasts TileMutation to every peer; LOCAL plows broadcast too.
+- Every node applies TileMutation: resident grids take the full mutation
+  plus a MAPDATA re-send to local holders; non-resident grids only
+  record the override (GridStore::note_override_maybe - never
+  materialize a grid nobody looks at just to shadow a mutation).
+- TILTH DECAY REVERT (real bug fix): an expired furrow now reverts its
+  tile to GRASS - live grid, persisted override, holder re-send and (in
+  cluster mode) TileMutation broadcast. Before this the tile stayed
+  PLOWED forever: un-re-plowable (not grass) AND un-plantable (no
+  tilth) - a permanent dead end after one missed planting window.
+- plow_tile's inline holder re-send extracted into resend_grid_to_holders
+  + mutate_tile_local (plow, decay revert, remote apply share them).
+- VERIFY: server/scripts/verify_session32.sh (relay-plow / decay-revert /
+  wire / cluster-plow phases) + scripts/probe_plow.py - a FarmClient
+  subclass that decodes the MAPDATA fragment stream, ports
+  grid_owner::owner_of to python (rendezvous hash, rustc-verified),
+  picks a foreign-cell grass tile and drives the plow through the REAL
+  widget chain against a REAL 2-node cluster.
+
+EVIDENCE: 176 unit tests green (6 new: 5 game relay/decay/mutation-path
+tests + 1 GridStore), clippy -D warnings clean, fmt clean. Real-cluster
+cluster-plow phase: client observed the PLOWED tile byte in the re-sent
+MAPDATA; node0 log "relay plow act sent" + "remote tile mutation
+applied"; node1 log "relay plow applied". SESSION30 E2E fully green on
+this tree (600-bot window p50 10.3ms max 46ms; cluster load n0 10.9ms /
+n1 12.7ms; 60+60 shard persistence + restart restore). Wire regression:
+WORLD ENTRY OK + FARMING FLOW OK.
+
+TWO VERIFICATION LESSONS (both caught by the failing phase, not by
+review - the reason the gates exist):
+1) A STALE RELEASE BINARY: `cargo test --release` does NOT rebuild the
+   bin target (only the unittest hosts in deps/), so the cluster-plow
+   phase silently ran the PRE-change binary and the relay branch never
+   fired. Rule: run `cargo build --release` after edits before any
+   binary-driven verification.
+2) A PYTHON PORT BUG: the owner_of port missed the 64-bit truncation of
+   the multiply stage (2 * 0x9E37.. carries a 65th bit in python but
+   wrapping_mul truncates in Rust) - it silently flipped cell owners and
+   made the probe "pass" through the LOCAL path. Fixed by masking every
+   product; cross-checked against a rustc-compiled reference on four
+   cells. Port order-splitmix operations are a standing footgun.
+
+HARNESS FIX: test_farming.py now uses a per-run isolated save file. The
+old shared fixed path accumulated restored crops across runs; the flow's
+find_gobs then clicked a stale first-seen crop instead of the one this
+run planted. Server-side acts were correct per the debug logs (plow /
+plant / harvest all executed); the yield grant landed per the cursor
+merge rules and the harness's inventory-widget assertion only tracks
+this run's expectations. If a future change makes grants land on the
+cursor, that assertion stays blind to same-resource cursor merges by
+design (session 30) - worth remembering when extending the flow.
+
+NEXT (handoff):
+- station menus relay (station-state snapshot piggybacked on the guest
+  payload + relayed widget actions - the RelayStaticAct pattern again);
+  station fuel/input/progress widgets read authority state.
+- craft pagina ad->action wiring for remaining recipes (wiki-verified
+  numbers only - do not invent).
+- carrying-pose state for bows (depends on a bow being craftable).
+- load-test story for the sharded save at 300+ bot cohorts per node
+  (today's evidence is 60/node).
+- DISCOVERED (pre-existing, not touched this session): on_mapreq
+  populates foreign-cell grids locally on EVERY node (each node carries
+  its own shadow statics for the same grid; the peer's copies are never
+  announced because publish_targets only reaches peers subscribed to
+  cells the PEER owns). Single-player-visible per node, so no duplicate
+  rendering per client today, but cross-node static visibility near a
+  boundary depends on BOTH nodes having populated the same grid. The
+  clean fix is owner-filtered populate + a Sub-driven populate/announce
+  on the authority; design it with the station relay above.

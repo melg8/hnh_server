@@ -97,7 +97,16 @@ def ensure_server():
     env = dict(os.environ)
     env["HNH_CROP_TIME_SCALE"] = "10000000"
     env["HNH_LP_RATE"] = "1000"
-    env["HNH_SAVE_FILE"] = os.path.join(REPO, "server", "target", "farm-test-save.json")
+    # Per-run isolated save: a shared fixed path accumulates restored
+    # crops/characters across runs, and the flow's find_gobs then clicks a
+    # stale first-seen crop instead of the one this run planted (the yield
+    # grant lands correctly either way, but the harness's inventory-widget
+    # assertion only tracks this run's expectations). Fresh state per run
+    # keeps the wire contract deterministic.
+    env["HNH_SAVE_FILE"] = os.path.join(
+        REPO, "server", "target",
+        "farm-test-save-%d.json" % (os.getpid() % 100000),
+    )
     proc = subprocess.Popen(
         [BIN, "--seed", "42"],
         cwd=os.path.join(REPO, "server"),
