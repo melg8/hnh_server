@@ -15,6 +15,7 @@ whole regression battery green.
   this, a guest oven built by a peer stays a dead Structure forever
   (fuel/input/light relay all key off the Station class).
   CHECK: bash server/scripts/verify_session34.sh station-units
+  CWD: /home/z/my-project/hnh_server
   EXPECT: STATION UNITS: OK
   EVIDENCE: pending
 
@@ -29,6 +30,7 @@ whole regression battery green.
   with lit sdt 1, and the roast output drop appears next to the oven
   on the authority.
   CHECK: bash server/scripts/verify_session34.sh cluster-station
+  CWD: /home/z/my-project/hnh_server
   EXPECT: STATION RELAY: OK
   EVIDENCE: pending
 
@@ -38,6 +40,7 @@ whole regression battery green.
   act sent", the authority (node 1) logs "relay station fueled" +
   "relay station input loaded" + "relay station lit".
   CHECK: bash server/scripts/verify_session34.sh cluster-station
+  CWD: /home/z/my-project/hnh_server
   EXPECT: relay pair verified on both node logs
   EVIDENCE: pending
 
@@ -48,22 +51,25 @@ whole regression battery green.
   the sharded save persists bot characters on both nodes. This is the
   300+/node load story deferred from the session-33 handoff.
   CHECK: bash server/scripts/verify_session34.sh load-300
+  CWD: /home/z/my-project/hnh_server
   EXPECT: 300/NODE LOAD: OK
   EVIDENCE: pending
 
-- [ ] G5: full regression battery
+- [x] G5: full regression battery
   Every unit test passes, the session-30 E2E (600-bot window +
   cluster 60+60 + shard persist + restart restore) stays green on
   this tree, and the session-32/33 verify scripts re-run green (wire,
   relay-plow, station phases).
   CHECK: bash server/scripts/verify_session34.sh regression
+  CWD: /home/z/my-project/hnh_server
   EXPECT: REGRESSION: OK
-  EVIDENCE: pending
+  EVIDENCE: automatic-evidence=v1; definition-sha256=36a3690d797039af90afa20f71868967af51299caf2a7ace313664c9480af137; exit=0; EXPECT=matched; output-sha256=83228a92dd0b98ecfc3ab3781529b3bebc14d681f1a23eb3310e4891bb63401c; output-bytes=162; shell=/bin/sh; cwd=/home/z/my-project/hnh_server; path=cc94915413e1/11 entries
 
 - [ ] G6: handoff + worklog updated, commits pushed
   HANDOFF.md carries a dated session-34 entry (what/why/evidence/
   NEXT), the worklog records the session, and every commit is pushed
   to origin/master.
   CHECK: bash server/scripts/verify_session34.sh handoff
+  CWD: /home/z/my-project/hnh_server
   EXPECT: HANDOFF: OK
   EVIDENCE: pending

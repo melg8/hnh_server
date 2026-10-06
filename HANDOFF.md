@@ -1807,3 +1807,108 @@ NEXT (handoff):
 - populate_for_subscriber announces by scanning gobs_in_view per cell -
   fine at 60-bot cohorts, revisit if the announce burst shows up in the
   perf counters at 300+.
+
+## 2026-10-06 - Session 34: build-transition publish, live station probe, 300/node load
+Both remaining NEXT deliverables from session 33 landed (the live
+guest-oven probe and the 300+/node load story), and driving the real
+cluster end to end caught and fixed FIVE latent defects that unit
+coverage on both sides of the mesh channel could not see.
+
+WHAT (commits 58cd502 + 558ce34 + bb37595):
+
+- BUILD TRANSITIONS PUBLISH (the read-side gap). sink_material's stage
+  advance and complete_plan only re-rendered LOCAL viewers
+  (restage_gob); peers watching a build never heard anything, so a
+  guest oven built by a peer stayed a dead Structure guest forever
+  (every station interaction keys off the Station class). Three
+  layers: GuestKind::Static carries a plan `stage: Option<u8>`
+  (additive bincode-positional field, same policy as the session-33
+  station snapshot); both transitions re-publish GuestUpdate; and
+  ingest_guest detects a kind-payload flip on an EXISTING guest and
+  re-renders every viewer with a full OD_RES block carrying the fresh
+  sdt byte - the wire mirror of restage_gob. That last piece also
+  fixed the session-33 lit re-render claim: the existing-guest path
+  only streamed pose/move/hp deltas before, so a lit guest oven never
+  re-rendered for players already watching it.
+
+- PROBE_STATION.PY (session 33's deferred verification gap). On a real
+  2-node cluster: a builder on node 1 walks to the cell boundary and
+  raises an oven on a DEEP own-cell tile (>= 60 subtiles from every
+  cell edge - the roast output drop spawns with a +/-30 jitter and a
+  rim site lands it in the peer's cell where gobs are invisible)
+  through the real build flow; a probe homed on node 0 follows the
+  build as guests and drives fuel + input (RelayStationItem), the
+  Light flower menu from the snapshot (RelayStationAct), the lit
+  re-render and the roast output drop. Both characters pump
+  cooperatively (a UDP session that stops reading for tens of seconds
+  overflows its socket buffer and loses raw OBJDATA blocks forever).
+
+- FOUR DEFECTS THE LIVE PROBE CAUGHT:
+  1. Sub carried diffs (added cells) but the receiver REPLACED the
+     whole subscription set: the first follow-up Sub from a moving
+     session silently unsubscribed every earlier cell - cross-node
+     updates for still-subscribed cells stopped flowing (a lit oven
+     never re-rendered). Sub now extends incrementally, like Unsub
+     always did. Unit test: sub_diffs_extend_not_replace.
+  2. tokio::select! in the session driver picked branches at random,
+     so a raw OBJDATA block could beat its own RESID announcement
+     (separate send paths) and the client could never resolve the
+     gob's resource. Biased polling drains inbound ACKs, then the
+     reliable stream, then raw datagrams.
+  3. Guest static spawn blocks carried OD_LAYERS with a bare 0xFFFF
+     terminator (no base u16) - the local path never writes OD_LAYERS
+     for statics and every strict OD parser chokes on the orphan.
+     Statics render from OD_RES alone now; stream_guest_pose skips
+     them.
+  4. test_build.py searched the roast output drop by the INVENTORY
+     icon resource while the drop GOB renders with the gfx/terobjs
+     items world shape (drop_world_res, session 26) - the station
+     flow's output stage had been searching for a gob that never
+     matches.
+
+- 300/NODE LOAD STORY (session 33's deferred deliverable). First run
+  FAILED the budget: node0 max_tick_us=168166 at 300 clustered walking
+  bots. Extending the perf attribution from 5 to 9 phases (farming,
+  stations, cluster, guests were invisible) pinpointed
+  phase_guests_us = 56-67 ms/tick: tick_guests built a viewers Vec by
+  filtering ALL sessions for EVERY moving guest every tick -
+  O(guests x sessions) HashSet lookups plus one datagram per (guest,
+  viewer) pair. Rewritten in the batch_move_broadcast shape (blocks
+  encoded once, one pass over sessions, ONE datagram per session,
+  LINSTEPs not recorded in unacked). Result at 600 clustered bots:
+  max_tick_us 62378/63936 - both nodes hold the 100 ms budget with
+  margin and the sharded save persists both cohorts.
+
+EVIDENCE: 191 unit tests green (5 new: stage advance publishes the
+Structure class + stage 1, completion publishes the Station class +
+snapshot, kind flip re-renders OD_RES with the lit sdt byte for an
+existing viewer (raw wire proof), sub diffs extend not replace),
+clippy -D warnings clean, fmt clean. verify_session34.sh: station-units
++ cluster-station (probe verdict "STATION RELAY: OK" + the relay pair
+on both node logs: item/act sent on node 0, fueled/input/lit/job on
+node 1) + load-300 (300 sessions per node, both within budget, shards
+persist 300+300). Full regression green on this tree: session-30 E2E
+(600-bot window, cluster 60+60, shard persist, restart restore),
+session-32 relay-plow, session-33 station.
+
+KNOWN LIMITATION (documented, not fixed): a gob SPAWNED by a node on a
+cell it does not own (e.g. a station output drop whose jitter crosses
+a cell boundary) is never published to the cell's owner - the peer is
+not subscribed to us for its own cells. Animals transfer authority on
+cell crossing; drops/statics do not. The probe sidesteps it by
+building deep in the owning cell. A general fix would mirror the
+animal authority-transfer path for drops - next-session candidate if
+boundary builds ever matter.
+
+NEXT (handoff):
+- craft pagina ad->action wiring for remaining recipes (wiki-verified
+  numbers only - do not invent).
+- carrying-pose state for bows (depends on a bow being craftable).
+- drop authority transfer on cell boundary (the known limitation
+  above) if boundary builds become a real scenario.
+- 1000-session single-node window re-measure on this tree (the
+  tick_guests batch should also lift the single-node 600-bot numbers;
+  the session-30 phase-3 gate still passes as-is).
+- real-client e2e re-run against the biased session driver (the
+  RESID-before-raw ordering is what the legacy client implicitly
+  assumed all along; the GL client should be re-verified).
