@@ -2869,3 +2869,31 @@ NEXT (handoff):
   datagrams correctly; re-run the client smoke to prove it.
 - Perf table on a quiet host.
 - Crafting paginae/Makewindow flow remains the top feature gap.
+
+## 2026-10-07 - Session 44 addendum: batched pose fan-out + ViewerIndex retired
+
+- BATCHED POSE FAN-OUT. stream_pose was the last per-viewer fan-out
+  (840-1370 us/call). The OD_LAYERS block encodes ONCE with every wire
+  slot as a game-global placeholder recorded as Patch::Many (base +
+  every layer offset) and fans out through the packed start batch at
+  tick end: the per-session pass resolves each wire id (first use
+  announces), rewrites the placeholders, and lands the patched block in
+  unacked. Patch is an enum: One (single-wire FX, no allocation) or
+  Many (pose layer list).
+
+- VIEWERINDEX RETIRED. All three fan-outs (LINBEG, FX, pose) now route
+  through the batch's cell-rectangle prefilter + exact visible.contains,
+  so the session-43 ViewerIndex (viewer_ix field, viewers_of_slot, the
+  per-tick rebuild pass) is removed - one less O(sessions) pass per
+  tick.
+
+- MEASURED (load43.sh, 1000-bot cohort): mv_pose 7-15 us/call (was
+  840-1370), mean tick 77-84 ms - the batch fan-outs now sit BELOW the
+  session-43 baseline. 246 tests green; probes green (MOVE PROBE, MELEE
+  WIRE, SESSION41 BOOT, WORLD ENTRY). Commit d5d3d1f pushed.
+
+NEXT (handoff):
+- GL client e2e + Windows smoke (carried; the wire-format fixes make
+  client verification the top trust gap).
+- Crafting paginae/Makewindow flow (top feature gap).
+- Perf table on a quiet multi-core host.
