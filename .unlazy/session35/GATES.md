@@ -11,7 +11,7 @@ re-measure the single-node 1000-session window on the post-session-34
 tree (the tick_guests batch rewrite should lift the single-node
 numbers beyond the 600-bot evidence).
 
-- [ ] G1: drop transfer unit battery
+- [x] G1: drop transfer unit battery
   A Kind::Drop spawned in a foreign cell (spawn jitter across a cell
   boundary) sends GuestTransfer to the cell's owner carrying the FULL
   drop payload (inventory resource name, quality, display label),
@@ -22,8 +22,11 @@ numbers beyond the 600-bot evidence).
   CHECK: cd /home/z/my-project/hnh_server/server && cargo test --release drop_transfer -- --nocapture
   CWD: /home/z/my-project/hnh_server/server
   EXPECT: 3 passed
+  EVIDENCE: exit=0; 3 passed (drop_transfer_sends_to_cell_owner_and_demotes,
+    drop_transfer_receiver_claims_pickup_payload,
+    drop_transfer_local_cell_drop_stays); full battery 194 green
 
-- [ ] G2: live cross-boundary drop lifecycle through the real mesh
+- [x] G2: live cross-boundary drop lifecycle through the real mesh
   On a real 2-node cluster, a station built near the shared spawn
   boundary produces an output drop that lands in the PEER's cell: the
   peer's probe session must SEE the drop (guest announce through the
@@ -33,22 +36,30 @@ numbers beyond the 600-bot evidence).
   CHECK: bash server/scripts/verify_session35.sh cluster-drop
   CWD: /home/z/my-project/hnh_server
   EXPECT: DROP TRANSFER: OK
+  EVIDENCE: exit=0; probe verdict 'DROP TRANSFER: OK drop=98590 cell=(3,1)
+    owner=node0 path=oven(roast2) pos=(995,489) inv=gfx/invobjs/meat';
+    node1 'drop authority transferred id=98590 owner=0' +
+    node0 'drop authority claimed id=98590' (live first run)
 
-- [ ] G3: single-node 1000-session load window re-measured
+- [x] G3: single-node 1000-session load window re-measured
   A single node with --bots 1000 --saturated (the session-2/30 load
   gate shape) holds max_tick_us < 100000 in the steady state with all
   1000 sessions live, on the post-session-34 tree (batch tick_guests).
   CHECK: bash server/scripts/verify_session35.sh load-1000
   CWD: /home/z/my-project/hnh_server
   EXPECT: 1000-BOT LOAD: OK
+  EVIDENCE: exit=0; sessions=1000 max_tick_us=88838 (100 ms budget held
+    with 11 percent headroom, saturated world)
 
-- [ ] G4: full regression battery
+- [x] G4: full regression battery
   Every unit test passes (191+3), clippy --all-targets -D warnings
   clean, cargo fmt --check clean, and the session-34 verification
   phases (station-units + cluster-station) stay green on this tree.
   CHECK: bash server/scripts/verify_session35.sh regression
   CWD: /home/z/my-project/hnh_server
   EXPECT: REGRESSION: OK
+  EVIDENCE: exit=0; unit battery green (194), clippy -D warnings green,
+    session-34 station-units green, session-34 cluster-station green
 
 - [ ] G5: handoff record and push
   HANDOFF.md carries the session-35 entry with evidence, the worklog

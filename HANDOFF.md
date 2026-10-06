@@ -1912,3 +1912,91 @@ NEXT (handoff):
 - real-client e2e re-run against the biased session driver (the
   RESID-before-raw ordering is what the legacy client implicitly
   assumed all along; the GL client should be re-verified).
+
+## 2026-10-06 - Session 35: drop authority transfer, 1000-bot window, per-node certs
+The session-34 known limitation ("a gob spawned by a node on a cell it
+does not own is never published to the cell's owner") is CLOSED, the
+single-node 1000-session window is measured in budget, and a fresh-
+sandbox cluster-boot race on the shared dev certificate is fixed.
+
+WHAT (commits 5b38557 + 0cc175e + 07f74be + handoff):
+
+- DROP AUTHORITY TRANSFER (the animal path mirrored for drops). A
+  Kind::Drop spawned by a node onto a cell it does not own (a station
+  output drop whose +/-33 subtile spawn jitter crosses the boundary,
+  stone rubble, loot) is now handed to the cell's owner and demoted to
+  a guest locally; the owner claims the EXACT id back into Kind::Drop.
+  Wire shape: GuestKind::Static gained an additive `drop:
+  Option<DropView>` payload (inv_res, ql, label) - same bincode-
+  positional policy as the session-33 station snapshot and the
+  session-34 stage field. The world render shape is NOT carried: the
+  receiver re-derives it from the inventory resource name via the SAME
+  deterministic drop_world_res the spawner used, so both nodes agree
+  on the sprite without shipping it. Labels cross as Strings and leak
+  into the interned-name arena (leak_static, the pattern every other
+  cross-node string already follows).
+
+- PROBE_DROP.PY (live proof through the real mesh). The builder raises
+  an oven at the RIM corner of cell (4,2) - a node-1 cell whose FOUR
+  axis neighbors all belong to node 0 (grid_owner scoring is seed-
+  independent, so the site plan is stable across runs). The probe
+  roasts through the guest relay (session-34 regression), and the
+  output drop that crosses the boundary must TRANSFER: it becomes a
+  LOCAL gob on the probe's node and a plain click (no relay hop)
+  restores 'Roasted Beef' into the probe inventory. Fallbacks when
+  the jitter keeps a drop inside the oven cell: a second roast driven
+  locally by the builder (fuel-first order - the surviving branch unit
+  sits in the builder's cursor after the build, and take is refused
+  while a cursor is held), then guest rim-tree chops (each chop
+  spawns a wood drop with the same jitter; trees survive 5 harvests).
+  LIVE FIRST-RUN EVIDENCE: roast 1 stayed (relay pickup regression
+  exercised instead), roast 2 crossed -> node1 "drop authority
+  transferred id=98590 owner=0" + node0 "drop authority claimed
+  id=98590" + local pickup proof.
+
+- 1000-BOT SINGLE-NODE WINDOW (the session-34 handoff's re-measure
+  ask). The in-process bots log in at ~12 sessions/s (TLS auth + play
+  + world entry each), so a fixed 75 s settle window cut the cohort at
+  938; the phase now polls until the cohort settles. Measured: 1000
+  sessions live (saturated world, walking/fighting),
+  max_tick_us=88838 - the 100 ms budget holds with 11 percent
+  headroom on the post-session-34 tree (batch tick_guests). Previous
+  single-node evidence was the session-30 600-bot window.
+
+- PER-NODE DEV CERTS (a fresh-sandbox cluster-boot race). Two nodes
+  booted from one repo raced on the SHARED certs/authsrv.* pair: both
+  regenerate it at startup, and the second node can parse a half-
+  written PEM and die at the auth self-check ("auth tcp/1883 not
+  reachable" - reproduced on the first cluster boot of this sandbox;
+  session 34 got lucky timing). Cluster nodes now default to
+  authsrv-n<N>.{crt,key}.pem; the single-node default path is
+  unchanged; explicit --cert/--key always wins.
+
+EVIDENCE: 194 unit tests green (3 new: drop transfer send+demote with
+the DropView payload, receiver claim with the pickup round-trip
+including the re-derived world shape, negative own-cell control),
+clippy -D warnings clean, fmt clean. verify_session35.sh: drop-units
++ cluster-drop (probe verdict + BOTH node logs grepped for the
+transfer pair) + load-1000 (sessions=1000 max_tick_us=88838) +
+regression (unit battery, clippy, session-34 station-units,
+session-34 cluster-station all green on this tree).
+
+NOT DONE THIS SESSION (rolled to NEXT):
+- craft pagina ad->action wiring for remaining recipes (wiki-verified
+  numbers only - do not invent). Carried from session 34.
+- carrying-pose state for bows (depends on a bow being craftable).
+- the ~12 sessions/s bot login pace is now the load-test bottleneck
+  (86 s to enter a 1000-bot cohort); if 10k-bot windows are ever
+  measured, parallelizing the bot login loop is the first lever.
+
+NEXT (handoff):
+- craft pagina ad->action wiring for remaining recipes (wiki-verified
+  numbers only - do not invent).
+- carrying-pose state for bows (depends on a bow being craftable).
+- real-client e2e re-run against the biased session driver (carried
+  from session 34; the RESID-before-raw ordering change is still
+  unverified on the GL client).
+- drop transfer is proven for Kind::Drop; plans/structures built on a
+  foreign cell still spawn a local-only gob on the builder's node (the
+  session-35 transfer pass deliberately handles drops only - plans
+  mutate through the build flow, not a stateless transfer).
