@@ -107,13 +107,19 @@ fn usage() -> &'static str {
 }
 
 fn parse_args() -> Args {
+    // Default tick workers = the machine's available parallelism
+    // (vertical scaling out of the box): the data-parallel tick fans the
+    // animal-AI intent and visibility-scan passes out over rayon, so an
+    // idle multi-core host is used without any flag. `--workers N`
+    // overrides it explicitly (0 = auto).
+    let auto_workers = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut a = Args {
         seed: 42,
         bots: 0,
         bot_secs: 600,
         saturated: false,
         shards: 1,
-        workers: 1,
+        workers: auto_workers,
         res_dir: None,
         cert: None,
         key: None,
@@ -132,7 +138,11 @@ fn parse_args() -> Args {
             "--bot-secs" => a.bot_secs = it.next().and_then(|v| v.parse().ok()).unwrap_or(600),
             "--saturated" => a.saturated = true,
             "--shards" => a.shards = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
-            "--workers" => a.workers = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+            "--workers" => {
+                // 0 or a malformed value = auto (available parallelism).
+                let v = it.next().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+                a.workers = if v == 0 { auto_workers } else { v };
+            }
             "--perf" => a.perf = true,
             "--res-dir" => a.res_dir = it.next(),
             "--cert" => a.cert = it.next(),
