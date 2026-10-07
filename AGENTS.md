@@ -175,10 +175,16 @@ contracts over the real protocol. It needs no gameres pack and no
 python - a fresh clone runs it as-is. The richer scenario probes
 (build, farming, party, stations) live in `server/scripts/` on the
 shared `hnhlib.py` harness (see `server/scripts/README.md`); run the
-relevant one when your change touches its domain. GitHub Actions runs
-fmt + clippy + `cargo test --workspace` on every push to master
-(`.github/workflows/rust.yml`) - a green local run is still mandatory:
-do not rely on CI to catch what you can verify yourself.
+relevant one when your change touches its domain.
+
+CI: the intended contract is fmt + clippy + `cargo test --workspace`
+on every push/PR to master via `.github/workflows/rust.yml`. As of
+session 53 the workflow file itself has never landed on the remote
+(the PAT lacks the `workflow` scope; the file content is preserved in
+HANDOFF_ARCHIVE.md, session-50 addendum) - retry that push once per
+session. Until it lands, the green local run of the three commands
+above is the ONLY gate: do not rely on CI to catch what you can
+verify yourself.
 
 If the change touches `unsafe` code, additionally run `cargo miri test` for
 the affected crate. If you cannot run the toolchain in your environment, state
