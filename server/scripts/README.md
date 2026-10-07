@@ -43,6 +43,7 @@ taming) that are easier to drive from python.
 | test_farming.py | plow/plant/harvest | farming verdict |
 | test_party_chat.py | party + chat relays | chat verdict |
 | test_equip.py | equipment doll/world layers | equip verdict |
+| test_newcraft.py | session-58 recipes end to end: saw, bucket-with-crafted-saw, fork paginae served | `NEWCRAFT: OK` |
 | load43.sh | 1000-bot duel cohort perf window | p95 histograms |
 
 ## Utilities
@@ -51,6 +52,13 @@ taming) that are easier to drive from python.
   overlay); the Windows twin is `windows/make-gameres.ps1`, which
   additionally calls `fix_gameres_versions.py`.
 - `dump_paginae.py` - dump the paginae the server pushes at login.
+- `scan_paginae.py` - static AButton decode of every
+  paginae/craft/*.res (offline; needs `unzip -o -q lib/haven-res.jar
+  'res/paginae/craft/*' -d /tmp/hx` first). Session-58 recipe
+  inventory source of truth.
+- `make_fork_paginae.py` - compose the fork craft paginae the pack
+  lacks (string, tanhide) into `res/compiled/`; donor image layer +
+  new AButton layer, layout verified by scan_paginae.py.
 - `profile_guests.sh` - guest-scan profiling run (session-43 artifact;
   the O(guests) rescan issue it measures is still open in HANDOFF.md).
 

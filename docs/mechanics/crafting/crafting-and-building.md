@@ -315,6 +315,40 @@ All of them share the same server shape: an inventory (per-gob item store), a fu
   through the session-46 sheep/mouflon loot rows
   (animals-and-husbandry.md). Unit counts remain chosen server policy
   (open question below).
+- **Recipe breadth batch (session 58).** 19 new recipes close the
+  biggest dead-end loops in the pack economy, all decoded from the
+  shipped pagina action layers by the static scanner
+  (`server/scripts/scan_paginae.py`, AButton layout verified against
+  src/haven/Resource.java):
+  - Stone/bone tools: saw (branch x2 + stone x1), bonesaw, pickaxe
+    (paginae/craft/paxe, ad "pickaxe"), scythe. The saw closes the
+    session-46 loop - the bucket demanded a saw nothing produced.
+  - Farm-tier headwear: straw hat (straw x3 from the wheat early
+    harvest), pumpkin hat, sprucecap.
+  - Woodwork: kuksa (branch x1, saw tool - the first recipe that
+    CONSUMES a crafted tool).
+  - Fishing gear: fishing pole, bone hook (fishing itself remains
+    future work).
+  - Linen tier: toga (linencloth x4), cylinder hat (x3), gauze (x1).
+  - **Fork paginae**: the pack ships no page for `ad =
+    ["craft","string"]` or `ad = ["craft","tanhide"]`, yet String and
+    Leather are real invobj resources consumed by shipped pages.
+    `res/compiled/paginae/craft/{string,tanhide}.res` (built by
+    `server/scripts/make_fork_paginae.py`: donor image layer from the
+    invobj icon + a newly composed AButton layer, verified by the
+    same scanner) give the recipes clickable pages. The string recipe
+    (flax fibres x2 -> string, flax/hemp early harvest) and the
+    tanhide recipe (raw cow hide x2 -> leather, the hand-tier stand-in
+    for the unimplemented tanning tub, whose documented legacy formula
+    stays (3*hide + bark + water + tub)/6) unlock the shipped leather
+    tier: lboots, lpants, lcloak, waterflask.
+  - Starter kit topped to branch x10 / stone x6 so the stone-tool
+    batch is craftable without world gathering (bough/stone picking
+    remains future work).
+  - Wire verification: `server/scripts/test_newcraft.py` (hnhlib
+    harness) drives act -> make widget -> pop -> make 0 -> item for
+    the saw and the crafted-saw bucket; the cargo unit battery covers
+    the tanhide/leather/lboots quality math end to end.
 
 ## Open questions
 

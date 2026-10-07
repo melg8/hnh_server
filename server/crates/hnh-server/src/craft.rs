@@ -391,6 +391,232 @@ pub const RECIPES: &[Recipe] = &[
         tool: Some("gfx/invobjs/saw"),
         q_weights: &[1],
     },
+    //
+    // Session 58: the breadth batch. Every pagina below ships in the
+    // legacy pack except string/tanhide (see the fork-page note on
+    // those). Ingredient resources were verified present in
+    // lib/haven-res.jar (gfx/invobjs); unit counts stay a chosen server
+    // policy recorded in crafting-and-building.md Open questions.
+    //
+    // Stone/bone tools. The saw closes the session-46 bucket loop: the
+    // bucket demanded a saw no recipe produced. Tool texts follow the
+    // RoB tool pages' material lists (branch + stone family).
+    Recipe {
+        id: "saw",
+        name: "Saw",
+        inputs: &[("gfx/invobjs/branch", 2), ("gfx/invobjs/stone", 1)],
+        outputs: &[("gfx/invobjs/saw", 1)],
+        pagina: "paginae/craft/saw",
+        softcap_attr: "carpentry",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    Recipe {
+        id: "bonesaw",
+        name: "Bone Saw",
+        inputs: &[
+            ("gfx/invobjs/bone", 1),
+            ("gfx/invobjs/branch", 1),
+            ("gfx/invobjs/string", 1),
+        ],
+        outputs: &[("gfx/invobjs/saw-bone", 1)],
+        pagina: "paginae/craft/bonesaw",
+        softcap_attr: "survive",
+        tool: None,
+        q_weights: &[1, 1, 1],
+    },
+    // Pickaxe: pagina ad ["craft", "pickaxe"] (page file paxe.res).
+    Recipe {
+        id: "pickaxe",
+        name: "Pickaxe",
+        inputs: &[("gfx/invobjs/branch", 1), ("gfx/invobjs/stone", 2)],
+        outputs: &[("gfx/invobjs/paxe", 1)],
+        pagina: "paginae/craft/paxe",
+        softcap_attr: "explore",
+        tool: None,
+        q_weights: &[1, 2],
+    },
+    Recipe {
+        id: "scythe",
+        name: "Scythe",
+        inputs: &[("gfx/invobjs/branch", 2), ("gfx/invobjs/stone", 2)],
+        outputs: &[("gfx/invobjs/scythe", 1)],
+        pagina: "paginae/craft/scythe",
+        softcap_attr: "farming",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    // Farm-tier headwear: straw comes from the wheat early harvest,
+    // pumpkins grow as the pumpkin crop, sprucecap is branch-woven.
+    Recipe {
+        id: "shat",
+        name: "Straw Hat",
+        inputs: &[("gfx/invobjs/straw", 3)],
+        outputs: &[("gfx/invobjs/shat", 1)],
+        pagina: "paginae/craft/shat",
+        softcap_attr: "farming",
+        tool: None,
+        q_weights: &[1],
+    },
+    Recipe {
+        id: "pumpkinhat",
+        name: "Pumpkin Hat",
+        inputs: &[("gfx/invobjs/pumpkin", 1)],
+        outputs: &[("gfx/invobjs/pumpkinhat", 1)],
+        pagina: "paginae/craft/pumpkinhat",
+        softcap_attr: "farming",
+        tool: None,
+        q_weights: &[1],
+    },
+    Recipe {
+        id: "sprucecap",
+        name: "Sprucecap",
+        inputs: &[("gfx/invobjs/branch", 2)],
+        outputs: &[("gfx/invobjs/hat-sprucecap", 1)],
+        pagina: "paginae/craft/sprucecap",
+        softcap_attr: "survive",
+        tool: None,
+        q_weights: &[1],
+    },
+    // Woodworking: kuksa is the carved cup; it is the first recipe that
+    // CONSUMES the saw (tool field) rather than merely demanding it.
+    Recipe {
+        id: "kuksa",
+        name: "Kuksa",
+        inputs: &[("gfx/invobjs/branch", 1)],
+        outputs: &[("gfx/invobjs/kuksa", 1)],
+        pagina: "paginae/craft/kuksa",
+        softcap_attr: "carpentry",
+        tool: Some("gfx/invobjs/saw"),
+        q_weights: &[1],
+    },
+    // Fishing-gear items (fishing itself remains future work; the pack
+    // pages and icons exist, so the gear is craftable).
+    Recipe {
+        id: "fpole",
+        name: "Fishing Pole",
+        inputs: &[("gfx/invobjs/branch", 1), ("gfx/invobjs/string", 1)],
+        outputs: &[("gfx/invobjs/fpole", 1)],
+        pagina: "paginae/craft/fpole",
+        softcap_attr: "survive",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    Recipe {
+        id: "bonehook",
+        name: "Bone Hook",
+        inputs: &[("gfx/invobjs/bone", 1), ("gfx/invobjs/branch", 1)],
+        outputs: &[("gfx/invobjs/hook-bone", 1)],
+        pagina: "paginae/craft/bonehook",
+        softcap_attr: "survive",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    // Linen tier: cloth conversions on top of the session-46 chain.
+    Recipe {
+        id: "toga",
+        name: "Toga",
+        inputs: &[("gfx/invobjs/linencloth", 4)],
+        outputs: &[("gfx/invobjs/toga", 1)],
+        pagina: "paginae/craft/toga",
+        softcap_attr: "sewing",
+        tool: None,
+        q_weights: &[1],
+    },
+    Recipe {
+        id: "tophat",
+        name: "Cylinder Hat",
+        inputs: &[("gfx/invobjs/linencloth", 3)],
+        outputs: &[("gfx/invobjs/hat-top", 1)],
+        pagina: "paginae/craft/tophat",
+        softcap_attr: "sewing",
+        tool: None,
+        q_weights: &[1],
+    },
+    Recipe {
+        id: "gauze",
+        name: "Gauze",
+        inputs: &[("gfx/invobjs/linencloth", 1)],
+        outputs: &[("gfx/invobjs/gauze", 1)],
+        pagina: "paginae/craft/gauze",
+        softcap_attr: "sewing",
+        tool: None,
+        q_weights: &[1],
+    },
+    // String: the pack economy consumes string (bow, arrows, rope,
+    // waterskin, backpack, quiver) but ships no producing page - the
+    // fork paginae/craft/string (res/compiled, built by
+    // server/scripts/make_fork_paginae.py) carries the invobj icon and
+    // ad ["craft", "string"]. Flax fibres come from the flax/hemp
+    // early harvest (farm.rs).
+    Recipe {
+        id: "string",
+        name: "String",
+        inputs: &[("gfx/invobjs/flaxfibre", 2)],
+        outputs: &[("gfx/invobjs/string", 1)],
+        pagina: "paginae/craft/string",
+        softcap_attr: "sewing",
+        tool: None,
+        q_weights: &[1],
+    },
+    // Leather: the 2009 pack's tanning-tub station is not implemented,
+    // so the tanhide fork page (icon from gfx/invobjs/leather, ad
+    // ["craft", "tanhide"]) gives the hide->leather conversion a home
+    // page in the leather category. The legacy tub formula
+    // (3*hide + bark + water + tub)/6 stays the reference in
+    // crafting-and-building.md; this recipe is the hand-tier stand-in.
+    Recipe {
+        id: "tanhide",
+        name: "Leather",
+        inputs: &[("gfx/invobjs/hide-raw-cow", 2)],
+        outputs: &[("gfx/invobjs/leather", 1)],
+        pagina: "paginae/craft/tanhide",
+        softcap_attr: "sewing",
+        tool: None,
+        q_weights: &[1],
+    },
+    // Leather tier: boots, pants, cloak, waterskin - the pages ship
+    // with the pack (paginae/craft/{lboots,lpants,lcloak,waterflask}).
+    Recipe {
+        id: "lboots",
+        name: "Leather boots",
+        inputs: &[("gfx/invobjs/leather", 2), ("gfx/invobjs/string", 1)],
+        outputs: &[("gfx/invobjs/lboots", 1)],
+        pagina: "paginae/craft/lboots",
+        softcap_attr: "sewing",
+        tool: None,
+        q_weights: &[2, 1],
+    },
+    Recipe {
+        id: "lpants",
+        name: "Leather pants",
+        inputs: &[("gfx/invobjs/leather", 3)],
+        outputs: &[("gfx/invobjs/lpants", 1)],
+        pagina: "paginae/craft/lpants",
+        softcap_attr: "sewing",
+        tool: None,
+        q_weights: &[1],
+    },
+    Recipe {
+        id: "lcloak",
+        name: "Leather Cloak",
+        inputs: &[("gfx/invobjs/leather", 3), ("gfx/invobjs/string", 1)],
+        outputs: &[("gfx/invobjs/cloak-leather", 1)],
+        pagina: "paginae/craft/lcloak",
+        softcap_attr: "sewing",
+        tool: None,
+        q_weights: &[2, 1],
+    },
+    Recipe {
+        id: "waterflask",
+        name: "Waterflask",
+        inputs: &[("gfx/invobjs/leather", 1), ("gfx/invobjs/string", 1)],
+        outputs: &[("gfx/invobjs/waterflask", 1)],
+        pagina: "paginae/craft/waterflask",
+        softcap_attr: "survive",
+        tool: None,
+        q_weights: &[1, 1],
+    },
 ];
 
 /// Raw -> roasted meat mapping for the `roast` recipe (paginae/craft/roastmeat,

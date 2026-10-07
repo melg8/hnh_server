@@ -3046,7 +3046,7 @@ async fn static_ack_grants_stack_and_lp_on_home() {
     let lp_after = g.world.players[pidx].lp;
     assert_eq!(cur.count, 3, "1@q10 + 2@q20 -> 3 units");
     assert_eq!(cur.ql, 16, "(10*1+20*2)/3 = 16");
-    // The starter kit's branch stack (6 since session 36) must stay
+    // The starter kit's branch stack (10 since session 58) must stay
     // UNTOUCHED: the ack redirected onto the cursor, not into the
     // inventory.
     let inv_branch: Vec<_> = g.world.players[pidx]
@@ -3054,7 +3054,7 @@ async fn static_ack_grants_stack_and_lp_on_home() {
         .iter()
         .filter(|s| s.res == branch)
         .collect();
-    assert_eq!((inv_branch.len(), inv_branch[0].count), (1, 6));
+    assert_eq!((inv_branch.len(), inv_branch[0].count), (1, 10));
     assert_eq!(
         lp_after,
         lp_before + 5,
@@ -4792,6 +4792,114 @@ fn set_inv(g: &mut Game, stacks: &[(&'static str, u32, u8)]) {
             label: "",
         })
         .collect();
+}
+
+/// Session 58 breadth batch. The leather chain: hides (animal loot)
+/// tan into leather through the tanhide fork page, and the shipped
+/// leather-tier pages consume it. Quality: 4 hides at q40 average the
+/// type to 40, the sewing softcap (10) halves toward 25.
+#[tokio::test]
+async fn leather_chain_tans_and_consumes() {
+    let (mut g, _rx, _raw) = entered_game("leather");
+    set_inv(
+        &mut g,
+        &[
+            ("gfx/invobjs/hide-raw-cow", 4, 40),
+            ("gfx/invobjs/string", 1, 10),
+        ],
+    );
+    assert!(g.craft_once(1, "tanhide"), "tanhide must succeed");
+    {
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let leather = g.world.res.intern("gfx/invobjs/leather");
+        let l = g.world.players[pidx]
+            .inv
+            .iter()
+            .find(|s| s.res == leather)
+            .expect("leather produced");
+        assert_eq!(l.count, 1);
+        assert_eq!(l.ql, 25, "(40 + 10)/2 with sewing softcap");
+    }
+    // The second tanhide consumes the remaining 2 hides (craft all
+    // would continue; a single pass keeps the test tight).
+    assert!(g.craft_once(1, "tanhide"), "second tanhide must succeed");
+    assert!(g.craft_once(1, "lboots"), "lboots from leather + string");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let boots = g.world.res.intern("gfx/invobjs/lboots");
+    let b = g.world.players[pidx]
+        .inv
+        .iter()
+        .find(|s| s.res == boots)
+        .expect("boots produced");
+    assert_eq!(b.count, 1);
+    // Leather q25 + string q10, type weights [2,1]: (25*2 + 10)/3 = 20,
+    // softcap sewing=10: (20 + 10)/2 = 15.
+    assert_eq!(b.ql, 15, "type-weighted boots quality");
+}
+
+/// String: the pack economy consumed string with no producer page;
+/// the session-58 fork page closes it from flax fibres (the flax/hemp
+/// early harvest).
+#[tokio::test]
+async fn string_spins_from_flax_fibres() {
+    let (mut g, _rx, _raw) = entered_game("flaxspin");
+    set_inv(&mut g, &[("gfx/invobjs/flaxfibre", 2, 10)]);
+    assert!(g.craft_once(1, "string"), "string must succeed");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let str_gidx = g.world.res.intern("gfx/invobjs/string");
+    let total: u32 = g.world.players[pidx]
+        .inv
+        .iter()
+        .filter(|s| s.res == str_gidx)
+        .map(|s| s.count)
+        .sum();
+    assert_eq!(total, 1, "one new string stack unit");
+}
+
+/// The saw closes the session-46 carpentry loop: the bucket demanded a
+/// saw that nothing produced. Now saw crafts from the starter kit and
+/// the bucket follows - and the saw is CONSUMED-as-required, not lost.
+#[tokio::test]
+async fn saw_crafts_from_starter_and_unlocks_bucket() {
+    let (mut g, _rx, _raw) = entered_game("carpentry");
+    // Starter kit carries 10 branch + 6 stone: enough for saw (2+1)
+    // and bucket (3 branches) with headroom.
+    assert!(g.craft_once(1, "saw"), "saw must craft from the starter");
+    {
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let saw = g.world.res.intern("gfx/invobjs/saw");
+        assert!(
+            g.world.players[pidx].inv.iter().any(|s| s.res == saw),
+            "saw produced"
+        );
+    }
+    assert!(g.craft_once(1, "bucket"), "bucket with the crafted saw");
+}
+
+/// Recipe registry hygiene: ids unique, paginae unique, quality
+/// weights align with the input count (per-type weights are indexed
+/// by input type; a shorter vector is legal, a bogus longer one is
+/// a data bug).
+#[test]
+fn recipe_registry_is_consistent() {
+    let mut ids: Vec<&str> = crate::craft::RECIPES.iter().map(|r| r.id).collect();
+    ids.sort_unstable();
+    let n = ids.len();
+    ids.dedup();
+    assert_eq!(ids.len(), n, "recipe ids must be unique");
+    let mut pages: Vec<&str> = crate::craft::RECIPES.iter().map(|r| r.pagina).collect();
+    pages.sort_unstable();
+    pages.dedup();
+    assert_eq!(pages.len(), n, "recipe paginae must be unique");
+    for r in crate::craft::RECIPES {
+        assert!(
+            r.q_weights.len() <= r.inputs.len(),
+            "{}: more type weights than inputs",
+            r.id
+        );
+        assert!(!r.inputs.is_empty(), "{}: no inputs", r.id);
+        assert!(!r.outputs.is_empty(), "{}: no outputs", r.id);
+    }
 }
 
 /// Wooden Bow quality follows the RoB type-weighted formula

@@ -349,10 +349,18 @@ fn build_flow_sinks_partial_stack_then_completes_after_cursor_return() {
         .map(|(gid, _)| *gid)
         .expect("plan gob id");
 
-    // Act 3: sink the stone stack. Demand is stone x2; the starter stack
-    // carries 4, so the plan advances to stage 1 and keeps 2 stones on
-    // the cursor.
+    // Count helper hoisted here: the starter kit size is not a contract
+    // of this test, only (starter - demand) is.
+    let stone_stack_count = |s: &Session| -> Option<i32> {
+        let wid = s.item_by_res("gfx/invobjs/stone")?;
+        s.items.get(&wid)?.get(4).and_then(ArgVal::as_int)
+    };
+
+    // Act 3: sink the stone stack. Demand is stone x2; the take removes
+    // the WHOLE starter stack, the plan credits 2, and the rest rides
+    // back on the cursor.
     let stone_wid = sess.item_by_res("gfx/invobjs/stone").expect("stone wid");
+    let starter_stones = stone_stack_count(&sess).expect("starter stone count");
     sess.inv_take(stone_wid);
     sess.map_itemact(mc.0, mc.1, plan_gob);
     assert!(
@@ -387,14 +395,10 @@ fn build_flow_sinks_partial_stack_then_completes_after_cursor_return() {
         server.log_tail(2000)
     );
     // The stone remainder is back in the inventory as its own stack:
-    // the take removed the whole stack (4), the plan credited 2, so the
-    // drop returns exactly 2. (Checked on the stone stack itself - other
-    // stacks, e.g. string, also carry count 2.)
-    let stone_stack_count = |s: &Session| -> Option<i32> {
-        let wid = s.item_by_res("gfx/invobjs/stone")?;
-        s.items.get(&wid)?.get(4).and_then(ArgVal::as_int)
-    };
-    let merged = sess.pump_until(|s| stone_stack_count(s) == Some(2), 5);
+    // the take removed the whole stack, the plan credited 2, so the
+    // drop returns exactly starter - 2. (Checked on the stone stack
+    // itself - other stacks, e.g. string, also carry count 2.)
+    let merged = sess.pump_until(|s| stone_stack_count(s) == Some(starter_stones - 2), 5);
     let items_dump: Vec<_> = sess
         .items
         .iter()

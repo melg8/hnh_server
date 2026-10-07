@@ -1595,9 +1595,12 @@ impl Game {
                 // one batch of Stone Arrows (1 stone + 2 branch) out of the
                 // box, with oven-building headroom (stone x2 + branch x1 of
                 // the demand) on top - the whole bow chain is playable
-                // immediately.
-                ("gfx/invobjs/branch", 6, 10, ""),
-                ("gfx/invobjs/stone", 4, 10, ""),
+                // immediately. Session 58 tops it up (10/6) so the
+                // stone-tool batch (saw/pickaxe/scythe/sprucecap) is also
+                // reachable without first harvesting; world gathering
+                // (bough/stone picking) remains future work.
+                ("gfx/invobjs/branch", 10, 10, ""),
+                ("gfx/invobjs/stone", 6, 10, ""),
                 ("gfx/invobjs/string", 2, 10, ""),
                 ("gfx/invobjs/meat", 1, 10, "Beef"),
                 // Farming starter seeds: the plow pagina is pushed to
