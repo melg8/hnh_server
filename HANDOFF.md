@@ -3508,3 +3508,11 @@ NEXT (handoff):
 - Session 48 leftovers: recipe breadth, feeding transfer (lift), GL
   e2e production walkthrough.
 - Windows smoke + GL client e2e when a display host exists (carried).
+
+### Session 51 addendum: push succeeded on retry
+
+The GitHub receive-pack 500 was transient: minutes after the seven
+rejections, `git push origin master` succeeded and the remote tip is
+now 61a3403 (probe fix 7e8fc40 + wire test 6f32474 + this handoff).
+Nothing to re-push; the saved patches in
+/home/z/my-project/scripts/session51-patches/ are now redundant.
