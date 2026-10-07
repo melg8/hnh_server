@@ -3724,3 +3724,86 @@ NEXT (handoff):
   harness entry pending until the next send - harmless, recorded for
   anyone debugging pending_rel growth.
 
+
+---
+
+## 2026-10-08 - Session 57 (type 5: performance)
+
+SESSION TYPE ROTATION LOG: 53=0, 54=1, 55=2, 56=4, 57=5. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the top carried type-5 item - profile batch_move_broadcast (the
+mv phase read as #2: 3-32 ms windows) and fix what the data points at;
+plus the cheap perf-field gap (per-window max tick).
+
+PROFILE FIRST (new attribution before touching anything):
+
+- Perf gains four mvbat_* fields splitting the movement phase: scan
+  (the O(alive) position advance + dirty marks), encode (wire blocks
+  + batch push), fan-out (broadcast_batch, both batches), and the
+  mover count. tick_movement is now a SCAN pass + an ENCODE pass
+  (candidates collected as (id, frame, step, cx, cy), encoded in slot
+  order afterwards - the packed batch is unchanged), so the split is
+  honest. start_blocks/fx_batch_n joined the perf report.
+- Findings at 300 bots: scan 22-40 us, encode 3-14 us, fan-out the
+  rest. At 1000 bots: fan-out dominates the wall clock (14-60 ms
+  windows) - but the per-pair ops are all hash probes, and the 1k
+  mean tick reproduces the session-52 re-baseline band (30-60 ms on
+  this 2-core box). Conclusion: at 1k the wall time is scheduler-
+  bound (2 cores, ~2000 runnable runtime tasks; the fan-out also
+  wakes 1000 session tasks, so it eats the most preemption), and the
+  fan-out itself is PAIR-bound (every visible (session, mover) pair
+  must append bytes - the true lower bound). The old per-session
+  HashMap cell walk was the one term that was NOT a lower bound -
+  so that is what got cut.
+
+CUTS:
+
+- move_batch: the per-session cell walk now runs over a DENSE SORTED
+  cell index - Vec<CellGroup> (~24 B per non-empty cell, ordered by
+  (y, x)) plus a Vec<u32> block order, rebuilt lazily once per batch.
+  A session binary-searches its y-cell range (axis_cell_lo/hi, exact
+  integer bounds) and x-tests inside: strictly sequential memory in
+  L1/L2 instead of sessions x cells hash probes with a cache miss per
+  bucket. Correctness: axis_cell_lo/hi are cross-checked against the
+  rectangle oracle over negative coords and boundary contacts
+  (exhaustive unit test); a manual micro-bench (#[ignore],
+  dense_index_bench) records dense=324 vs full-scan=472 ns per
+  fan-out scan at the 1000-session/134-cell/500-block scale - the
+  ratio EXCLUDES the HashMap cache misses the old walk also paid.
+- tick_movement: per-block MessageBuf::new + finish + drop and a
+  fresh finished-Vec per tick are gone - three taken/restored
+  scratches (finished, progress, encoder) keep the 10 Hz path
+  allocation-free (at 1k movers on cadence ticks that was ~10k
+  allocs/s of 256 B churn).
+- Perf: window_max_tick_us - reset by every 5 s report. The lifetime
+  max never resets, so one early ramp-up spike froze every later
+  report at 60 ms regardless of the steady state; the new wmax
+  attribute spikes to their 5 s window (measured 17-28 ms windows at
+  300 bots while lifetime max stayed at 60 ms).
+
+VERIFICATION:
+
+- 285 cargo tests green (11 proto + 261 unit incl. the movement/
+  combat batteries + 1 ignored manual bench + 4 wire + 9 world);
+  fmt + clippy -D warnings clean.
+- Release binary: python probes WORLD ENTRY: OK + CATTR ORDER: OK.
+- 300-bot and 1000-bot load runs with the new attribution; 1k wall
+  time matches the documented session-52 band (scheduler-bound box,
+  not an index regression).
+- CI workflow push retried once per the session-53 rule: REJECTED
+  again (PAT lacks the `workflow` scope), commit rolled back AFTER
+  the perf commit was safe on its own - do not retry until the scope
+  exists.
+
+COMMITS: 7c1aef2 (perf: fan-out dense index + attribution) + this
+handoff entry.
+
+NEXT (handoff):
+- The fan-out is pair-bound and the 1k single-node worst case is the
+  clustered spawn shape; the multi-node path already caps pairs per
+  node. Only a multi-node profile can justify more here (recorded as
+  gap #2).
+- Mechanical carried: five-probe hnhlib.py migration, recipe breadth
+  (type 3), feeding lift, GL e2e + Windows smoke (no display host).
+

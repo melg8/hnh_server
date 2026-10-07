@@ -161,13 +161,19 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    entries). The full file content is preserved in the archive
    (session-50 addendum). Retry the push every session; a green local
    run stays mandatory.
-2. **Pair-work fan-out at scale**: the fan-out is now pair-bound -
-   every visible (session, mover) pair must append its bytes to that
-   session's datagram, and clustered populations make that O(N^2)
-   (session-57 finding: 1k bots spawn clustered, so the single-node
-   worst case is intrinsic to the load shape, not the index). The
-   multi-node path caps pairs per node (sessions x local movers);
-   revisit only with a multi-node profile that says otherwise.
+2. **Pair-work fan-out at scale**: MEASURED (session 59). The fan-out
+   is pair-bound and the multi-node path really caps it per node:
+   2x300 bots against single-node 600 cut mvbat_fanout p50 12.4 ->
+   3.9/7.4 ms with the same total population. At 2x500 on ONE 2-core
+   box both nodes starve (mean 170-210 ms ticks) and the cluster
+   carries EXTRA work the single node does not: guest mirroring
+   doubles the fan-out (mvbat_fanout + guests_fanout both at
+   90-130 ms) and 500 sessions see ~250 movers each because bots
+   spawn clustered. Verdict: the 1k cluster target needs nodes on
+   SEPARATE machines (or more cores), not a bigger single box; no
+   further single-index work is justified here. Guest pose
+   finalizers (the one profiled cluster excess) were already fixed
+   this session (see S59).
 3. **Probe migration**: move the five legacy self-contained probes onto
    hnhlib.py (mechanical; recipe in server/scripts/README.md).
 4. **Recipe breadth**: MOSTLY CLOSED (session 58): 35 recipes total;
@@ -184,18 +190,20 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 6. **Real-client e2e**: GL production walkthrough (tame, wait out the
    milk meter, milk on screen) and Windows smoke when a display host
    exists (carried).
-7. **Guest GC at scale**: the 50-tick guest GC walks the whole guest
-   table per node (session-35 design); bounded by the subscribed
-   population, so fine at 1k - revisit only if multi-node profiling
-   says otherwise (session 54 review note).
+7. **Guest GC at scale**: CLOSED by measurement (session 59): the
+   50-tick GC walk inside phase_cluster measured p50 73-98 us and
+   p95 <= 314 us with 646-984 guests per node at 2x300 - two orders
+   below anything actionable. Do not revisit without a multi-node
+   profile that shows phase_cluster in the milliseconds.
 
 ## Session type rotation log (consolidated)
 
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0, 54=1, 55=2, 56=4, 57=5, 58=3. All six types have been served -
-pick freely, but avoid serving the same type as the previous session.
+53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5. All six types have been
+served - pick freely, but avoid serving the same type as the previous
+session.
 
 ## Session index (one line each; full entries in the archive)
 
@@ -252,88 +260,9 @@ pick freely, but avoid serving the same type as the previous session.
 - S56 (type 4): wire-test de-flake - the harness now retransmits unacked reliable datagrams on the legacy RWorker backoff (lost WDGMSG click root-caused); 15/15 green full-suite runs.
 - S57 (type 5): mv-phase profile first (new mvbat_* attribution), then dense sorted cell index for the fan-out, allocation-free movement encode, per-window max-tick perf field; 1k wall time confirmed scheduler-bound on 2 cores.
 - S58 (type 3): recipe breadth batch - 19 recipes (35 total), static paginae scanner (scan_paginae.py), fork pages string/tanhide unlock the leather tier, test_newcraft.py wire probe.
+- S59 (type 5): multi-node scaling profile (profile_multinode.sh) - pair-cap confirmed per node, guest GC cleared by measurement, guest pose finalizers moved to the packed patched batch (p95 10.9 ms -> 16 us).
 
 ---
-
-## 2026-10-08 - Session 57 (type 5: performance)
-
-SESSION TYPE ROTATION LOG: 53=0, 54=1, 55=2, 56=4, 57=5. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: the top carried type-5 item - profile batch_move_broadcast (the
-mv phase read as #2: 3-32 ms windows) and fix what the data points at;
-plus the cheap perf-field gap (per-window max tick).
-
-PROFILE FIRST (new attribution before touching anything):
-
-- Perf gains four mvbat_* fields splitting the movement phase: scan
-  (the O(alive) position advance + dirty marks), encode (wire blocks
-  + batch push), fan-out (broadcast_batch, both batches), and the
-  mover count. tick_movement is now a SCAN pass + an ENCODE pass
-  (candidates collected as (id, frame, step, cx, cy), encoded in slot
-  order afterwards - the packed batch is unchanged), so the split is
-  honest. start_blocks/fx_batch_n joined the perf report.
-- Findings at 300 bots: scan 22-40 us, encode 3-14 us, fan-out the
-  rest. At 1000 bots: fan-out dominates the wall clock (14-60 ms
-  windows) - but the per-pair ops are all hash probes, and the 1k
-  mean tick reproduces the session-52 re-baseline band (30-60 ms on
-  this 2-core box). Conclusion: at 1k the wall time is scheduler-
-  bound (2 cores, ~2000 runnable runtime tasks; the fan-out also
-  wakes 1000 session tasks, so it eats the most preemption), and the
-  fan-out itself is PAIR-bound (every visible (session, mover) pair
-  must append bytes - the true lower bound). The old per-session
-  HashMap cell walk was the one term that was NOT a lower bound -
-  so that is what got cut.
-
-CUTS:
-
-- move_batch: the per-session cell walk now runs over a DENSE SORTED
-  cell index - Vec<CellGroup> (~24 B per non-empty cell, ordered by
-  (y, x)) plus a Vec<u32> block order, rebuilt lazily once per batch.
-  A session binary-searches its y-cell range (axis_cell_lo/hi, exact
-  integer bounds) and x-tests inside: strictly sequential memory in
-  L1/L2 instead of sessions x cells hash probes with a cache miss per
-  bucket. Correctness: axis_cell_lo/hi are cross-checked against the
-  rectangle oracle over negative coords and boundary contacts
-  (exhaustive unit test); a manual micro-bench (#[ignore],
-  dense_index_bench) records dense=324 vs full-scan=472 ns per
-  fan-out scan at the 1000-session/134-cell/500-block scale - the
-  ratio EXCLUDES the HashMap cache misses the old walk also paid.
-- tick_movement: per-block MessageBuf::new + finish + drop and a
-  fresh finished-Vec per tick are gone - three taken/restored
-  scratches (finished, progress, encoder) keep the 10 Hz path
-  allocation-free (at 1k movers on cadence ticks that was ~10k
-  allocs/s of 256 B churn).
-- Perf: window_max_tick_us - reset by every 5 s report. The lifetime
-  max never resets, so one early ramp-up spike froze every later
-  report at 60 ms regardless of the steady state; the new wmax
-  attribute spikes to their 5 s window (measured 17-28 ms windows at
-  300 bots while lifetime max stayed at 60 ms).
-
-VERIFICATION:
-
-- 285 cargo tests green (11 proto + 261 unit incl. the movement/
-  combat batteries + 1 ignored manual bench + 4 wire + 9 world);
-  fmt + clippy -D warnings clean.
-- Release binary: python probes WORLD ENTRY: OK + CATTR ORDER: OK.
-- 300-bot and 1000-bot load runs with the new attribution; 1k wall
-  time matches the documented session-52 band (scheduler-bound box,
-  not an index regression).
-- CI workflow push retried once per the session-53 rule: REJECTED
-  again (PAT lacks the `workflow` scope), commit rolled back AFTER
-  the perf commit was safe on its own - do not retry until the scope
-  exists.
-
-COMMITS: 7c1aef2 (perf: fan-out dense index + attribution) + this
-handoff entry.
-
-NEXT (handoff):
-- The fan-out is pair-bound and the 1k single-node worst case is the
-  clustered spawn shape; the multi-node path already caps pairs per
-  node. Only a multi-node profile can justify more here (recorded as
-  gap #2).
-- Mechanical carried: five-probe hnhlib.py migration, recipe breadth
-  (type 3), feeding lift, GL e2e + Windows smoke (no display host).
 
 ## 2026-10-08 - Session 58 (type 3: new functionality)
 
@@ -418,3 +347,78 @@ NEXT (handoff):
 - Feeding lift (trough-to-trough fodder transfer), GL e2e + Windows
   smoke (carried), five-probe hnhlib.py migration (test_newcraft.py is
   the template now), CI push when the token gets the scope.
+
+## 2026-10-08 - Session 59 (type 5: performance)
+
+SESSION TYPE ROTATION LOG: 55=2, 56=4, 57=5, 58=3, 59=5. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the two carried profiling questions (HANDOFF gaps #2 and #7) -
+the session-57 fan-out work said "only a multi-node profile can
+justify more here". This session produced that profile and fixed what
+the data pointed at.
+
+PROFILE FIRST (new harness, no production changes initially):
+
+- server/scripts/profile_multinode.sh: MODE=single|cluster BOTS=<per
+  node> boots the baseline or a 2-node cluster with BOTH nodes loaded
+  (--saturated --perf), settles, then prints per-node percentiles for
+  tick/phase/mvbat/guests over a 60 s window. TERM/INT trap tears the
+  nodes down - the first runs proved a bare EXIT trap does not run
+  when bash dies from a signal, and orphaned nodes poison the next
+  run's ports.
+- Run A (single 600 bots): tick p50 68 ms, mvbat_fanout p50 12.4 ms,
+  guests 0 - the pair-bound fan-out baseline at this population.
+- Run B (cluster 2x300): PAIR-CAP CONFIRMED. mvbat_fanout p50 fell
+  to 3.9/7.4 ms per node at the same total population; sessions=300
+  per node, guests=646/984 (players in foreign cells + roaming
+  animals both mirror). phase_cluster (subs + abroad + GC) p50
+  73-98 us, p95 <= 314 us. Node tick stayed ~60 ms because both
+  processes share this box's 2 cores - the pair savings are real
+  but scheduler-masked locally.
+- Run C (cluster 2x500 on one 2-core box): BOTH NODES STARVE - mean
+  ticks 170-210 ms, p95 300-360 ms, perf reports skip. The cluster
+  path carries work the single node does not: guest mirroring puts
+  ~250 movers in front of ~500 sessions per node (bots spawn
+  clustered, so most pairs survive the cell filter), and the fan-out
+  runs twice (mvbat_fanout + guests_fanout at 90-130 ms each). The
+  honest verdict: 1k clustered needs nodes on separate machines or
+  more cores; on one 2-core box the single-node 1k (30-60 ms band)
+  remains the better shape.
+
+CUT (the one profiled cluster excess):
+
+- guest pose finalizers: tick_guests encoded one OD_LAYERS block PER
+  (session, guest) pair - intern lookups + layer allocations per
+  pair; the 2x500 profile measured guests_pose_us at 22-52 ms (vs
+  0.5 ms at 2x300). queue_guest_pose now encodes ONCE per guest with
+  global-index placeholders (Patch::Many) and pushes into the packed
+  start batch, so broadcast_batch resolves per-session wire ids,
+  first-announces unseen resources, filters visibility and records
+  the block in unacked - the session-44 local-pose machinery. The
+  ingest pose-flip path rides it too. Two process notes: the pose
+  block is now retransmittable (fin=true, matching local poses),
+  and it ships at tick end instead of immediately (<= 100 ms lag,
+  same as local start/FX blocks).
+- Verified against the same 2x300 profile: guests_pose_us p50
+  528-608 us -> 10-11 us, p95 6.9-10.9 ms -> 14-16 us; phase_guests
+  p95 11.9/5.9 -> 6.1/2.1 ms; everything else in its old band.
+
+VERIFICATION:
+
+- 290 cargo tests green (11 proto + 266 unit incl. the new
+  guest_pose_finalizer_fans_out_patched_layers wire pin + 4 wire +
+  9 world); fmt + clippy -D warnings clean.
+- Release binary: WORLD ENTRY: OK + CATTR ORDER: OK + EAT FLOW: OK.
+- profile_multinode.sh re-run after the cut (see numbers above).
+
+COMMITS: e10b144 (pose cut + test) + 73fe043 (profile harness +
+README) + this handoff entry.
+
+NEXT (handoff):
+- The 10k path's next honest step is a MULTI-MACHINE cluster profile;
+  single-box cluster runs now have a recorded ceiling. If a bigger
+  dev box appears, rerun profile_multinode.sh with BOTS=1000+.
+- Carried: world gathering (bough/stone picking - type 3), feeding
+  lift, five-probe hnhlib.py migration, GL e2e + Windows smoke (no
+  display host), CI push when the token gets the scope.
