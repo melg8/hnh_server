@@ -380,7 +380,48 @@ required; Legacy:Hunting). Rules:
 - Persistence: animals, troughs, coops, and hives are claim-adjacent persistent
   structures; write them with the same durability as tiles.
 
+## Server implementation notes (this repo, session 45)
+
+- Taming MVP is live (single-node authority): the Quell pagina
+  (paginae/atk/quell) gates and resolves through the real combat
+  model. Selection-time gates: 2 IP available (req_ip 2), advantage
+  >= 3 (req_adv 30 tenths), target is a LOCAL animal, a rope
+  (gfx/invobjs/rope) equipped in ANY slot (weapon-slot-only is a
+  documented NEXT check), the tamer's rope not already bound, and the
+  beast not already quelled. Guest (cross-node) animals refuse quell
+  in the MVP.
+- Resolution: the queued quell intercepts the animal swing cadence
+  (same offence-bar economics as a normal swing; no defence chip, no
+  damage) and applies +20 tameness (TAMENESS_PER_QUELL). The battle
+  ends on the first quell (out of animal_fights, fight window torn
+  down), the beast follows the tamer client-side via a batched
+  OD_FOLLOW broadcast (gob ids are global - no per-session patching;
+  Following.java renders it), and the rope binds (one partially-tamed
+  beast per tamer; binding ends at full tameness or on a break).
+- Leash lifecycle: the break deadline is game-tick based (10 minutes
+  = 6000 ticks, the docs' 5-15 min floor as policy) rearmed on every
+  quell below 100; at 100 (TAMENESS_FULL) the beast never breaks.
+  Damaging the beast kills ALL tameness (server policy) and frees the
+  rope. The tick sweep (before the batch fan-out) breaks due leashes,
+  sends the OD_FOLLOW removal (oid -1), and chats the tamer.
+- Tamed animals skip animal AI entirely (no wander, no aggro) while
+  the tame row lives; tame rows never outlive local authority (a
+  transferred animal drops the row + follow render). Animals are
+  spawned wildlife in this server (not persisted), so taming state is
+  runtime world state with the same scope - recorded in Open
+  questions.
+
 ## Open questions (animals)
+
+- Taming MVP gaps (session 45): the "battle intensity == 0" prerequisite
+  is not yet modeled (the MVP gates on IP/advantage/rope; FightRel
+  intensity stays 0 in animal fights - the de-escalation meter is a
+  NEXT feature); the Animal Husbandry skill purchase is not gated
+  (the skill catalog carries "hunting" only - "ahusb" is an advisory
+  pagina string, consistent with every other recipe/action gate in
+  this server); the species morph at 100 tameness (boar->pig,
+  mouflon->sheep, aurochs->cow/bull) is not implemented; tamed-state
+  persistence is absent (see the session-45 implementation notes).
 
 - Session 36 bone drops: every species now drops `gfx/invobjs/bone` on
   death (Deer/Aurochs/Cow/Boar/Wolf x2, Fox/Hare x1) so the Bone Arrow

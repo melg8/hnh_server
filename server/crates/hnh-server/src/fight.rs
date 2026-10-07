@@ -317,16 +317,22 @@ pub const MANEUVERS: &[Maneuver] = &[
         req_ip: 0,
         req_adv: 0,
     },
+    // Quell the Beast (session 45 taming): the docs quote Jorb's
+    // prerequisite list - two initiative points available for the
+    // attack's IP cost, advantage fully in the tamer's favor (>= 3),
+    // battle intensity 0, a Rope equipped. The rope check is
+    // target-specific, so it lives in the game.rs on_maneuver gate,
+    // not in the static table.
     Maneuver {
         id: "quell",
         res: "paginae/atk/quell",
         kind: ManeuverKind::Attack,
-        ip_cost: 4,
+        ip_cost: 2,
         ip_gain: 0,
         ip_opp: 0,
         adv: 0,
-        req_ip: 0,
-        req_adv: 0,
+        req_ip: 2,
+        req_adv: 30,
     },
     // ---- block (POLICY) ----
     Maneuver {

@@ -3447,6 +3447,12 @@ impl Game {
             self.world.gobs.kill(id);
             self.world.gobs.vis.insert(id, st.pos);
             self.world.animal_gobs.retain(|&a| a != id);
+            // Tame rows never outlive local authority (the follow render
+            // and AI skip are node-local; cross-node leashes are an open
+            // MVP limitation recorded in the docs).
+            if self.world.tamed.remove(&id).is_some() {
+                self.stream_follow_off(id);
+            }
             tracing::debug!(id, owner, "animal authority transferred");
         }
 
@@ -5827,6 +5833,16 @@ impl Game {
         if let Some(why) = refuse {
             self.chat_line(sid, &why, Some((255, 128, 128)));
             return;
+        }
+        // Quell the Beast (session 45 taming): target-specific gates on
+        // top of the static IP/advantage requirements (animals-and-
+        // husbandry.md taming service). Refusals chat and mutate nothing.
+        if id == "quell" {
+            let why = self.quell_gate(pidx, target);
+            if let Some(why) = why {
+                self.chat_line(sid, &why, Some((255, 128, 128)));
+                return;
+            }
         }
         // Opponent-side IP delta FIRST: a LOCAL victim's own pool changes
         // (their rel(pgob).ip_self) and their window re-streams; a
@@ -8429,6 +8445,22 @@ impl Game {
         // Criminal-flag expiry: a rare-event O(players) scan kept out of
         // the phase histogram (it is empty in the steady state).
         self.tick_criminal_expiry();
+        // Leash-break sweep (session 45): a rare-event scan of the tame
+        // table (empty in the steady state; only beasts mid-taming live
+        // here). Runs before the batch fan-out so the follow-removal
+        // blocks ride the same packed datagram.
+        if !self.world.tamed.is_empty() {
+            let tick = self.world.tick;
+            let mut broke: Vec<GobId> = Vec::new();
+            for (&id, tame) in self.world.tamed.iter() {
+                if tame.break_at_tick != 0 && tick >= tame.break_at_tick {
+                    broke.push(id);
+                }
+            }
+            for id in broke {
+                self.break_leash(id, "and re-attacks");
+            }
+        }
         // The dirty set served this tick's visibility pass; spawn marks
         // after this point (farming/station drops) dirty the next pass.
         self.world.gobs.vis.clear_dirty();
@@ -8997,13 +9029,16 @@ impl Game {
         let tick = self.world.tick;
         // Cluster: only cell-owned animals simulate here (foreign ones are
         // guests or other nodes' authority; transferred out on crossing).
+        // Tamed animals skip AI entirely: the client renders the leash
+        // (OD_FOLLOW), the beast holds position and never re-aggros while
+        // the tame row lives (session 45).
         let animal_ids: Vec<GobId> = self
             .world
             .animal_gobs
             .iter()
             .copied()
             .filter(|&id| match self.world.gobs.get(id) {
-                Some(slot) => self.is_authority_slot(slot),
+                Some(slot) => self.is_authority_slot(slot) && !self.world.tamed.contains_key(&id),
                 None => false,
             })
             .collect();
@@ -9508,8 +9543,8 @@ impl Game {
             }
             // Bar updates and swing decision inside a tight scope, so the
             // session borrow is dropped before any self-facing call.
-            let mut swing = None;
-            {
+            // Returns (quell?, damage-swing?); None = no action this tick.
+            let action = {
                 let Some(out) = self.sessions.get_mut(&sid) else {
                     continue;
                 };
@@ -9526,33 +9561,50 @@ impl Game {
                 // Swing: spend offence, chip defence, land damage on an opening.
                 out.fight.own_off -= crate::fight::SWING_SPEND;
                 out.fight.atkc = crate::fight::ATKC_TICKS;
-                let Some(rel) = out.fight.rel_mut(target) else {
-                    continue;
-                };
-                rel.ip_self += 1;
-                // Attack weight scales 0.5..2.0 with advantage (balance).
-                let weight = (rel.balance.clamp(-5, 5) as f32) * 0.1 + 1.0;
-                let def_chip = (crate::fight::SWING_DEF_DMG as f32 * weight) as i32;
-                // Chip the animal's defence in the World store (the mirror
-                // source); rel.defence streams it to the client.
-                let (_, landed) = {
-                    let Some(af) = self.world.animal_fights.get_mut(&target) else {
+                // The SELECTED attack resolves: Quell the Beast turns the
+                // swing into a taming attempt instead of a damage swing
+                // (the IP/adv/rope gates ran at selection time, so the
+                // attempt is valid here by construction).
+                let quell = out.fight.atk_cur == Some("paginae/atk/quell");
+                if quell {
+                    Some((true, None))
+                } else {
+                    let Some(rel) = out.fight.rel_mut(target) else {
                         continue;
                     };
-                    let breaking = af.def <= crate::fight::OPENING_THRESHOLD;
-                    af.def = (af.def - def_chip).max(0);
-                    let landed = breaking || af.def <= crate::fight::OPENING_THRESHOLD;
-                    if landed {
-                        af.def = crate::fight::BAR_FULL;
-                    }
-                    (breaking, landed)
-                };
-                if landed {
-                    swing = Some(self.melee_dmg(pidx));
+                    rel.ip_self += 1;
+                    // Attack weight scales 0.5..2.0 with advantage (balance).
+                    let weight = (rel.balance.clamp(-5, 5) as f32) * 0.1 + 1.0;
+                    let def_chip = (crate::fight::SWING_DEF_DMG as f32 * weight) as i32;
+                    // Chip the animal's defence in the World store (the mirror
+                    // source); rel.defence streams it to the client.
+                    let (_, landed) = {
+                        let Some(af) = self.world.animal_fights.get_mut(&target) else {
+                            continue;
+                        };
+                        let breaking = af.def <= crate::fight::OPENING_THRESHOLD;
+                        af.def = (af.def - def_chip).max(0);
+                        let landed = breaking || af.def <= crate::fight::OPENING_THRESHOLD;
+                        if landed {
+                            af.def = crate::fight::BAR_FULL;
+                        }
+                        (breaking, landed)
+                    };
+                    let swing = if landed {
+                        Some(self.melee_dmg(pidx))
+                    } else {
+                        None
+                    };
+                    Some((false, swing))
                 }
-            }
+            };
+            let Some((quell, swing)) = action else {
+                continue;
+            };
             self.world.players[pidx].stamina = (self.world.players[pidx].stamina - 2).max(0);
-            if let Some(dmg) = swing {
+            if quell {
+                self.apply_quell(pidx, sid, target);
+            } else if let Some(dmg) = swing {
                 self.damage_animal(pidx, sid, target, tslot, dmg);
             }
         }
@@ -9824,7 +9876,190 @@ impl Game {
         }
     }
 
-    /// Apply player damage to an animal, handling death + loot.
+    // ------------------------------------------------------------------
+    // Taming (session 45; animals-and-husbandry.md taming service)
+    // ------------------------------------------------------------------
+
+    /// Quell target gate: local animal, rope equipped, this tamer's rope
+    /// not already bound to a partially-tamed beast, and the beast not
+    /// already tamed. Returns the refusal reason or None.
+    fn quell_gate(&mut self, pidx: usize, target: GobId) -> Option<String> {
+        let tslot = self.world.gobs.get(target)?;
+        if !matches!(self.world.gobs.kind[tslot], Kind::Animal { .. }) {
+            return Some("You can only quell an animal.".to_owned());
+        }
+        // Cross-node guest animals keep their authority on the owner node:
+        // the MVP resolves quells on the local authority only.
+        if self.world.guests.contains_key(&target) {
+            return Some("That beast is beyond your rope's reach.".to_owned());
+        }
+        if self.world.tamed.contains_key(&target) {
+            return Some("That beast is already quelled.".to_owned());
+        }
+        if !self.rope_equipped(pidx) {
+            return Some("You need a rope equipped to quell a beast.".to_owned());
+        }
+        // The rope binds to one animal until it turns hostile again
+        // (tameness reaches full = permanently tame, binding ends).
+        let my_gob = self.world.players[pidx].gob;
+        let bound = self
+            .world
+            .tamed
+            .values()
+            .any(|t| t.tamer == my_gob && t.tameness < crate::state::TAMENESS_FULL);
+        if bound {
+            return Some(
+                "Your rope is bound to another beast until it is tamed or breaks loose.".to_owned(),
+            );
+        }
+        None
+    }
+
+    /// True when a rope (gfx/invobjs/rope) sits in any equipment slot.
+    /// The docs name "a Rope equipped as the weapon" - any equip slot
+    /// accepts it for now (weapon-slot-only is a documented NEXT check).
+    fn rope_equipped(&mut self, pidx: usize) -> bool {
+        const ROPE: &str = "gfx/invobjs/rope";
+        let rope_gidx = self.world.res.intern(ROPE);
+        self.world.players[pidx]
+            .equip
+            .iter()
+            .flatten()
+            .any(|s| s.res == rope_gidx)
+    }
+
+    /// One successful Quell: +20 tameness, the battle ends, the beast
+    /// follows the tamer (leashed), the rope binds, and the 10-minute
+    /// leash-break timer starts (docs steps 3-5). At 100 tameness the
+    /// animal is permanently tame and never breaks loose again.
+    fn apply_quell(&mut self, pidx: usize, sid: SessionId, target: GobId) {
+        let tamer_gob = self.world.players[pidx].gob;
+        // End the battle: the beast stops biting (out of animal_fights).
+        self.world.animal_fights.remove(&target);
+        // Accumulate tameness.
+        let (tameness, full) = {
+            let entry = self
+                .world
+                .tamed
+                .entry(target)
+                .or_insert(crate::state::TameState {
+                    tamer: tamer_gob,
+                    tameness: 0,
+                    break_at_tick: 0,
+                });
+            entry.tamer = tamer_gob;
+            entry.tameness = (entry.tameness + crate::state::TAMENESS_PER_QUELL)
+                .min(crate::state::TAMENESS_FULL);
+            // The leash-break deadline: ~10 minutes from NOW on every
+            // quell below full (docs step 5; game-time based).
+            entry.break_at_tick = self.world.tick + crate::state::LEASH_BREAK_TICKS;
+            if entry.tameness >= crate::state::TAMENESS_FULL {
+                entry.break_at_tick = 0;
+                (entry.tameness, true)
+            } else {
+                (entry.tameness, false)
+            }
+        };
+        // The leash: client-side following (OCache OD_FOLLOW -> Following).
+        self.stream_follow(target, tamer_gob);
+        // Clean up the session-side fight (bars + window).
+        self.fight_del(sid, target);
+        self.world.players[pidx].fight_target = None;
+        let label = match self
+            .world
+            .gobs
+            .get(target)
+            .map(|s| &self.world.gobs.kind[s])
+        {
+            Some(Kind::Animal { species }) => format!("{species:?}"),
+            _ => "beast".to_owned(),
+        };
+        self.chat_line(
+            sid,
+            &format!("You quell the {label}. Tameness: {tameness}/100."),
+            Some((255, 255, 128)),
+        );
+        if full {
+            self.chat_line(
+                sid,
+                &format!("The {label} is fully tamed and stays by your side."),
+                Some((255, 255, 128)),
+            );
+        }
+    }
+
+    /// Broadcast an OD_FOLLOW block for one gob (leash rendering). Gob
+    /// ids are global (not session-relative wire ids), so the encoded
+    /// block needs no per-session patching - fan out through the packed
+    /// start batch like a one-shot FX (Session 44 batched fan-out).
+    fn stream_follow(&mut self, id: GobId, target: GobId) {
+        let Some(slot) = self.world.gobs.get(id) else {
+            return;
+        };
+        let frame = self.world.gobs.frame[slot] as i32;
+        let (px, py) = self.world.gobs.pos[slot];
+        let mut m = MessageBuf::new();
+        m.uint8(0)
+            .int32(id)
+            .int32(frame)
+            .uint8(OD_FOLLOW)
+            .int32(target)
+            .int8(0)
+            .int32(0)
+            .int32(0)
+            .uint8(OD_END);
+        self.start_scratch.push(
+            id,
+            self.world.gobs.frame[slot],
+            crate::visidx::cell_of(px, py),
+            true,
+            &m.finish(),
+        );
+        self.world.perf.fx_batch_n += 1;
+    }
+
+    /// Broadcast the follow REMOVAL (oid = -1: delattr client-side).
+    fn stream_follow_off(&mut self, id: GobId) {
+        let Some(slot) = self.world.gobs.get(id) else {
+            return;
+        };
+        let frame = self.world.gobs.frame[slot] as i32;
+        let (px, py) = self.world.gobs.pos[slot];
+        let mut m = MessageBuf::new();
+        m.uint8(0)
+            .int32(id)
+            .int32(frame)
+            .uint8(OD_FOLLOW)
+            .int32(-1)
+            .uint8(OD_END);
+        self.start_scratch.push(
+            id,
+            self.world.gobs.frame[slot],
+            crate::visidx::cell_of(px, py),
+            true,
+            &m.finish(),
+        );
+        self.world.perf.fx_batch_n += 1;
+    }
+
+    /// Break a leash: the beast re-aggros, the follow ends, the rope
+    /// frees (docs step 5). Chat the tamer when online.
+    fn break_leash(&mut self, target: GobId, reason: &str) {
+        let Some(tame) = self.world.tamed.remove(&target) else {
+            return;
+        };
+        self.stream_follow_off(target);
+        let tamer_pidx = self.world.players.iter().position(|p| p.gob == tame.tamer);
+        if let Some(pidx) = tamer_pidx {
+            let sid = self.world.players[pidx].session;
+            self.chat_line(
+                sid,
+                &format!("The beast breaks its leash {reason}!"),
+                Some((255, 128, 128)),
+            );
+        }
+    }
+
     fn damage_animal(
         &mut self,
         pidx: usize,
@@ -9833,6 +10068,13 @@ impl Game {
         tslot: usize,
         dmg: i32,
     ) {
+        // Docs step 5: hitting or damaging the beast removes the tameness
+        // gained (server policy: ALL of it - the beast shakes the leash
+        // and re-aggros). Runs before the normal damage path so the row
+        // is gone before any death handling.
+        if self.world.tamed.contains_key(&target) {
+            self.break_leash(target, "as your blow lands");
+        }
         let spec_dmg = dmg;
         if let Some(af) = self.world.animal_fights.get_mut(&target) {
             af.def = af.def.clamp(0, crate::fight::BAR_FULL);
@@ -17275,6 +17517,140 @@ mod tests {
         assert!(
             chat.iter().any(|t| t.contains("You have defeated")),
             "attacker told about the knockout: {chat:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Taming (session 45): quell gates, tameness accumulation, leash
+    // lifecycle. Server-policy numbers live in state.rs (TAMENESS_*,
+    // LEASH_BREAK_TICKS) and the docs Open questions.
+    // ------------------------------------------------------------------
+
+    fn equip_rope(g: &mut Game, pidx: usize) {
+        let rope = g.world.res.intern("gfx/invobjs/rope");
+        g.world.players[pidx].equip[0] = Some(crate::state::InvStack {
+            res: rope,
+            count: 1,
+            ql: 10,
+            label: "",
+        });
+    }
+
+    /// Satisfy the static quell gates (2 IP in the pool, advantage in
+    /// the tamer's favor past 3) and queue the quell selection.
+    fn arm_quell(g: &mut Game, sid: SessionId, target: GobId) {
+        {
+            let out = g.sessions.get_mut(&sid).unwrap();
+            let rel = out.fight.rel_mut(target).unwrap();
+            rel.ip_self = 5;
+            rel.adv = 40;
+            rel.sync_balance();
+        }
+        g.on_maneuver(sid, "quell");
+        assert_eq!(
+            g.sessions.get(&sid).unwrap().fight.atk_cur,
+            Some("paginae/atk/quell"),
+            "quell selection accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn quell_refuses_without_a_rope() {
+        let (mut g, _rx, _raw) = entered_game("tamenorope");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let deer = spawn_deer_at(&mut g, pidx, 20, Species::Deer.max_hp());
+        g.start_fight(1, deer, Species::Deer);
+        {
+            let out = g.sessions.get_mut(&1).unwrap();
+            let rel = out.fight.rel_mut(deer).unwrap();
+            rel.ip_self = 5;
+            rel.adv = 40;
+            rel.sync_balance();
+        }
+        g.on_maneuver(1, "quell");
+        assert_ne!(
+            g.sessions.get(&1).unwrap().fight.atk_cur,
+            Some("paginae/atk/quell"),
+            "the selection must be refused without a rope"
+        );
+        assert!(g.world.tamed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn quell_tames_and_binds_the_rope() {
+        let (mut g, _rx, _raw) = entered_game("tamerone");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let deer = spawn_deer_at(&mut g, pidx, 20, Species::Deer.max_hp());
+        g.start_fight(1, deer, Species::Deer);
+        equip_rope(&mut g, pidx);
+        arm_quell(&mut g, 1, deer);
+        // Resolve: one swing cadence later the quell lands.
+        g.sessions.get_mut(&1).unwrap().fight.own_off = crate::fight::BAR_FULL;
+        g.sessions.get_mut(&1).unwrap().fight.atkc = 0;
+        g.tick_combat();
+        let tame = g.world.tamed.get(&deer).expect("tame row");
+        assert_eq!(tame.tameness, 20, "+20 per quell");
+        assert_eq!(tame.tamer, pgob);
+        assert!(tame.break_at_tick > g.world.tick, "leash timer armed");
+        assert!(
+            !g.world.animal_fights.contains_key(&deer),
+            "the battle ends on the first quell"
+        );
+        assert_eq!(
+            g.world.players[pidx].fight_target, None,
+            "the engagement clears"
+        );
+        // The bound rope refuses a second beast.
+        let deer2 = spawn_deer_at(&mut g, pidx, 40, Species::Deer.max_hp());
+        g.start_fight(1, deer2, Species::Deer);
+        arm_quell(&mut g, 1, deer2);
+        assert!(
+            !g.world.tamed.contains_key(&deer2),
+            "the second quell must be refused while the rope is bound"
+        );
+    }
+
+    #[tokio::test]
+    async fn damage_kills_tameness_and_leashes_break() {
+        let (mut g, _rx, _raw) = entered_game("leashbrk");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let deer = spawn_deer_at(&mut g, pidx, 20, Species::Deer.max_hp());
+        g.apply_quell(pidx, 1, deer);
+        assert_eq!(g.world.tamed.get(&deer).unwrap().tameness, 20);
+        // Hitting the beast shakes off ALL tameness (server policy).
+        let tslot = g.world.gobs.get(deer).unwrap();
+        g.damage_animal(pidx, 1, deer, tslot, 1);
+        assert!(
+            g.world.tamed.is_empty(),
+            "damage removes the tame row entirely"
+        );
+        // Re-tame, then the leash breaks on the tick sweep.
+        g.apply_quell(pidx, 1, deer);
+        g.world.tamed.get_mut(&deer).unwrap().break_at_tick = g.world.tick + 1;
+        g.tick();
+        assert!(
+            g.world.tamed.is_empty(),
+            "the sweep breaks the leash past the deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_tame_never_breaks_loose() {
+        let (mut g, _rx, _raw) = entered_game("tamefull");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let deer = spawn_deer_at(&mut g, pidx, 20, Species::Deer.max_hp());
+        for _ in 0..5 {
+            g.apply_quell(pidx, 1, deer);
+        }
+        let tame = g.world.tamed.get(&deer).expect("tame row");
+        assert_eq!(tame.tameness, 100, "five quells reach full tameness");
+        assert_eq!(tame.break_at_tick, 0, "a fully tamed beast never breaks");
+        g.world.tick += crate::state::LEASH_BREAK_TICKS * 10;
+        g.tick();
+        assert!(
+            g.world.tamed.contains_key(&deer),
+            "the sweep must not touch a fully tamed beast"
         );
     }
 }

@@ -636,6 +636,31 @@ pub struct AnimalFight {
     pub def: i32,
 }
 
+/// Taming progress for one animal (session 45; animals-and-husbandry.md
+/// taming service). Each successful Quell adds TAMENESS_PER_QUELL; at
+/// TAMENESS_FULL the animal is permanently tame (no more leash breaks).
+/// The leash-break deadline is a game-tick stamp: surviving logout means
+/// game-time based, matching the wiki's lagg-relative wording.
+#[derive(Debug, Clone, Copy)]
+pub struct TameState {
+    /// The tamer's player gob id (the follow target + rope binding).
+    pub tamer: GobId,
+    /// Accumulated tameness (0..=100). 100 = fully tamed.
+    pub tameness: i32,
+    /// World tick when the leash breaks and the beast re-aggros.
+    /// Ignored once tameness reaches TAMENESS_FULL.
+    pub break_at_tick: u64,
+}
+
+/// Tameness added per successful Quell (docs step 3: five cycles to 100).
+pub const TAMENESS_PER_QUELL: i32 = 20;
+/// Full tameness: the animal is permanently tame.
+pub const TAMENESS_FULL: i32 = 100;
+/// Leash-break deadline: ~10 real minutes of game ticks (docs step 5
+/// "about ten minutes (5-15, variable)" - the floor as server policy).
+/// 600 s / TICK_MS(100) = 6000 ticks.
+pub const LEASH_BREAK_TICKS: u64 = 6000;
+
 /// A connected, in-world client's outbound message sinks.
 ///
 /// Two channels mirror the legacy split: widget/control traffic rides the
@@ -826,6 +851,14 @@ pub struct World {
     /// `animal_fights`). Keyed by the animal gob id, value = player gob
     /// id; PlayerHurt/KillCredit route back through `node_of_gob`.
     pub guest_attackers: HashMap<GobId, GobId>,
+    /// Taming state per animal gob (session 45). An entry exists from the
+    /// first successful Quell until the leash breaks (or damage kills the
+    /// tameness). Tamed animals never re-enter `animal_fights` while the
+    /// entry lives; the client renders the leash through OD_FOLLOW.
+    /// Runtime world state: animals are spawned wildlife (not persisted),
+    /// so taming state is equally session-world scope - recorded in the
+    /// docs Open questions.
+    pub tamed: HashMap<GobId, TameState>,
     /// Tick counter for deterministic scheduling.
     pub tick: u64,
     /// Logical world time in ms, advanced by TICK_MS each game tick (the
@@ -986,6 +1019,7 @@ impl World {
             guests: HashMap::new(),
             guest_fights: HashMap::new(),
             guest_attackers: HashMap::new(),
+            tamed: HashMap::new(),
             tick: 0,
             now_ms: 0,
             rng: hnh_world::JavaRandom::new(seed as i64),
