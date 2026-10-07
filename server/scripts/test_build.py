@@ -19,448 +19,84 @@ Modes: `buildbot` (steps 1-5, BUILD FLOW), `stationbot` (6, STATION
 FLOW), `all` (both, default: buildbot first then a fresh character).
 """
 import os
-import socket
-import struct
 import subprocess
 import sys
 import time
 
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-BIN = os.path.join(REPO, "server", "target", "release", "hnh-server")
+# Shared wire harness: hnhlib.py is the single source of the transport
+# plumbing (constants, auth, reliability walk, OBJDATA op table, session
+# driver). This module keeps its historical CLI (buildbot/stationbot/
+# persistbot/persistcheck modes) and re-exports the shared names so the
+# probes that historically imported them from test_build keep working.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from hnhlib import (  # noqa: E402,F401
+    REPO,
+    BIN,
+    GAME_PORT,
+    AUTH_PORT,
+    MSG_SESS,
+    MSG_REL,
+    MSG_ACK,
+    MSG_BEAT,
+    MSG_MAPREQ,
+    MSG_MAPDATA,
+    MSG_OBJDATA,
+    MSG_OBJACK,
+    MSG_CLOSE,
+    RMSG_NEWWDG,
+    RMSG_WDGMSG,
+    RMSG_DSTWDG,
+    RMSG_MAPIV,
+    RMSG_GLOBLOB,
+    RMSG_PAGINAE,
+    RMSG_RESID,
+    RMSG_PARTY,
+    RMSG_SFX,
+    RMSG_CATTR,
+    RMSG_MUSIC,
+    RMSG_TILES,
+    RMSG_BUFF,
+    OD_REM,
+    OD_MOVE,
+    OD_RES,
+    OD_LINBEG,
+    OD_LINSTEP,
+    OD_SPEECH,
+    OD_LAYERS,
+    OD_DRAWOFF,
+    OD_LUMIN,
+    OD_AVATAR,
+    OD_FOLLOW,
+    OD_HOMING,
+    OD_OVERLAY,
+    OD_HEALTH,
+    OD_BUDDY,
+    OD_END,
+    SESSERR_AUTH,
+    PVER,
+    LIST_END,
+    LIST_INT,
+    LIST_STR,
+    LIST_COORD,
+    LIST_COLOR,
+    REQUIRED_CATTR,
+    le16,
+    le32,
+    havstr,
+    auth_cookie,
+    ensure_server,
+    parse_objdata,
+    WireClient,
+    enter_world,
+    stop_server,
+)
 
-MSG_REL, MSG_MAPDATA, MSG_OBJDATA = 1, 5, 6
-RMSG_WDGMSG, RMSG_RESID, RMSG_CATTR = 1, 6, 9
-LIST_END, LIST_INT, LIST_STR, LIST_COORD = 0, 1, 2, 3
-LIST_COLOR = 6
-OD_MOVE, OD_RES, OD_LINBEG, OD_LINSTEP, OD_BUDDY, OD_END = 1, 2, 3, 4, 15, 255
-OD_LAYERS, OD_HEALTH = 6, 14
+class BuildClient(WireClient):
+    """Historical name: the build-flow probes keep their exact pre-chr
+    request wire shape (the old BuildClient never sent `chr`)."""
 
-
-def le16(v):
-    return struct.pack("<H", v & 0xFFFF)
-
-
-def le32(v):
-    return struct.pack("<i", v)
-
-
-def havstr(s):
-    return s.encode() + b"\x00"
-
-
-def auth_cookie(username, password="x"):
-    """TLS auth -> session cookie (test_farming.py handshake)."""
-    import hashlib
-    import ssl
-
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    raw = socket.create_connection(("127.0.0.1", 1871), timeout=5)
-    tls = ctx.wrap_socket(raw)
-
-    def send_frame(ty, payload):
-        tls.sendall(bytes([ty, len(payload)]) + payload)
-
-    def recv_frame():
-        head = b""
-        while len(head) < 2:
-            ch = tls.recv(2 - len(head))
-            if not ch:
-                raise RuntimeError("eof")
-            head += ch
-        ln = head[1]
-        body = b""
-        while len(body) < ln:
-            ch = tls.recv(ln - len(body))
-            if not ch:
-                raise RuntimeError("eof")
-            body += ch
-        return head[0], body
-
-    send_frame(1, username.encode())
-    ty, _ = recv_frame()
-    assert ty == 0, "CMD_USR rejected"
-    send_frame(2, hashlib.sha256(password.encode()).digest())
-    ty, body = recv_frame()
-    assert ty == 0, "CMD_PASSWD rejected"
-    return body
-
-
-def ensure_server():
-    """Start an isolated server (fresh save) if none is listening."""
-    probe = socket.socket()
-    probe.settimeout(0.4)
-    try:
-        probe.connect(("127.0.0.1", 1871))
-        probe.close()
-        return None
-    except OSError:
-        pass
-    env = dict(os.environ)
-    env["HNH_LP_RATE"] = "1000"
-    save_path = os.path.join(REPO, "server", "target", "build-test-save.json")
-    # Fresh world: persistent plans from earlier runs would occupy the
-    # spawn-area tiles and intercept this run's itemacts.
-    try:
-        os.remove(save_path)
-    except OSError:
-        pass
-    env["HNH_SAVE_FILE"] = save_path
-    proc = subprocess.Popen(
-        [BIN, "--seed", "42"],
-        cwd=os.path.join(REPO, "server"),
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        try:
-            probe = socket.socket()
-            probe.settimeout(0.4)
-            probe.connect(("127.0.0.1", 1871))
-            probe.close()
-            return proc
-        except OSError:
-            time.sleep(0.4)
-    raise RuntimeError("server did not come up")
-
-
-class BuildClient:
     def __init__(self, username):
-        self.username = username
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.settimeout(0.25)
-        self.server = ("127.0.0.1", 1870)
-        self.tseq = 0
-        self.rseq = 0
-        self.held = {}
-        self.widgets = {}
-        self.charlist_id = None
-        self.mapview_id = None
-        self.scm_id = None
-        self.slen_id = None
-        self.sm_wid = None
-        self.sm_opts = []
-        self.resids = {}  # wire id -> name
-        self.gobs = {}  # gobid -> {"res": name, "sdt": bytes, "pos": (x,y)}
-        self.item_info = {}  # item wid -> {"res": name, "ql": int, "tt": str}
-        self.player_gob = None
-        self.place_seen = None  # mapview `place` uimsg args
-
-    # ---- session plumbing -------------------------------------------------
-    def connect(self):
-        cookie = auth_cookie(self.username)
-        sess = (
-            bytes([0])
-            + le16(1)
-            + havstr("Haven")
-            + le16(2)
-            + havstr(self.username)
-            + cookie
-        )
-        for _ in range(8):
-            self.sock.sendto(sess, self.server)
-            try:
-                data, _ = self.sock.recvfrom(65536)
-                if data[0] == 0 and len(data) == 2 and data[1] == 0:
-                    return
-            except socket.timeout:
-                continue
-        raise RuntimeError("session not accepted")
-
-    def send_rel(self, subs):
-        out = bytes([1]) + le16(self.tseq)
-        for i, p in enumerate(subs):
-            if i < len(subs) - 1:
-                out += bytes([p[0] | 0x80]) + le16(len(p) - 1) + p[1:]
-            else:
-                out += p
-        self.tseq += len(subs)
-        self.sock.sendto(out, self.server)
-
-    def wdgmsg(self, wid, name, args=b""):
-        self.send_rel([bytes([1]) + le16(wid) + havstr(name) + args])
-
-    def pump(self, seconds):
-        deadline = time.time() + seconds
-        while time.time() < deadline:
-            try:
-                data, _ = self.sock.recvfrom(65536)
-            except socket.timeout:
-                continue
-            self.on_datagram(data)
-
-    def wait_for(self, predicate, timeout, step=0.25):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if predicate():
-                return True
-            self.pump(step)
-        return False
-
-    # ---- protocol handlers -------------------------------------------------
-    def on_datagram(self, data):
-        if data[0] == 2:
-            return  # ack
-        if data[0] == MSG_OBJDATA:
-            self.on_objdata(data[2:])
-            return
-        if data[0] != MSG_REL:
-            return
-        seq = struct.unpack("<H", data[1:3])[0]
-        off = 3
-        while off < len(data):
-            t = data[off]
-            off += 1
-            if t & 0x80:
-                ln = struct.unpack("<H", data[off : off + 2])[0]
-                body = data[off : off + ln]
-                off += ln
-            else:
-                body = data[off:]
-                off = len(data)
-            t &= 0x7F
-            if seq == self.rseq:
-                self.on_rel(t, body)
-                self.rseq = (self.rseq + 1) & 0xFFFF
-                while self.rseq in self.held:
-                    t2, b2 = self.held.pop(self.rseq)
-                    self.on_rel(t2, b2)
-                    self.rseq = (self.rseq + 1) & 0xFFFF
-                self.sock.sendto(bytes([2]) + le16((self.rseq - 1) & 0xFFFF), self.server)
-            elif ((seq - self.rseq) & 0xFFFF) < 0x8000:
-                self.held[seq] = (t, body)
-            seq = (seq + 1) & 0xFFFF
-
-    def on_rel(self, t, body):
-        if t == 0:  # NEWWDG
-            wid = struct.unpack("<H", body[0:2])[0]
-            nend = body.index(0, 2)
-            name = body[2:nend].decode()
-            self.widgets[wid] = name
-            aoff = nend + 1 + 10  # skip x, y, parent
-            args = list(self.parse_args(body[aoff:]))
-            if name == "charlist":
-                self.charlist_id = wid
-            elif name == "mapview":
-                self.mapview_id = wid
-                for gy in (-1, 0, 1):
-                    for gx in (-1, 0, 1):
-                        self.sock.sendto(bytes([4]) + le32(gx) + le32(gy), self.server)
-            elif name == "scm":
-                self.scm_id = wid
-            elif name == "slen":
-                self.slen_id = wid
-            elif name == "sm":
-                self.sm_wid = wid
-                self.sm_opts = [a for a in args if isinstance(a, str)]
-            elif name == "item" and len(args) >= 4:
-                # args: [wire res, ql, drag, tooltip, num]
-                self.item_info[wid] = {
-                    "res": self.resids.get(args[0]),
-                    "ql": args[1] if isinstance(args[1], int) else None,
-                    "tt": args[3] if isinstance(args[3], str) else "",
-                }
-        elif t == 2:  # DSTWDG
-            wid = struct.unpack("<H", body[0:2])[0]
-            self.widgets.pop(wid, None)
-            self.item_info.pop(wid, None)
-        elif t == RMSG_WDGMSG:
-            wid = struct.unpack("<H", body[0:2])[0]
-            nend = body.index(0, 2)
-            name = body[2:nend].decode()
-            args = list(self.parse_args(body[nend + 1 :]))
-            if name == "place" and wid == self.mapview_id:
-                self.place_seen = args
-        elif t == RMSG_RESID:
-            wire = struct.unpack("<H", body[0:2])[0]
-            end = body.index(0, 2)
-            name = body[2:end].decode()
-            self.resids[wire] = name
-
-    def parse_args(self, buf):
-        off = 0
-        while off < len(buf) and buf[off] != LIST_END:
-            ty = buf[off]
-            off += 1
-            if ty == LIST_INT:
-                yield struct.unpack("<i", buf[off : off + 4])[0]
-                off += 4
-            elif ty == LIST_STR:
-                end = buf.index(0, off)
-                yield buf[off:end].decode()
-                off = end + 1
-            elif ty == LIST_COORD:
-                x, y = struct.unpack("<ii", buf[off : off + 8])
-                off += 8
-                yield (x, y)
-            else:
-                return
-
-    def on_objdata(self, body):
-        off = 0
-        while off + 8 <= len(body):
-            gobid = struct.unpack("<i", body[off : off + 4])[0]
-            off += 4
-            off += 4  # frame
-            g = self.gobs.setdefault(gobid, {"res": None, "sdt": b"", "pos": None})
-            while off < len(body):
-                code = body[off]
-                off += 1
-                if code == OD_END:
-                    break
-                if code == OD_RES:
-                    wire = struct.unpack("<H", body[off : off + 2])[0]
-                    off += 2
-                    if wire & 0x8000:
-                        ln = body[off]
-                        off += 1
-                        g["sdt"] = body[off : off + ln]
-                        off += ln
-                        wire &= 0x7FFF
-                    g["res"] = self.resids.get(wire)
-                elif code == OD_MOVE:
-                    x, y = struct.unpack("<ii", body[off : off + 8])
-                    off += 8
-                    g["pos"] = (x, y)
-                elif code == OD_LINBEG:
-                    off += 20
-                elif code == OD_LINSTEP:
-                    off += 4
-                elif code == OD_LAYERS:
-                    base = struct.unpack("<H", body[off : off + 2])[0]
-                    off += 2
-                    while True:
-                        layer = struct.unpack("<H", body[off : off + 2])[0]
-                        off += 2
-                        if layer == 0xFFFF:
-                            break
-                    # The layered base is the avatar body resource; record
-                    # it so player-gob detection keeps working now that
-                    # players spawn without a plain OD_RES.
-                    g["res"] = self.resids.get(base)
-                elif code == OD_HEALTH:
-                    off += 1
-                elif code == OD_BUDDY:
-                    end = body.index(0, off)
-                    if body[off:end].decode(errors="replace") == self.username:
-                        self.player_gob = gobid
-                    off = end + 3
-                else:
-                    return
-
-    # ---- scenario actions --------------------------------------------------
-    def play(self, name):
-        assert self.charlist_id is not None
-        self.send_rel(
-            [
-                bytes([1])
-                + le16(self.charlist_id)
-                + b"play\x00"
-                + bytes([2])
-                + name.encode()
-                + b"\x00"
-                + bytes([0])
-            ]
-        )
-
-    def menu_act(self, *words):
-        args = b"".join(bytes([LIST_STR]) + havstr(w) for w in words) + bytes([LIST_END])
-        self.wdgmsg(self.scm_id, "act", args)
-
-    def send_place(self, coord, button=1, modflags=0):
-        self.wdgmsg(
-            self.mapview_id,
-            "place",
-            bytes([LIST_COORD]) + le32(coord[0]) + le32(coord[1])
-            + bytes([LIST_INT]) + le32(button)
-            + bytes([LIST_INT]) + le32(modflags)
-            + bytes([LIST_END]),
-        )
-
-    def take_item(self, wid):
-        self.wdgmsg(wid, "take", bytes([LIST_COORD]) + le32(0) + le32(0) + bytes([LIST_END]))
-
-    def map_itemact(self, coord, gobid=None):
-        mc = coord
-        args = (
-            bytes([LIST_COORD]) + le32(0) + le32(0)
-            + bytes([LIST_COORD]) + le32(mc[0]) + le32(mc[1])
-            + bytes([LIST_INT]) + le32(0)
-        )
-        if gobid is not None:
-            args += (
-                bytes([LIST_INT]) + le32(gobid)
-                + bytes([LIST_COORD]) + le32(mc[0]) + le32(mc[1])
-            )
-        args += bytes([LIST_END])
-        self.wdgmsg(self.mapview_id, "itemact", args)
-
-    def click_gob(self, gobid, pos):
-        self.wdgmsg(
-            self.mapview_id,
-            "click",
-            bytes([LIST_COORD]) + le32(0) + le32(0)
-            + bytes([LIST_COORD]) + le32(pos[0]) + le32(pos[1])
-            + bytes([LIST_INT]) + le32(1)
-            + bytes([LIST_INT]) + le32(0)
-            + bytes([LIST_INT]) + le32(gobid)
-            + bytes([LIST_COORD]) + le32(pos[0]) + le32(pos[1])
-            + bytes([LIST_END]),
-        )
-
-    def flower_choice(self, wid, idx=0):
-        self.wdgmsg(wid, "cl", bytes([LIST_INT]) + le32(idx) + bytes([LIST_END]))
-
-    def find_item_by_res(self, resname):
-        # refresh_inventory recreates item widgets with fresh ids; the
-        # newest wid (max) is the live one once DSTWDG pruning is applied.
-        best = None
-        for wid, info in self.item_info.items():
-            if info["res"] == resname and (best is None or wid > best):
-                best = wid
-        return best
-
-    def find_item_by_tooltip(self, tooltip):
-        for wid, info in self.item_info.items():
-            if info["tt"] == tooltip:
-                return wid
-        return None
-
-    def find_gobs(self, resname):
-        return {
-            g: info
-            for g, info in self.gobs.items()
-            if info["res"] == resname
-        }
-
-
-def enter_world(username):
-    c = BuildClient(username)
-    c.connect()
-    print("session accepted")
-    c.pump(1.5)
-    c.play(username)
-    ok = c.wait_for(lambda: c.mapview_id is not None and c.player_gob is not None, 12)
-    if not ok and c.player_gob is None:
-        mine = [
-            g for g, info in c.gobs.items()
-            if info["res"] == "gfx/borka/body"
-        ]
-        c.player_gob = mine[0] if mine else None
-    assert ok or c.player_gob is not None, (
-        "world entry incomplete: mapview=%s player=%s gobs=%d" % (
-            c.mapview_id, c.player_gob, len(c.gobs)))
-    # Open the inventory the way the client's slen button does.
-    assert c.slen_id is not None, "slen widget missing"
-    for _ in range(4):
-        c.wdgmsg(c.slen_id, "inv", bytes([LIST_END]))
-        c.pump(0.3)
-    c.wait_for(lambda: any(n == "inv" for n in c.widgets.values()), 4)
-    print("world entry: player gob", c.player_gob)
-    return c
+        super().__init__(username, request_chr=False)
 
 
 def run_buildbot():
