@@ -154,26 +154,22 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    `workflow` scope (session 50; retried in 53, see its entry). The
    full file content is preserved in the archive (session-50 addendum).
    Retry the push every session; a green local run stays mandatory.
-2. **Wire-test flake**: movement_click_walks_with_linstep_progress is
-   flaky under parallel cargo test load (UDP timing). Give the wire
-   suite the pump_until treatment (type-4 session; same class as the
-   session-51 world_entry de-flake).
-3. **Perf fields**: cumulative max-tick counter never resets - add a
+2. **Perf fields**: cumulative max-tick counter never resets - add a
    per-window max to attribute the 197-210 ms ramp-up spikes.
-4. **move_batch**: profile batch_move_broadcast (mv phase is now #2:
+3. **move_batch**: profile batch_move_broadcast (mv phase is now #2:
    3-32 ms windows).
-5. **Probe migration**: move the five legacy self-contained probes onto
+4. **Probe migration**: move the five legacy self-contained probes onto
    hnhlib.py (mechanical; recipe in server/scripts/README.md).
-6. **Recipe breadth**: ~150 shipped paginae; oven-gated tools/
+5. **Recipe breadth**: ~150 shipped paginae; oven-gated tools/
    furniture/containers; flour/bread blocked (the 2009 pack has no
    grain item - sprout/grist only, see farm.rs).
-7. **Feeding depth**: trough-to-trough fodder transfer needs the lift
+6. **Feeding depth**: trough-to-trough fodder transfer needs the lift
    mechanic; per-animal breed stat rows (Milk Quantity / Wool Quality
    are flat constants).
-8. **Real-client e2e**: GL production walkthrough (tame, wait out the
+7. **Real-client e2e**: GL production walkthrough (tame, wait out the
    milk meter, milk on screen) and Windows smoke when a display host
    exists (carried).
-9. **Guest GC at scale**: the 50-tick guest GC walks the whole guest
+8. **Guest GC at scale**: the 50-tick guest GC walks the whole guest
     table per node (session-35 design); bounded by the subscribed
     population, so fine at 1k - revisit only if multi-node profiling
     says otherwise (session 54 review note).
@@ -183,8 +179,8 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0, 54=1, 55=2. All six types have been served - pick freely, but
-avoid serving the same type as the previous session.
+53=0, 54=1, 55=2, 56=4. All six types have been served - pick freely,
+but avoid serving the same type as the previous session.
 
 ## Session index (one line each; full entries in the archive)
 
@@ -238,74 +234,9 @@ avoid serving the same type as the previous session.
 - S53 (type 0): docs hygiene - HANDOFF split (living file + verbatim archive), stale sections rebuilt, scripts attic.
 - S54 (type 1): architecture review - guest scan O(node guests) per rescan removed (view-cell-bounded), idempotent VisIndex insert (promote double-insert bug), probe_guest_walk; live 2-node cluster evidence.
 - S55 (type 2): game/interact.rs + game/combat.rs extracted from game.rs (pure move, 5.3k -> 3.5k lines); split-verification process note.
+- S56 (type 4): wire-test de-flake - the harness now retransmits unacked reliable datagrams on the legacy RWorker backoff (lost WDGMSG click root-caused); 15/15 green full-suite runs.
 
 ---
-
-## 2026-10-08 - Session 54 (type 1: architecture review)
-
-SESSION TYPE ROTATION LOG: 49=2, 50=4, 51=3, 52=5, 53=0, 54=1. All six
-types served at least once now - pick freely, avoid repeats in a row.
-
-GOAL: review the architecture for scalability/correctness landmines on
-the road to multi-node 10k, and spend the session closing the one the
-gaps list flagged (the O(guests) scan term).
-
-REVIEW FINDINGS (verified by reading the code, not assumed):
-
-- INVARIANT (sound): every guest lifecycle site keeps the guest row and
-  its VisIndex membership in sync - ingest_guest (insert/reposition),
-  both authority-demote paths (insert after kill), remove_guest
-  (remove). The session-30 patch path already resolves ids through
-  gobs.get().or_else(guests.get()), so guests flow through the touched
-  lists correctly. Because of this, the per-cell guest bucket the gaps
-  list asked for was unnecessary: the buckets ALREADY hold guests.
-- BUG 1 (real, fixed): scan_visible_into dropped guests in its
-  compaction (gobs.get miss) and then re-walked the WHOLE guest table
-  per rescan - O(node guest population) per session per scan. Empty
-  table single-node (invisible in every single-node load run), a
-  landmine at multi-node 10k. Fix: the compaction resolves local-first/
-  guest-second and the walk is gone; scan cost is bounded by the guest
-  population of the VIEW cells.
-- BUG 2 (real, fixed): spawn_with_id inserts into the VisIndex
-  unconditionally, so promote_transfer re-spawning a previously
-  ingested guest pushed the id into the SAME cell bucket twice (the
-  dead `let _ = was_guest;` binding hinted at it). Dupes made the scan
-  list the id twice and cell_count() lie. Fix: VisIndex::insert is now
-  idempotent per (id, cell) - same-cell re-insert marks dirty/touched;
-  a drifted mapping heals through reposition.
-- INVARIANT (sound): gob ids are globally unique in a cluster by
-  per-node slot partitioning (Gobs::with_layout hands each node a
-  disjoint slot range; wire blocks stay valid without id remapping).
-- Review notes carried to the gaps list: the 50-tick guest GC walks the
-  whole guest table per node (bounded by the subscribed population;
-  fine at 1k, revisit only with multi-node profiling).
-
-VERIFICATION:
-
-- cargo fmt + clippy -D warnings clean; 285 tests green (261 unit incl.
-  3 new pins: two visidx-level idempotence pins + the game-level
-  guest_promotion_does_not_duplicate_the_vis_bucket_entry, 11 proto,
-  4 wire, 9 world). No Rust rule violations: rust-skills loaded before
-  coding (mem-reuse-collections, coll-seq-choice re-read; the compaction
-  stays allocation-free write-index).
-- LIVE 2-NODE CLUSTER (release binary, seed 42, fresh saves): wire
-  client WORLD ENTRY: OK through node 0; MOVE PROBE: OK (probe_walk);
-  new scripts/probe_guest_walk.py walked 880 subtiles east across 4
-  VisIndex cells (cell (4,2) is node-1-owned by rendezvous) - node 0
-  ingested 17 guests and transferred 13 local animals out, zero errors
-  or panics on both nodes (RUST_LOG=hnh_server=debug to see the
-  ingest/transfer lines).
-
-COMMITS: 3fd2681 (scan + visidx fixes + test pins), dcb23da
-(probe_guest_walk + README row) + this handoff entry.
-
-NEXT (handoff):
-- The gaps list in the living file is renumbered (guest scan done);
-  top picks: wire-test de-flake (type 4), batch_move_broadcast
-  profiling (type 5), game.rs interact/combat split (type 2), recipe
-  breadth (type 3). Windows smoke + GL e2e still carried.
-- CI workflow push: token unchanged, still no `workflow` scope - not
-  retried this session per the session-53 note.
 
 ---
 
@@ -364,3 +295,66 @@ NEXT (handoff):
   five-probe hnhlib.py migration are mechanical.
 - Windows smoke + GL client e2e still carried (no display host here).
 
+---
+
+## 2026-10-08 - Session 56 (type 4: test coverage / test pyramid)
+
+SESSION TYPE ROTATION LOG: 52=5, 53=0, 54=1, 55=2, 56=4. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: de-flake the wire suite (the top carried item): reproduce
+movement_click_walks_with_linstep_progress's parallel-load flake,
+root-cause it, fix it in the HARNESS (or the server - whichever the
+evidence points at), and prove the fix under stress.
+
+REPRODUCED: full-suite run 3 of 8 (default cargo parallelism, no added
+load) - the test panicked at wire.rs:182, "no own-gob LINBEG after
+ground click": the own LINBEG never appeared within 10 s of the map
+click.
+
+ROOT CAUSE (harness, not server): the harness sent every reliable
+datagram (the WDGMSG click, play, take, itemact, ...) exactly ONCE.
+On localhost, parallel-test CPU load overflows kernel receive
+buffers and silently drops datagrams; a lost click is never resent,
+the server never starts the walk, and the failure is indistinguish-
+able from a server bug. The legacy client owns this duty (Session.java
+RWorker retransmits unacked on the 80/200/620/2000 ms backoff until
+the server's cumulative MSG_ACK covers them) - the harness had simply
+never implemented that half of the contract. The server side was
+verified sound: RelSender retransmits its own stream on a 20 ms
+scheduler, and RelReceiver dedups resent client datagrams by seq.
+
+FIX (tests/common/mod.rs, the black-box client side):
+
+- pending_rel: every sent MSG_REL datagram is tracked (last submessage
+  seq, next retry time, attempt) until its cumulative ACK arrives.
+- MSG_ACK handling drops covered datagrams with the same
+  wrapping-window compare the server's RelSender::on_ack uses.
+- pump_until retransmits due datagrams each cycle (granularity = the
+  200 ms recv timeout; the legacy cadence tolerates that).
+- The LINBEG assert now reports the unacked-datagram count.
+
+The build-flow test inherits the protection (all take/itemact/place
+traffic rides the same path). Server code untouched.
+
+VERIFICATION:
+
+- 15/15 green full-suite runs after the fix: 10 standard + 5 with two
+  busy-loop CPU hogs added (the unfixed baseline failed on run 3 of
+  8). fmt + clippy -D warnings clean; 285 tests green.
+- CI workflow push retried once (rule): REJECTED again - the PAT still
+  lacks the `workflow` scope. Rolled back AFTER the fix commit was
+  already safe on its own commit (the session-55 lesson, applied).
+
+COMMITS: 742871a (the de-flake) + this handoff entry.
+
+NEXT (handoff):
+- Remaining gaps (8 items): per-window max-tick perf field (cheap),
+  batch_move_broadcast profiling (type 5), probe migration
+  (mechanical), recipe breadth (type 3), feeding lift, GL e2e +
+  Windows smoke (carried), guest GC at scale (revisit with multi-node
+  profiling only).
+- The duplicate-ACK note: the server's RelReceiver drops duplicates
+  without re-ACKing (legacy-faithful); a lost ACK therefore keeps a
+  harness entry pending until the next send - harmless, recorded for
+  anyone debugging pending_rel growth.
