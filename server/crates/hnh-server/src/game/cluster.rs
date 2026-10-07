@@ -1713,7 +1713,7 @@ impl Game {
         // Fan-out: each session merges its visible blocks into one
         // datagram; finalizers also land in `unacked` (retransmittable).
         let fanout_t = Instant::now();
-        self.broadcast_batch(&batch);
+        self.broadcast_batch(&mut batch);
         self.move_scratch = batch;
         self.world.perf.guests_fanout_us = fanout_t.elapsed().as_micros() as u64;
         // Rest pose for finished movers: the standing layer block per

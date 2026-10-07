@@ -317,9 +317,24 @@ impl Game {
         // per-session scan this replaces dominated the tick budget at the
         // 400+ mover scale (68 ms of movement phase measured at 426
         // players) and re-appeared at the duel-cohort load scale.
+        //
+        // Session 57 split the single loop into a SCAN pass (position
+        // advance + dirty marks + candidate collection, zero wire work)
+        // and an ENCODE pass (wire blocks off the collected candidates):
+        // the mvbat_* perf counters attribute the two honestly, and the
+        // scratch Vecs + the block encoder are taken/restored so the 10 Hz
+        // hot path stays allocation-free (a fresh Vec::new() per tick and
+        // a 256 B MessageBuf::new() + finish + drop per encoded block were
+        // the loop's remaining allocator churn).
         let mut batch = std::mem::take(&mut self.move_scratch);
         batch.clear();
-        let mut finished: Vec<(usize, i32, i32)> = Vec::new();
+        let mut finished = std::mem::take(&mut self.mv_finished_scratch);
+        finished.clear();
+        let mut progress = std::mem::take(&mut self.mv_progress_scratch);
+        progress.clear();
+        let mut encode = std::mem::take(&mut self.mv_encode_scratch);
+        let t_scan = Instant::now();
+        let mut movers = 0usize;
         for slot in 0..self.world.gobs.alive.len() {
             if !self.world.gobs.alive[slot] {
                 continue;
@@ -333,6 +348,7 @@ impl Game {
             let Some(lm) = self.world.gobs.mv[slot] else {
                 continue;
             };
+            movers += 1;
             // Active mover: keep its cell dirty so viewers receive LINSTEP
             // progress and boundary exits are caught.
             self.world
@@ -360,30 +376,38 @@ impl Game {
                     // cadence (see tick_guests); the client interpolates
                     // locally between corrections.
                     if self.world.tick.is_multiple_of(LINSTEP_EVERY_TICKS) {
-                        // Block layout: [fl][id i32][frame i32][ops..OD_END]
-                        // - NO per-block MSG header. The fan-out datagram
-                        // carries ONE MSG_OBJDATA type byte followed by
-                        // consecutive blocks (Session.getobjdata loops
-                        // exactly this shape).
-                        let mut m = MessageBuf::new();
-                        m.uint8(0)
-                            .int32(id)
-                            .int32(frame as i32)
-                            .uint8(OD_LINSTEP)
-                            .int32(l)
-                            .uint8(OD_END);
-                        batch.push(
-                            id,
-                            frame,
-                            crate::visidx::cell_of(cx, cy),
-                            false,
-                            &m.finish(),
-                        );
+                        progress.push((id, frame, l, cx, cy));
                     }
                 }
             }
         }
-        for (slot, tx, ty) in finished {
+        self.world.perf.mvbat_scan_us = t_scan.elapsed().as_micros() as u64;
+        let t_enc = Instant::now();
+        // Encode pass: block layout [fl][id i32][frame i32][ops..OD_END] -
+        // NO per-block MSG header. The fan-out datagram carries ONE
+        // MSG_OBJDATA type byte followed by consecutive blocks
+        // (Session.getobjdata loops exactly this shape). Candidates iterate
+        // in slot order - the old single loop pushed progress blocks inside
+        // the scan and finalizers after it, so the packed batch order is
+        // unchanged.
+        for (id, frame, l, cx, cy) in progress.drain(..) {
+            encode.clear();
+            encode
+                .uint8(0)
+                .int32(id)
+                .int32(frame as i32)
+                .uint8(OD_LINSTEP)
+                .int32(l)
+                .uint8(OD_END);
+            batch.push(
+                id,
+                frame,
+                crate::visidx::cell_of(cx, cy),
+                false,
+                encode.as_slice(),
+            );
+        }
+        for (slot, tx, ty) in finished.drain(..) {
             let id = gob_id_from_slot(slot, self.world.gobs.gen[slot]);
             let steps = self.world.gobs.mv[slot].map(|lm| lm.steps).unwrap_or(0);
             self.world.gobs.mv[slot] = None;
@@ -395,8 +419,9 @@ impl Game {
             // avatar visibly snapped back to its start point (the measured
             // "walks then rubber-bands home" defect).
             let frame = self.world.gobs.frame[slot];
-            let mut m = MessageBuf::new();
-            m.uint8(0)
+            encode.clear();
+            encode
+                .uint8(0)
                 .int32(id)
                 .int32(frame as i32)
                 .uint8(OD_MOVE)
@@ -404,7 +429,13 @@ impl Game {
                 .uint8(OD_LINSTEP)
                 .int32(steps)
                 .uint8(OD_END);
-            batch.push(id, frame, crate::visidx::cell_of(tx, ty), true, &m.finish());
+            batch.push(
+                id,
+                frame,
+                crate::visidx::cell_of(tx, ty),
+                true,
+                encode.as_slice(),
+            );
             // Rest pose: the standing set of the current facing (players
             // and animals both composite directional pose parts).
             let dir = self.world.gobs.facing[slot];
@@ -416,8 +447,13 @@ impl Game {
             // cell owner, for players standing abroad).
             self.publish(id, GuestEv::Update);
         }
-        self.broadcast_batch(&batch);
+        self.world.perf.mvbat_encode_us = t_enc.elapsed().as_micros() as u64;
+        self.world.perf.mvbat_movers = movers as u64;
+        self.broadcast_batch(&mut batch);
         self.move_scratch = batch;
+        self.mv_finished_scratch = finished;
+        self.mv_progress_scratch = progress;
+        self.mv_encode_scratch = encode;
     }
 
     /// Movement fan-out for one packed batch: every viewing session
@@ -431,12 +467,13 @@ impl Game {
     /// path so OBJACK retransmission keeps working; progress frames are
     /// deliberately NOT recorded (each is superseded by the next tick's
     /// frame, a lost datagram self-heals within 100 ms).
-    pub(super) fn broadcast_batch(&mut self, batch: &crate::move_batch::MoveBatch) {
+    pub(super) fn broadcast_batch(&mut self, batch: &mut crate::move_batch::MoveBatch) {
         if batch.is_empty() {
             return;
         }
         self.world.perf.move_blocks += batch.len() as u64;
         self.world.perf.move_cells += batch.cell_count() as u64;
+        let t_fan = Instant::now();
         // Session anchor positions (avatar gob slot -> SoA position).
         // Taken/restored scratch: this runs twice per tick at most (the
         // movement batch mid-tick, the start/FX batch at tick end) and
@@ -458,13 +495,26 @@ impl Game {
             // Datagram is materialized lazily: sessions with no visible
             // blocks allocate nothing.
             let mut m: Option<MessageBuf> = None;
-            for (cell, idxs) in batch.cells() {
-                if !crate::move_batch::cell_intersects_axis(cell.0, *px, FANOUT_SPAN)
-                    || !crate::move_batch::cell_intersects_axis(cell.1, *py, FANOUT_SPAN)
-                {
+            // Dense sorted scan (session 57): the groups are ordered by
+            // (y, x), so this session's y-cell range is ONE contiguous
+            // segment - binary-search its start, break at its end, and
+            // x-test inside. Strictly sequential memory (a few KiB in
+            // L1/L2) instead of the old per-session HashMap walk.
+            batch.ensure_groups();
+            let (groups, order) = batch.groups();
+            let cy0 = crate::move_batch::axis_cell_lo(*py, FANOUT_SPAN);
+            let cy1 = crate::move_batch::axis_cell_hi(*py, FANOUT_SPAN);
+            let cx0 = crate::move_batch::axis_cell_lo(*px, FANOUT_SPAN);
+            let cx1 = crate::move_batch::axis_cell_hi(*px, FANOUT_SPAN);
+            let first = groups.partition_point(|g| g.y < cy0);
+            for g in &groups[first..] {
+                if g.y > cy1 {
+                    break;
+                }
+                if g.x < cx0 || g.x > cx1 {
                     continue;
                 }
-                for &i in idxs {
+                for &i in &order[g.off as usize..(g.off + g.len) as usize] {
                     let (id, frame, fin) = batch.block_info(i);
                     if !out.visible.contains(&id) {
                         continue;
@@ -515,6 +565,9 @@ impl Game {
                 out.send_raw(m.finish());
             }
         }
+        // `+=`: the movement batch calls this mid-tick, the start/FX batch
+        // at tick end - one attribution total per fan-out.
+        self.world.perf.mvbat_fanout_us += t_fan.elapsed().as_micros() as u64;
         self.fan_scratch = sids_pos;
     }
 

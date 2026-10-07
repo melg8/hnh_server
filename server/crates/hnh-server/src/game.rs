@@ -269,6 +269,17 @@ pub struct Game {
     /// restored; avoids two per-tick allocations at the 1000-session
     /// scale - two batch fan-outs per tick).
     fan_scratch: Vec<(SessionId, (i32, i32))>,
+    /// Scratch for tick_movement's finished-mover list (taken/restored;
+    /// was a fresh `Vec::new()` per tick).
+    mv_finished_scratch: Vec<(usize, i32, i32)>,
+    /// Scratch for tick_movement's cadence-tick progress candidates
+    /// `(id, frame, step, cx, cy)` collected by the scan pass and encoded
+    /// by the encode pass (taken/restored).
+    mv_progress_scratch: Vec<(GobId, u32, i32, i32, i32)>,
+    /// Scratch block encoder for tick_movement (taken/restored; was a
+    /// fresh 256 B `MessageBuf::new()` + finish + drop per encoded block
+    /// - the last per-mover allocator churn on the 10 Hz hot path).
+    mv_encode_scratch: MessageBuf,
     /// Combat-phase lookup indexes (session 43): rebuilt once per tick in
     /// one O(players) pass, reused across ticks (mem-reuse-collections).
     ///
@@ -680,6 +691,9 @@ impl Game {
             move_scratch: crate::move_batch::MoveBatch::default(),
             start_scratch: crate::move_batch::MoveBatch::default(),
             fan_scratch: Vec::new(),
+            mv_finished_scratch: Vec::new(),
+            mv_progress_scratch: Vec::new(),
+            mv_encode_scratch: MessageBuf::new(),
             combat_ix: CombatIndex::default(),
             lp_ms_per_lp: {
                 // HNH_LP_RATE scales the passive accrual (skills.rs);
@@ -778,6 +792,13 @@ impl Game {
                     self.world.perf.last_tick_us = us;
                     if us > self.world.perf.max_tick_us {
                         self.world.perf.max_tick_us = us;
+                    }
+                    // Per-window maximum: reset by report_perf every 5 s so
+                    // spikes attribute to their window (the lifetime max
+                    // above never resets and stops being informative after
+                    // the first ramp-up spike).
+                    if us > self.world.perf.window_max_tick_us {
+                        self.world.perf.window_max_tick_us = us;
                     }
                     last_glob += 1;
                     if last_glob >= TICK_HZ * 5 {
@@ -1019,7 +1040,7 @@ impl Game {
         }
     }
 
-    fn report_perf(&self) {
+    fn report_perf(&mut self) {
         let ph = self.world.perf.phase_us;
         info!(
             players = self.world.players.len(),
@@ -1027,6 +1048,7 @@ impl Game {
             tick_us = self.world.perf.last_tick_us,
             mean_tick_us = self.world.perf.mean_tick_us,
             max_tick_us = self.world.perf.max_tick_us,
+            wmax_tick_us = self.world.perf.window_max_tick_us as u64,
             sessions = self.world.perf.active_sessions,
             gobs = self.world.gobs.alive.iter().filter(|a| **a).count(),
             spawned = self.world.perf.spawned_objects,
@@ -1066,13 +1088,22 @@ impl Game {
             mv_viewers_us = self.world.perf.mv_viewers_us,
             mv_pose_us = self.world.perf.mv_pose_us,
             mv_calls = self.world.perf.mv_calls,
+            mvbat_scan_us = self.world.perf.mvbat_scan_us,
+            mvbat_encode_us = self.world.perf.mvbat_encode_us,
+            mvbat_fanout_us = self.world.perf.mvbat_fanout_us,
+            mvbat_movers = self.world.perf.mvbat_movers,
             ix_cand_n = self.world.perf.ix_cand_n,
             move_blocks = self.world.perf.move_blocks,
             move_cells = self.world.perf.move_cells,
+            start_blocks = self.world.perf.start_blocks,
+            fx_batch_n = self.world.perf.fx_batch_n,
             grid_gens = self.world.grids.gen_count,
             grid_hits = self.world.grids.hit_count,
             "perf"
         );
+        // The window maximum has been delivered to this window's report;
+        // the next 5 s window measures from zero.
+        self.world.perf.window_max_tick_us = 0;
     }
 
     // ------------------------------------------------------------------
@@ -2418,6 +2449,10 @@ impl Game {
         self.world.perf.mv_viewers_us = 0;
         self.world.perf.mv_pose_us = 0;
         self.world.perf.mv_calls = 0;
+        self.world.perf.mvbat_scan_us = 0;
+        self.world.perf.mvbat_encode_us = 0;
+        self.world.perf.mvbat_fanout_us = 0;
+        self.world.perf.mvbat_movers = 0;
         self.world.perf.ix_cand_n = 0;
         // Cluster character migrations: re-broadcast unanswered queries on
         // a fixed cadence (a link still negotiating buffers the retry and
@@ -2688,7 +2723,7 @@ impl Game {
         if !self.start_scratch.is_empty() {
             self.world.perf.start_blocks = self.start_scratch.len() as u64;
             let mut batch = std::mem::take(&mut self.start_scratch);
-            self.broadcast_batch(&batch);
+            self.broadcast_batch(&mut batch);
             batch.clear();
             self.start_scratch = batch;
         }

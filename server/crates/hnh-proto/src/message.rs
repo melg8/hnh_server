@@ -276,6 +276,15 @@ impl MessageBuf {
         self.read >= self.buf.len()
     }
 
+    /// Reset for reuse, keeping the allocated capacity: the hot-path
+    /// encode loops (packed movement blocks) borrow `as_slice` per block
+    /// from ONE taken/restored buffer instead of `new()` + `finish()` +
+    /// drop per block.
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.read = 0;
+    }
+
     pub fn len(&self) -> usize {
         self.buf.len()
     }

@@ -1147,6 +1147,11 @@ pub struct GuestGob {
 pub struct Perf {
     pub last_tick_us: u128,
     pub max_tick_us: u128,
+    /// Max tick cost since the LAST perf report (the 5 s reporter window):
+    /// attributes ramp-up spikes to their window. The lifetime maximum
+    /// never resets, so a single early spike made every later report read
+    /// 197-210 ms regardless of the current steady state.
+    pub window_max_tick_us: u128,
     /// Exponential moving average of tick cost (stable steady-state number
     /// for load reports; 50-tick half-life).
     pub mean_tick_us: u64,
@@ -1212,6 +1217,19 @@ pub struct Perf {
     pub mv_viewers_us: u64,
     pub mv_pose_us: u64,
     pub mv_calls: u64,
+    /// Last-tick movement-tick sub-attribution (microseconds): the O(alive)
+    /// mover scan (interpolated pos + dirty marks, no encoding), the packed
+    /// block encode + batch push, and the per-session packed fan-out
+    /// (`broadcast_batch`, both the mid-tick movement batch and the tick-end
+    /// start/FX batch). Splits the phase_mv_us top-line the way
+    /// combat_index_us et al. split phase_combat_us.
+    pub mvbat_scan_us: u64,
+    pub mvbat_encode_us: u64,
+    pub mvbat_fanout_us: u64,
+    /// Last-tick mover count (alive authority gobs carrying a LinMove) and
+    /// the packed-block count they produced - per-mover cost attribution:
+    /// `mvbat_encode_us / max(movers,1)` is the per-mover encode price.
+    pub mvbat_movers: u64,
     /// Last-tick viewer-index diagnostics: mean visible set size across
     /// sessions (visible_total / sessions) and the total candidate count
     /// the cell-index fan-outs probed (`ix_cand_n`). Decides whether the
