@@ -390,31 +390,76 @@ impl Game {
         // deployment hands to its owning node processes. Results reorder
         // back into to_scan order before phase B; the exact distance
         // filter is unchanged. ---
+        //
+        // Allocation-free pass (session 52): per-session result lists are
+        // appended into ONE flat buffer; `ranges` holds (start, len) per
+        // to_scan entry. Each rayon task reuses a single (flat, scratch)
+        // pair for its whole partition - the per-session Vec churn this
+        // replaces was ~1000 heap allocations per tick at the 1000-
+        // session scale.
         let scan_t = Instant::now();
-        let in_range: Vec<Vec<GobId>> = if self.workers > 1 && to_scan.len() > 8 {
+        struct ScanRanges {
+            ranges: Vec<(u32, u32)>,
+            flat: Vec<GobId>,
+        }
+        let scanned = if self.workers > 1 && to_scan.len() > 8 {
             let nodes = std::num::NonZeroUsize::new(self.workers).expect("workers >= 1");
             let parts = crate::grid_owner::partition_by_owner(
                 |&i| crate::visidx::cell_of(to_scan[i].1 .0, to_scan[i].1 .1),
                 (0..to_scan.len()).collect::<Vec<usize>>(),
                 nodes,
             );
-            let mut by_index: Vec<(usize, Vec<GobId>)> = parts
+            // Each task: one reusable buffer pair for its whole partition,
+            // emitting (index, start, len) triples plus its flat segment.
+            type ScanSegment = (Vec<(usize, u32, u32)>, Vec<GobId>);
+            let per_task: Vec<ScanSegment> = parts
                 .par_iter()
                 .map(|part| {
-                    part.iter()
-                        .map(|&i| (i, self.scan_for_entry(&to_scan[i])))
-                        .collect::<Vec<_>>()
+                    let mut flat: Vec<GobId> = Vec::with_capacity(part.len() * 512);
+                    let mut scratch: Vec<GobId> = Vec::new();
+                    let mut triples = Vec::with_capacity(part.len());
+                    for &i in part {
+                        let start = flat.len() as u32;
+                        self.scan_for_entry_into(&to_scan[i], &mut flat, &mut scratch);
+                        let len = flat.len() as u32 - start;
+                        triples.push((i, start, len));
+                    }
+                    (triples, flat)
                 })
-                .collect::<Vec<Vec<_>>>()
-                .into_iter()
-                .flatten()
                 .collect();
-            by_index.sort_unstable_by_key(|(i, _)| *i);
-            by_index.into_iter().map(|(_, v)| v).collect()
+            // Merge in to_scan order: copy each session's segment into the
+            // shared flat, remapping the task-local offsets (memmove only).
+            let total: usize = per_task.iter().map(|(t, f)| t.len() + f.len()).sum();
+            let mut merged = ScanRanges {
+                ranges: Vec::with_capacity(to_scan.len()),
+                flat: Vec::with_capacity(total),
+            };
+            let mut order: Vec<ScanSegment> = per_task;
+            // Sort task segments by their first scan index so the merged
+            // flat buffer lists sessions in to_scan order.
+            order.sort_unstable_by_key(|(triples, _)| triples.first().map_or(usize::MAX, |x| x.0));
+            for (triples, flat) in order {
+                for (_, start, len) in triples {
+                    let start = start as usize;
+                    let end = start + len as usize;
+                    merged.ranges.push((merged.flat.len() as u32, len));
+                    merged.flat.extend_from_slice(&flat[start..end]);
+                }
+            }
+            merged
         } else {
-            to_scan.iter().map(|e| self.scan_for_entry(e)).collect()
+            let mut flat: Vec<GobId> = Vec::with_capacity(to_scan.len() * 512);
+            let mut scratch: Vec<GobId> = Vec::new();
+            let mut ranges = Vec::with_capacity(to_scan.len());
+            for e in &to_scan {
+                let start = flat.len() as u32;
+                self.scan_for_entry_into(e, &mut flat, &mut scratch);
+                let len = flat.len() as u32 - start;
+                ranges.push((start, len));
+            }
+            ScanRanges { ranges, flat }
         };
-        self.world.perf.vis_gob_scans += in_range.iter().map(|v| v.len() as u64).sum::<u64>();
+        self.world.perf.vis_gob_scans += scanned.flat.len() as u64;
         self.world.perf.vis_scan_us = scan_t.elapsed().as_micros() as u64;
         self.world.perf.vis_cells = self.world.gobs.vis.cell_count();
         // --- Phase B: serial application per session. ---
@@ -426,17 +471,19 @@ impl Game {
         let mut spawn_us: u128 = 0;
         let mut retract_us: u128 = 0;
         let mut spawn_count: u64 = 0;
-        for ((sid, (px, py), cell_moved, _kind), cand) in to_scan.into_iter().zip(in_range) {
+        for (i, (sid, (px, py), cell_moved, _kind)) in to_scan.iter().enumerate() {
+            let (start, len) = scanned.ranges[i];
+            let cand = &scanned.flat[start as usize..start as usize + len as usize];
             let spawn_t = Instant::now();
-            for id in &cand {
+            for id in cand {
                 // Check-only here: stream_spawn performs the insert and
                 // skips already-present ids; inserting before calling it
                 // would suppress the spawn block entirely (the avatar
                 // bug: the client never received its own gob).
-                let is_new = !self.sessions[&sid].visible.contains(id);
+                let is_new = !self.sessions[sid].visible.contains(id);
                 if is_new {
                     spawn_count += 1;
-                    self.stream_spawn(sid, *id);
+                    self.stream_spawn(*sid, *id);
                 }
             }
             // Retractions use a 2x VIEW_RADIUS hysteresis (a gob between
@@ -447,18 +494,21 @@ impl Game {
             // broadcast_retract.
             spawn_us += spawn_t.elapsed().as_micros();
             let retract_t = Instant::now();
-            if cell_moved || self.world.tick.is_multiple_of(8) {
-                self.retract_sweep_due(sid, px, py);
+            if *cell_moved || self.world.tick.is_multiple_of(8) {
+                self.retract_sweep_due(*sid, *px, *py);
             }
-            // The result list becomes the session's cache (moved into
-            // the session, no clone). Stored in scan order; the patch
-            // path sorts its own working copy (see patch_vis_cache).
-            if let Some(out) = self.sessions.get_mut(&sid) {
-                out.vis_cache = Some(cand);
-                out.vis_cache_pos = Some((px, py));
+            // The result list becomes the session's cache. The previous
+            // cache Vec is recycled (take -> clear -> refill) so the
+            // steady state allocates nothing here (mem-reuse-collections).
+            if let Some(out) = self.sessions.get_mut(sid) {
+                let mut cache = out.vis_cache.take().unwrap_or_default();
+                cache.clear();
+                cache.extend_from_slice(cand);
+                out.vis_cache = Some(cache);
+                out.vis_cache_pos = Some((*px, *py));
             }
             retract_us += retract_t.elapsed().as_micros();
-            self.world.perf.visible_total += self.sessions[&sid].visible.len();
+            self.world.perf.visible_total += self.sessions[sid].visible.len();
         }
         self.world.perf.vis_spawn_us = spawn_us as u64;
         self.world.perf.vis_spawns = spawn_count;
@@ -476,14 +526,23 @@ impl Game {
     /// Resolve one to_scan entry to its in-range list (Phase A2 helper,
     /// pure read, rayon-friendly). Full = scan_visible; Patch = re-filter
     /// the cached list by current positions and add touched enterers.
-    fn scan_for_entry(&self, e: &(SessionId, (i32, i32), bool, bool)) -> Vec<GobId> {
+    /// Allocation-free scan: writes the in-range id list into `out`
+    /// (cleared first); `scratch` is a reusable buffer for the patch
+    /// path's touched-id candidates. One (out, scratch) pair serves the
+    /// whole scan pass per worker (perf-drain-reuse / mem-reuse-collections).
+    fn scan_for_entry_into(
+        &self,
+        e: &(SessionId, (i32, i32), bool, bool),
+        out: &mut Vec<GobId>,
+        scratch: &mut Vec<GobId>,
+    ) {
         // Slot 4: true = Patch (patch the cached result), false = Full.
         // The cached list is BORROWED (read) - no per-tick clone on the
         // hot path; all access here is immutable so rayon shares &self.
         let (sid, (px, py), _moved, patch) = (e.0, e.1, e.2, e.3);
         match self.sessions.get(&sid).and_then(|o| o.vis_cache.as_deref()) {
-            Some(cached) if patch => self.patch_vis_cache(px, py, cached),
-            _ => self.scan_visible(px, py),
+            Some(cached) if patch => self.patch_vis_cache_into(px, py, cached, out, scratch),
+            _ => self.scan_visible_into(px, py, out),
         }
     }
 
@@ -496,7 +555,16 @@ impl Game {
     /// are binary searches - no per-tick HashSet allocation. The result
     /// is sorted + deduped before returning (touched lists may carry a
     /// boundary crosser twice).
-    fn patch_vis_cache(&self, px: i32, py: i32, cached: &[GobId]) -> Vec<GobId> {
+    /// Allocation-free variant: the result is written into `out` (cleared
+    /// first); `scratch` receives the touched-id candidates.
+    fn patch_vis_cache_into(
+        &self,
+        px: i32,
+        py: i32,
+        cached: &[GobId],
+        out: &mut Vec<GobId>,
+        scratch: &mut Vec<GobId>,
+    ) {
         let in_range = |id: GobId| -> bool {
             let gpos = self
                 .world
@@ -509,7 +577,8 @@ impl Game {
                 None => false, // dead/retracted: never kept
             }
         };
-        let mut out = Vec::with_capacity(cached.len() + 16);
+        out.clear();
+        out.reserve(cached.len() + 16);
         for &id in cached {
             if in_range(id) {
                 out.push(id);
@@ -521,14 +590,17 @@ impl Game {
         // order). Touched lists may carry a boundary crosser twice.
         out.sort_unstable();
         out.dedup();
-        for id in self.world.gobs.vis.touched_in_view(px, py, VIEW_RADIUS) {
+        self.world
+            .gobs
+            .vis
+            .touched_in_view_into(px, py, VIEW_RADIUS, scratch);
+        for &id in scratch.iter() {
             if in_range(id) && out.binary_search(&id).is_err() {
                 out.push(id);
             }
         }
         out.sort_unstable();
         out.dedup();
-        out
     }
 
     /// Spawn-churn debounce (session 42): gate the retract sweep to at
@@ -599,10 +671,18 @@ impl Game {
     /// Cluster guests merge in (foreign-authority gobs rendered locally);
     /// the guest table only holds gobs some local session subscribed to,
     /// so the scan cost stays bounded by what this node actually views.
-    pub(super) fn scan_visible(&self, px: i32, py: i32) -> Vec<GobId> {
-        let candidates = self.world.gobs.vis.gobs_in_view(px, py, VIEW_RADIUS);
-        let mut out = Vec::new();
-        for id in candidates {
+    pub(super) fn scan_visible_into(&self, px: i32, py: i32, out: &mut Vec<GobId>) {
+        out.clear();
+        self.world
+            .gobs
+            .vis
+            .gobs_in_view_into(px, py, VIEW_RADIUS, out);
+        // In-place compaction: cell buckets over-cover the exact view
+        // square, dead ids vanish between bucket updates. Write-index
+        // compaction keeps the buffer allocation-free (coll-seq-choice).
+        let mut w = 0usize;
+        for r in 0..out.len() {
+            let id = out[r];
             let Some(slot) = self.world.gobs.get(id) else {
                 continue;
             };
@@ -610,15 +690,16 @@ impl Game {
             if (gx - px).abs() > VIEW_RADIUS || (gy - py).abs() > VIEW_RADIUS {
                 continue;
             }
-            out.push(id);
+            out[w] = id;
+            w += 1;
         }
+        out.truncate(w);
         for (&id, g) in &self.world.guests {
             if (g.pos.0 - px).abs() > VIEW_RADIUS || (g.pos.1 - py).abs() > VIEW_RADIUS {
                 continue;
             }
             out.push(id);
         }
-        out
     }
 
     pub(super) fn on_objack(&mut self, sid: SessionId, acks: Vec<(GobId, u32)>) {

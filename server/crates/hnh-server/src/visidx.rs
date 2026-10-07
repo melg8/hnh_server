@@ -144,9 +144,18 @@ impl VisIndex {
     /// Gobs in the cells intersecting the view square. The caller applies
     /// the exact distance filter (cells are coarse buckets).
     pub fn gobs_in_view(&self, px: i32, py: i32, span: i32) -> Vec<GobId> {
+        let mut out = Vec::new();
+        self.gobs_in_view_into(px, py, span, &mut out);
+        out
+    }
+
+    /// Allocation-free variant of [`Self::gobs_in_view`]: reuses `out`
+    /// (cleared first). Hot path - one call per rescanned session per
+    /// tick; the buffer lives for the whole scan pass, not per session.
+    pub fn gobs_in_view_into(&self, px: i32, py: i32, span: i32, out: &mut Vec<GobId>) {
+        out.clear();
         let (cx0, cx1) = cell_range(px - span, px + span);
         let (cy0, cy1) = cell_range(py - span, py + span);
-        let mut out = Vec::new();
         for cy in cy0..=cy1 {
             for cx in cx0..=cx1 {
                 if let Some(v) = self.cells.get(&(cx, cy)) {
@@ -154,7 +163,6 @@ impl VisIndex {
                 }
             }
         }
-        out
     }
 
     pub fn clear_dirty(&mut self) {
@@ -190,10 +198,11 @@ impl VisIndex {
     /// its old and its new cell) - the caller dedups; no HashSet churn on
     /// this hot path. These are the only ids whose view membership can
     /// have changed since the last tick for a position-stable session.
-    pub fn touched_in_view(&self, px: i32, py: i32, span: i32) -> Vec<GobId> {
+    /// Allocation-free: `out` is cleared first and refilled.
+    pub fn touched_in_view_into(&self, px: i32, py: i32, span: i32, out: &mut Vec<GobId>) {
+        out.clear();
         let (cx0, cx1) = cell_range(px - span, px + span);
         let (cy0, cy1) = cell_range(py - span, py + span);
-        let mut out = Vec::new();
         for cy in cy0..=cy1 {
             for cx in cx0..=cx1 {
                 if let Some(v) = self.touched.get(&(cx, cy)) {
@@ -201,7 +210,6 @@ impl VisIndex {
                 }
             }
         }
-        out
     }
 }
 

@@ -3206,7 +3206,8 @@ async fn vis_cache_patches_stationary_session() {
     // 4) The cached result stays consistent with a fresh full scan:
     //    same id set as scan_visible at the same position.
     let cached = g.sessions.get(&1).unwrap().vis_cache.clone().unwrap();
-    let fresh = g.scan_visible(px, py);
+    let mut fresh = Vec::new();
+    g.scan_visible_into(px, py, &mut fresh);
     let mut a = cached;
     let mut b = fresh;
     a.sort_unstable();
