@@ -14,6 +14,7 @@ mod craft;
 mod equip;
 mod farm;
 mod fight;
+mod fxhash;
 mod game;
 mod grid_owner;
 mod move_batch;

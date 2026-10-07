@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use hnh_world::tile;
 
+use crate::fxhash::FxHashMap;
 use crate::resources::ResTable;
 
 pub const TICK_HZ: u64 = 10;
@@ -897,10 +898,11 @@ pub struct SessionOut {
     /// drops on a full queue exactly like a lost UDP datagram.
     pub raw: tokio::sync::mpsc::Sender<Vec<u8>>,
     pub player_gob: Option<GobId>,
-    /// Gobs currently streamed to this client.
-    pub visible: HashSet<GobId>,
+    /// Gobs currently streamed to this client. Keys are server-allocated
+    /// gob ids -> fxhash id hasher (hot per-candidate membership checks).
+    pub visible: crate::fxhash::FxHashSet<GobId>,
     /// Unacked OBJDATA blocks per gob (frame -> encoded block) for retransmit.
-    pub unacked: HashMap<GobId, HashMap<u32, Vec<u8>>>,
+    pub unacked: crate::fxhash::FxHashMap<GobId, HashMap<u32, Vec<u8>>>,
     /// Widget id counter (session-local uint16 space).
     pub next_wid: u16,
     pub widgets: HashMap<u16, String>,
@@ -1047,9 +1049,9 @@ pub struct World {
     /// Animals by gob id for quick lookup.
     pub animal_gobs: Vec<GobId>,
     /// Live animal engagements: offence/defence bars toward their target.
-    pub animal_fights: HashMap<GobId, AnimalFight>,
+    pub animal_fights: FxHashMap<GobId, AnimalFight>,
     /// Growing crops by gob id (farming tick + harvest lookup).
-    pub crops: HashMap<GobId, crate::farm::CropState>,
+    pub crops: FxHashMap<GobId, crate::farm::CropState>,
     /// Tile -> crop gob occupying it (one crop per tile).
     pub crop_at: HashMap<(i32, i32), GobId>,
     /// Plowed (furrowed) tiles -> tilth state. `0` deadline = planted
@@ -1057,11 +1059,11 @@ pub struct World {
     /// reverts the tile to grass when it passes.
     pub tilth: HashMap<(i32, i32), u64>,
     /// Construction plans by gob id (sinking + stage lookup).
-    pub plans: HashMap<GobId, crate::build::PlanState>,
+    pub plans: FxHashMap<GobId, crate::build::PlanState>,
     /// Tile -> plan gob occupying it (one build site per tile).
     pub plan_at: HashMap<(i32, i32), GobId>,
     /// Finished stations by gob id (fuel/input/progress state).
-    pub stations: HashMap<GobId, crate::build::StationState>,
+    pub stations: FxHashMap<GobId, crate::build::StationState>,
     /// Tile -> finished structure gob occupying it.
     pub structure_at: HashMap<(i32, i32), GobId>,
     /// Formed parties (small vec; parties are capped and rare, linear
@@ -1071,18 +1073,18 @@ pub struct World {
     /// The owning node streams their state; this node NEVER simulates a
     /// guest - it only advances movement interpolation deterministically
     /// from the linmove params (same arithmetic as local movers).
-    pub guests: HashMap<GobId, GuestGob>,
+    pub guests: FxHashMap<GobId, GuestGob>,
     /// Cross-node interaction relay (session 28). On the ATTACKER's home
     /// node: local mirrors of the defence bars of guest animals being
     /// fought through the relay (the authoritative bars live on the
     /// owning node; FightBars messages re-sync this mirror, the fightview
     /// reads it). Keyed by the animal gob id.
-    pub guest_fights: HashMap<GobId, AnimalFight>,
+    pub guest_fights: FxHashMap<GobId, AnimalFight>,
     /// On the TARGET's authority node: the guest player currently engaged
     /// with each relay-fought animal (same one-attacker cardinality as
     /// `animal_fights`). Keyed by the animal gob id, value = player gob
     /// id; PlayerHurt/KillCredit route back through `node_of_gob`.
-    pub guest_attackers: HashMap<GobId, GobId>,
+    pub guest_attackers: FxHashMap<GobId, GobId>,
     /// Taming state per animal gob (session 45). An entry exists from the
     /// first successful Quell until the leash breaks (or damage kills the
     /// tameness). Tamed animals never re-enter `animal_fights` while the
@@ -1090,11 +1092,11 @@ pub struct World {
     /// Runtime world state: animals are spawned wildlife (not persisted),
     /// so taming state is equally session-world scope - recorded in the
     /// docs Open questions.
-    pub tamed: HashMap<GobId, TameState>,
+    pub tamed: FxHashMap<GobId, TameState>,
     /// Placed Food Troughs (session 48): fodder stores keyed by gob id.
     /// Built through the build tree (build::BUILDABLES id "trough"),
     /// loaded by itemact, drained by animals feeding inside the radius.
-    pub troughs: HashMap<GobId, TroughState>,
+    pub troughs: FxHashMap<GobId, TroughState>,
     /// Tick counter for deterministic scheduling.
     pub tick: u64,
     /// Logical world time in ms, advanced by TICK_MS each game tick (the
@@ -1243,20 +1245,20 @@ impl World {
             players: Vec::new(),
             by_session: HashMap::new(),
             animal_gobs: Vec::new(),
-            animal_fights: HashMap::new(),
-            crops: HashMap::new(),
+            animal_fights: FxHashMap::default(),
+            crops: FxHashMap::default(),
             crop_at: HashMap::new(),
             tilth: HashMap::new(),
-            plans: HashMap::new(),
+            plans: FxHashMap::default(),
             plan_at: HashMap::new(),
-            stations: HashMap::new(),
+            stations: FxHashMap::default(),
             structure_at: HashMap::new(),
             parties: Vec::new(),
-            guests: HashMap::new(),
-            guest_fights: HashMap::new(),
-            guest_attackers: HashMap::new(),
-            tamed: HashMap::new(),
-            troughs: HashMap::new(),
+            guests: FxHashMap::default(),
+            guest_fights: FxHashMap::default(),
+            guest_attackers: FxHashMap::default(),
+            tamed: FxHashMap::default(),
+            troughs: FxHashMap::default(),
             tick: 0,
             now_ms: 0,
             rng: hnh_world::JavaRandom::new(seed as i64),

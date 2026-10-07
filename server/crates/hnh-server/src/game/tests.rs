@@ -1584,7 +1584,7 @@ fn clustered_game(name: &str, me: usize, nodes: usize) -> ClusterHarness {
         mesh: crate::nodes::Mesh { out_tx: mesh_tx },
         peer_subs: HashMap::new(),
         my_subs: HashMap::new(),
-        player_abroad: HashMap::new(),
+        player_abroad: crate::fxhash::FxHashMap::default(),
     });
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(4096);
@@ -2473,7 +2473,7 @@ fn bare_clustered(
         mesh: crate::nodes::Mesh { out_tx: mesh_tx },
         peer_subs: HashMap::new(),
         my_subs: HashMap::new(),
-        player_abroad: HashMap::new(),
+        player_abroad: crate::fxhash::FxHashMap::default(),
     });
     (g, mesh_rx)
 }

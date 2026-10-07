@@ -233,7 +233,7 @@ pub enum Cmd {
 
 pub struct Game {
     pub world: World,
-    pub sessions: HashMap<SessionId, SessionOut>,
+    pub sessions: crate::fxhash::FxHashMap<SessionId, SessionOut>,
     pub rx: tokio::sync::mpsc::UnboundedReceiver<Cmd>,
     pub net_rx: tokio::sync::mpsc::UnboundedReceiver<crate::net::NetCmd>,
     pub saturated: bool,
@@ -383,7 +383,7 @@ pub struct Cluster {
     pub my_subs: HashMap<usize, HashSet<(i32, i32)>>,
     /// Foreign owner node currently holding each of my abroad players
     /// (home node keeps authority and streams updates to that owner).
-    pub player_abroad: HashMap<GobId, usize>,
+    pub player_abroad: crate::fxhash::FxHashMap<GobId, usize>,
 }
 
 /// Publish event kind for a local gob's guest stream.
@@ -666,7 +666,7 @@ impl Game {
         }
         Game {
             world,
-            sessions: HashMap::new(),
+            sessions: crate::fxhash::FxHashMap::default(),
             rx,
             net_rx,
             saturated,
@@ -716,7 +716,7 @@ impl Game {
             mesh,
             peer_subs: HashMap::new(),
             my_subs: HashMap::new(),
-            player_abroad: HashMap::new(),
+            player_abroad: crate::fxhash::FxHashMap::default(),
         });
         info!(
             me = cfg.me,
@@ -1096,8 +1096,8 @@ impl Game {
             queue: tx,
             raw: raw_tx,
             player_gob: None,
-            visible: HashSet::new(),
-            unacked: HashMap::new(),
+            visible: crate::fxhash::FxHashSet::default(),
+            unacked: crate::fxhash::FxHashMap::default(),
             next_wid: 100,
             widgets: HashMap::new(),
             mapreqs: HashSet::new(),

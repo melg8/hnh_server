@@ -17,8 +17,7 @@
 //! the view always dirties a boundary cell that still intersects the
 //! view square (250 subtiles vs the ~50-subtile/tick speed bound).
 
-use std::collections::{HashMap, HashSet};
-
+use crate::fxhash::{FxHashMap, FxHashSet};
 use crate::state::GobId;
 
 /// Square cell edge in subtiles. 250 ≫ max per-tick movement, small
@@ -33,13 +32,14 @@ pub fn cell_of(x: i32, y: i32) -> (i32, i32) {
 
 #[derive(Default)]
 pub struct VisIndex {
-    /// Cell -> gob ids in that cell (materialized on demand).
-    cells: HashMap<(i32, i32), Vec<GobId>>,
+    /// Cell -> gob ids in that cell (materialized on demand). All keys
+    /// are server-computed coordinates -> the fxhash id hasher.
+    cells: FxHashMap<(i32, i32), Vec<GobId>>,
     /// Per-gob current cell (reindex bookkeeping; ids never reuse
     /// in-session, so a HashMap keyed by GobId cannot collide).
-    cell_of_gob: HashMap<GobId, (i32, i32)>,
+    cell_of_gob: FxHashMap<GobId, (i32, i32)>,
     /// Cells whose contents changed since the last `clear_dirty`.
-    dirty: HashSet<(i32, i32)>,
+    dirty: FxHashSet<(i32, i32)>,
     /// Per-tick touched lists (session 30): every gob that spawned, died
     /// or MOVED is recorded under each cell relevant to the change (old
     /// and new for a boundary crosser). A session whose position is
@@ -47,7 +47,7 @@ pub struct VisIndex {
     /// lists instead of rescanning: leavers are re-filtered from the old
     /// result by their current position, enterers are exactly the touched
     /// ids now in range. Cleared together with `dirty`.
-    touched: HashMap<(i32, i32), Vec<GobId>>,
+    touched: FxHashMap<(i32, i32), Vec<GobId>>,
 }
 
 impl VisIndex {
