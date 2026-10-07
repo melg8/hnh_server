@@ -3606,3 +3606,59 @@ NEXT (handoff):
   retried this session per the session-53 note.
 
 ---
+## 2026-10-08 - Session 55 (type 2: refactoring / tech debt)
+
+SESSION TYPE ROTATION LOG: 51=3, 52=5, 53=0, 54=1, 55=2. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: finish the session-49 split leftovers flagged in the gaps list -
+extract game/interact.rs and game/combat.rs from game.rs.
+
+WHAT:
+
+- game/interact.rs (new): the Map section (on_map_click, player_walk,
+  player_interact) and the movement/fan-out block (tick_movement,
+  broadcast_batch, record_unacked, fx_overlay_broadcast, stream_pose,
+  stream_avatar, interpolated_pos, start_move). tile_at stayed in
+  game.rs (the farming/station sweeps use it too).
+- game/combat.rs (new): the openings duel + archery + frv protocol
+  (start_fight, start_pvp_melee, start_aim, tick_aim, shoot_arrow,
+  fight_uimsg, fight_open, fight_del, on_maneuver, on_frv_msg) and the
+  PvP consequences (armor_totals, melee_dmg, hurt_player,
+  knockout_lp_loss, flag_criminal, stream_criminal_buff,
+  tick_criminal_expiry, tick_vitals; CRIMINAL_MS/CRIMINAL_BUFF_ID).
+- Pure move, no behavior changes. Cross-module methods widened to
+  pub(super) exactly like the existing game/ pattern; every caller was
+  grep-verified before the move.
+- game.rs: 5325 -> 3465 lines; the game/ tree is now 10 feature
+  modules + the test battery.
+
+PROCESS NOTE (self-inflicted, recorded so it is not repeated): the
+per-session CI push retry ran BEFORE the refactor was committed, and
+the `git reset --hard` rollback of the (expectedly rejected) workflow
+commit silently reverted the uncommitted game.rs. The first
+verification round then ran against the OLD tree with the new files
+ignored as dead code - clippy and tests still passed. Re-applied the
+split, re-verified, amended the commit. Lesson: commit first, THEN do
+the CI retry.
+
+VERIFICATION (on the split tree):
+
+- fmt + clippy -D warnings clean; 285 cargo tests green (261 unit incl.
+  the moved combat/movement batteries, 11 proto, 4 wire, 9 world).
+- Release binary: python probes WORLD ENTRY: OK + CATTR ORDER: OK.
+- 300-bot load smoke: mean tick ~7-11 ms (budget 100 ms), live animal
+  fights flowing through game/combat.rs.
+- CI workflow push retried once per the session-53 rule: REJECTED
+  again (PAT lacks the `workflow` scope), commit rolled back, token
+  unchanged - do not retry until the scope exists.
+
+COMMITS: 96e8824 (the split) + this handoff entry.
+
+NEXT (handoff):
+- Wire-test de-flake (type 4) and batch_move_broadcast profiling
+  (type 5) are the top carried items; recipe breadth (type 3) and the
+  five-probe hnhlib.py migration are mechanical.
+- Windows smoke + GL client e2e still carried (no display host here).
+
+---

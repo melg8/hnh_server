@@ -141,7 +141,13 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
   (3300+ animals, live fights) at tick ~37-40 ms vs the 100 ms budget
   (session 2); 300 bots/node across the cluster (session 34); 1000
   duelist window (session 40); session-52 re-baseline on current
-  master: 44-48 ms mean tick with workers=auto on 2 cores.
+  master: 44-48 ms mean tick with workers=auto on 2 cores;
+  session-57: same wall-time band reproduced with the dense fan-out
+  index (the 1k wall time is scheduler-bound on 2 cores, not index
+  bound) plus per-phase sub-attribution (mv scan 22-40 us, encode
+  3-14 us, fan-out the rest) and a dense-vs-full-scan micro-bench
+  (324 vs 472 ns per fan-out scan, ratio before counting the HashMap
+  cache misses the old walk also paid).
 - Real-client e2e: scripts/jogl/ boots the real GL client under Xvfb
   (login, Robot map clicks, MOVEMENT/portrait/equipment verdicts;
   sessions 21/25/45). Windows: windows/ one-command scripts (fix log
@@ -151,36 +157,40 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 
 1. **CI**: `.github/workflows/rust.yml` (fmt, clippy -D warnings, cargo
    test --workspace on push/PR) could not be pushed - the PAT lacks the
-   `workflow` scope (session 50; retried in 53, see its entry). The
-   full file content is preserved in the archive (session-50 addendum).
-   Retry the push every session; a green local run stays mandatory.
-2. **Perf fields**: cumulative max-tick counter never resets - add a
-   per-window max to attribute the 197-210 ms ramp-up spikes.
-3. **move_batch**: profile batch_move_broadcast (mv phase is now #2:
-   3-32 ms windows).
-4. **Probe migration**: move the five legacy self-contained probes onto
+   `workflow` scope (session 50; retried in 53/55/56/57, see those
+   entries). The full file content is preserved in the archive
+   (session-50 addendum). Retry the push every session; a green local
+   run stays mandatory.
+2. **Pair-work fan-out at scale**: the fan-out is now pair-bound -
+   every visible (session, mover) pair must append its bytes to that
+   session's datagram, and clustered populations make that O(N^2)
+   (session-57 finding: 1k bots spawn clustered, so the single-node
+   worst case is intrinsic to the load shape, not the index). The
+   multi-node path caps pairs per node (sessions x local movers);
+   revisit only with a multi-node profile that says otherwise.
+3. **Probe migration**: move the five legacy self-contained probes onto
    hnhlib.py (mechanical; recipe in server/scripts/README.md).
-5. **Recipe breadth**: ~150 shipped paginae; oven-gated tools/
+4. **Recipe breadth**: ~150 shipped paginae; oven-gated tools/
    furniture/containers; flour/bread blocked (the 2009 pack has no
    grain item - sprout/grist only, see farm.rs).
-6. **Feeding depth**: trough-to-trough fodder transfer needs the lift
+5. **Feeding depth**: trough-to-trough fodder transfer needs the lift
    mechanic; per-animal breed stat rows (Milk Quantity / Wool Quality
    are flat constants).
-7. **Real-client e2e**: GL production walkthrough (tame, wait out the
+6. **Real-client e2e**: GL production walkthrough (tame, wait out the
    milk meter, milk on screen) and Windows smoke when a display host
    exists (carried).
-8. **Guest GC at scale**: the 50-tick guest GC walks the whole guest
-    table per node (session-35 design); bounded by the subscribed
-    population, so fine at 1k - revisit only if multi-node profiling
-    says otherwise (session 54 review note).
+7. **Guest GC at scale**: the 50-tick guest GC walks the whole guest
+   table per node (session-35 design); bounded by the subscribed
+   population, so fine at 1k - revisit only if multi-node profiling
+   says otherwise (session 54 review note).
 
 ## Session type rotation log (consolidated)
 
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0, 54=1, 55=2, 56=4. All six types have been served - pick freely,
-but avoid serving the same type as the previous session.
+53=0, 54=1, 55=2, 56=4, 57=5. All six types have been served - pick
+freely, but avoid serving the same type as the previous session.
 
 ## Session index (one line each; full entries in the archive)
 
@@ -235,63 +245,7 @@ but avoid serving the same type as the previous session.
 - S54 (type 1): architecture review - guest scan O(node guests) per rescan removed (view-cell-bounded), idempotent VisIndex insert (promote double-insert bug), probe_guest_walk; live 2-node cluster evidence.
 - S55 (type 2): game/interact.rs + game/combat.rs extracted from game.rs (pure move, 5.3k -> 3.5k lines); split-verification process note.
 - S56 (type 4): wire-test de-flake - the harness now retransmits unacked reliable datagrams on the legacy RWorker backoff (lost WDGMSG click root-caused); 15/15 green full-suite runs.
-
----
-
-## 2026-10-08 - Session 55 (type 2: refactoring / tech debt)
-
-SESSION TYPE ROTATION LOG: 51=3, 52=5, 53=0, 54=1, 55=2. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: finish the session-49 split leftovers flagged in the gaps list -
-extract game/interact.rs and game/combat.rs from game.rs.
-
-WHAT:
-
-- game/interact.rs (new): the Map section (on_map_click, player_walk,
-  player_interact) and the movement/fan-out block (tick_movement,
-  broadcast_batch, record_unacked, fx_overlay_broadcast, stream_pose,
-  stream_avatar, interpolated_pos, start_move). tile_at stayed in
-  game.rs (the farming/station sweeps use it too).
-- game/combat.rs (new): the openings duel + archery + frv protocol
-  (start_fight, start_pvp_melee, start_aim, tick_aim, shoot_arrow,
-  fight_uimsg, fight_open, fight_del, on_maneuver, on_frv_msg) and the
-  PvP consequences (armor_totals, melee_dmg, hurt_player,
-  knockout_lp_loss, flag_criminal, stream_criminal_buff,
-  tick_criminal_expiry, tick_vitals; CRIMINAL_MS/CRIMINAL_BUFF_ID).
-- Pure move, no behavior changes. Cross-module methods widened to
-  pub(super) exactly like the existing game/ pattern; every caller was
-  grep-verified before the move.
-- game.rs: 5325 -> 3465 lines; the game/ tree is now 10 feature
-  modules + the test battery.
-
-PROCESS NOTE (self-inflicted, recorded so it is not repeated): the
-per-session CI push retry ran BEFORE the refactor was committed, and
-the `git reset --hard` rollback of the (expectedly rejected) workflow
-commit silently reverted the uncommitted game.rs. The first
-verification round then ran against the OLD tree with the new files
-ignored as dead code - clippy and tests still passed. Re-applied the
-split, re-verified, amended the commit. Lesson: commit first, THEN do
-the CI retry.
-
-VERIFICATION (on the split tree):
-
-- fmt + clippy -D warnings clean; 285 cargo tests green (261 unit incl.
-  the moved combat/movement batteries, 11 proto, 4 wire, 9 world).
-- Release binary: python probes WORLD ENTRY: OK + CATTR ORDER: OK.
-- 300-bot load smoke: mean tick ~7-11 ms (budget 100 ms), live animal
-  fights flowing through game/combat.rs.
-- CI workflow push retried once per the session-53 rule: REJECTED
-  again (PAT lacks the `workflow` scope), commit rolled back, token
-  unchanged - do not retry until the scope exists.
-
-COMMITS: 96e8824 (the split) + this handoff entry.
-
-NEXT (handoff):
-- Wire-test de-flake (type 4) and batch_move_broadcast profiling
-  (type 5) are the top carried items; recipe breadth (type 3) and the
-  five-probe hnhlib.py migration are mechanical.
-- Windows smoke + GL client e2e still carried (no display host here).
+- S57 (type 5): mv-phase profile first (new mvbat_* attribution), then dense sorted cell index for the fan-out, allocation-free movement encode, per-window max-tick perf field; 1k wall time confirmed scheduler-bound on 2 cores.
 
 ---
 
@@ -356,3 +310,83 @@ NEXT (handoff):
   without re-ACKing (legacy-faithful); a lost ACK therefore keeps a
   harness entry pending until the next send - harmless, recorded for
   anyone debugging pending_rel growth.
+
+## 2026-10-08 - Session 57 (type 5: performance)
+
+SESSION TYPE ROTATION LOG: 53=0, 54=1, 55=2, 56=4, 57=5. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the top carried type-5 item - profile batch_move_broadcast (the
+mv phase read as #2: 3-32 ms windows) and fix what the data points at;
+plus the cheap perf-field gap (per-window max tick).
+
+PROFILE FIRST (new attribution before touching anything):
+
+- Perf gains four mvbat_* fields splitting the movement phase: scan
+  (the O(alive) position advance + dirty marks), encode (wire blocks
+  + batch push), fan-out (broadcast_batch, both batches), and the
+  mover count. tick_movement is now a SCAN pass + an ENCODE pass
+  (candidates collected as (id, frame, step, cx, cy), encoded in slot
+  order afterwards - the packed batch is unchanged), so the split is
+  honest. start_blocks/fx_batch_n joined the perf report.
+- Findings at 300 bots: scan 22-40 us, encode 3-14 us, fan-out the
+  rest. At 1000 bots: fan-out dominates the wall clock (14-60 ms
+  windows) - but the per-pair ops are all hash probes, and the 1k
+  mean tick reproduces the session-52 re-baseline band (30-60 ms on
+  this 2-core box). Conclusion: at 1k the wall time is scheduler-
+  bound (2 cores, ~2000 runnable runtime tasks; the fan-out also
+  wakes 1000 session tasks, so it eats the most preemption), and the
+  fan-out itself is PAIR-bound (every visible (session, mover) pair
+  must append bytes - the true lower bound). The old per-session
+  HashMap cell walk was the one term that was NOT a lower bound -
+  so that is what got cut.
+
+CUTS:
+
+- move_batch: the per-session cell walk now runs over a DENSE SORTED
+  cell index - Vec<CellGroup> (~24 B per non-empty cell, ordered by
+  (y, x)) plus a Vec<u32> block order, rebuilt lazily once per batch.
+  A session binary-searches its y-cell range (axis_cell_lo/hi, exact
+  integer bounds) and x-tests inside: strictly sequential memory in
+  L1/L2 instead of sessions x cells hash probes with a cache miss per
+  bucket. Correctness: axis_cell_lo/hi are cross-checked against the
+  rectangle oracle over negative coords and boundary contacts
+  (exhaustive unit test); a manual micro-bench (#[ignore],
+  dense_index_bench) records dense=324 vs full-scan=472 ns per
+  fan-out scan at the 1000-session/134-cell/500-block scale - the
+  ratio EXCLUDES the HashMap cache misses the old walk also paid.
+- tick_movement: per-block MessageBuf::new + finish + drop and a
+  fresh finished-Vec per tick are gone - three taken/restored
+  scratches (finished, progress, encoder) keep the 10 Hz path
+  allocation-free (at 1k movers on cadence ticks that was ~10k
+  allocs/s of 256 B churn).
+- Perf: window_max_tick_us - reset by every 5 s report. The lifetime
+  max never resets, so one early ramp-up spike froze every later
+  report at 60 ms regardless of the steady state; the new wmax
+  attribute spikes to their 5 s window (measured 17-28 ms windows at
+  300 bots while lifetime max stayed at 60 ms).
+
+VERIFICATION:
+
+- 285 cargo tests green (11 proto + 261 unit incl. the movement/
+  combat batteries + 1 ignored manual bench + 4 wire + 9 world);
+  fmt + clippy -D warnings clean.
+- Release binary: python probes WORLD ENTRY: OK + CATTR ORDER: OK.
+- 300-bot and 1000-bot load runs with the new attribution; 1k wall
+  time matches the documented session-52 band (scheduler-bound box,
+  not an index regression).
+- CI workflow push retried once per the session-53 rule: REJECTED
+  again (PAT lacks the `workflow` scope), commit rolled back AFTER
+  the perf commit was safe on its own - do not retry until the scope
+  exists.
+
+COMMITS: 7c1aef2 (perf: fan-out dense index + attribution) + this
+handoff entry.
+
+NEXT (handoff):
+- The fan-out is pair-bound and the 1k single-node worst case is the
+  clustered spawn shape; the multi-node path already caps pairs per
+  node. Only a multi-node profile can justify more here (recorded as
+  gap #2).
+- Mechanical carried: five-probe hnhlib.py migration, recipe breadth
+  (type 3), feeding lift, GL e2e + Windows smoke (no display host).
