@@ -524,6 +524,65 @@ required; Legacy:Hunting). Rules:
   terraforming silently reverted on every restart even though the
   in-memory world_state carried them. Both fields now round-trip.
 
+## Server implementation notes (this repo, session 48)
+
+- Food Trough (docs "Feeding: troughs and grazing" + paginae/build/
+  trough + gfx/terobjs/trough, both shipped in the 2009 pack): a new
+  Buildable (id "trough") joins the build tree after the smelter.
+  Build demand is server policy - branch x4, single stage (the doc
+  carries no build materials; the wiki page is lost). Completing the
+  plan opens an empty fodder store (world.troughs) keyed by the gob.
+  The doc's 2x1 footprint and the lift-and-right-click trough-to-
+  trough fodder transfer stay out of scope until a lift mechanic
+  exists (no lift handling anywhere in this server yet).
+- Fodder table (docs fodder list intersected with the 2009 jar): one
+  fodder unit per item for any `gfx/invobjs/seed-*` resource plus
+  flaxseed, apple, apple core, mulberry, straw, pumpkin flesh, carrot
+  and the poppy flower. Blueberries, Chantrelles, Bloated Bolete,
+  Peapod and Beetroot/Leaves have NO invobj resources in the 2009 pack
+  and therefore cannot be matched; Giant Pumpkin (worth 16 seeds) is
+  likewise absent. Loading is itemact on the finished trough, ONE item
+  per click (the oven-fuel accounting policy keeps the quality average
+  exact); a non-fodder item is refused untouched ("The trough does not
+  accept that as fodder."), a full trough refuses at the 200-unit cap
+  (doc "Capacity 200 fodder units").
+- Fodder quality: the store keeps a running sum/count of every unit
+  ever placed; the average follows the doc's arithmetic (q5 + q12 +
+  q16 -> q11). Consumption drains units but NOT the quality history.
+  Product quality stays the session-47 policy (GRAZE_PRODUCT_QL) -
+  linking the milk/wool quality to the consumed fodder average is an
+  Open question.
+- Feeding preference (docs "animals inside a trough's radius prefer
+  the trough over grazing"): the production sweep now resolves food
+  per producer - nearest trough with fodder within 18 tiles
+  (TROUGH_RADIUS, euclidean over subtiles, 11 subtiles per tile) wins
+  over the grazing fallback (moor/heath/grass = q10). Feeding from the
+  trough keeps production running on ANY tile (e.g. a sand pen around
+  a trough), grazing feeds only on the pasture tiles.
+- Consumption rates (docs Legacy:Cattle): a cow eats 4.8 fodder units
+  per in-game day (1 in-game day = 8 real hours per the farming doc),
+  plus the lactating surcharge 0.1 unit per liter of milk produced -
+  bound to the production rate (1/60000 L per tick at quantity 10 =
+  0.1 unit per 60000 ticks), exactly the doc's wording. The doc quotes
+  no sheep number: 2.4 units/day (half a cow) is server policy. Rates
+  accumulate as integer nano-units per tick (feed_acc_nano, persisted)
+  and drain ONE whole unit from the shared trough every ~60 000 ticks
+  at the cow rate.
+- Starvation (docs "kill or stop production"): a fully tamed producer
+  with NO food - no trough fodder in radius AND no grazing tile -
+  accumulates hunger each tick (hunger, persisted); at 3 in-game days
+  without a bite (STARVE_DEATH_TICKS = 864000) it dies. Death
+  despawns the animal, drops the tame row and chats the online tamer;
+  no corpse and no loot (the corpse pipeline is not implemented -
+  policy). Production is gated on feeding, so the stop-half is
+  implicit. Mid-taming beasts and wild animals are out of the
+  starvation scope (wildlife forages on its own).
+- Persistence (save v7, additive): SavedStructure carries the trough
+  fodder fields (units + the quality history) for trough rows;
+  SavedAnimal carries feed_acc_nano + hunger. Older saves load through
+  the per-field serde defaults (verified: a v6 file loads under the
+  v7 binary).
+
 ## Open questions (animals)
 
 - Taming state (post session-47): the "battle intensity == 0",
@@ -534,11 +593,15 @@ required; Legacy:Hunting). Rules:
   bar exists only server-side; the legacy Fightview rendered
   intensity from the uimsg relation, which this server keeps at 0).
 - Tamed-animal production depth: breed stats (Milk Quantity / Wool
-  Quality per animal) are flat server-policy constants (10 / 5); the
-  Food Trough object, fodder transfer and starvation are not
-  implemented (free grazing on moor/heath/grass is the only feeding
-  path), and breeding/gestation is out of scope until animals carry
-  per-animal stat rows.
+  Quality per animal) are flat server-policy constants (10 / 5);
+  breeding/gestation is out of scope until animals carry per-animal
+  stat rows. The Food Trough and starvation ARE implemented (session
+  48); still open: the doc's 2x1 footprint + trough-to-trough fodder
+  transfer (no lift mechanic exists), the doc's fodder items with no
+  2009-pack resources (blueberries, chantrelles, bloated bolete,
+  peapod, beetroot/leaves, giant pumpkin), and linking the milk/wool
+  product quality to the consumed fodder average (GRAZE_PRODUCT_QL
+  stays the policy).
 - The boar morph is unreachable: the 2009 pack ships no pig kritter
   directory, so a fully tamed boar stays a boar. When a pig drawable
   surfaces (a later resource pack or the legacy client's own pack),

@@ -87,6 +87,23 @@ pub const BUILDABLES: &[Buildable] = &[
         stages: 3,
         station: None,
     },
+    Buildable {
+        id: "trough",
+        res: "gfx/terobjs/trough",
+        on_tile: true,
+        place_radius: None,
+        // Legacy:Food_Trough names no build materials in the docs; the
+        // wiki page is lost. Server policy: a branch-dominated wooden
+        // build (the trough is furniture-grade, cheaper than an oven),
+        // single stage. Fodder is loaded by itemact after completion;
+        // the doc's 2x1 lift-able footprint and trough-to-trough fodder
+        // transfer stay out of scope until a lift mechanic exists
+        // (documented in the livestock doc's Open questions).
+        demand: &[("gfx/invobjs/branch", 4)],
+        hp: 300,
+        stages: 1,
+        station: None,
+    },
 ];
 
 pub fn buildable_by_ad(id: &str) -> Option<usize> {

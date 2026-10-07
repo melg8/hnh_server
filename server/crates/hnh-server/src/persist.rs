@@ -121,6 +121,15 @@ pub struct SavedStructure {
     pub input: Option<(String, u8, String)>,
     #[serde(default)]
     pub progress: u32,
+    /// Food Trough fodder store (session 48, additive; zero for every
+    /// other structure). Quality history: sum and count of the units
+    /// ever placed (the running average the doc's q5+q12+q16 -> q11).
+    #[serde(default)]
+    pub fodder_units: u32,
+    #[serde(default)]
+    pub fodder_ql_sum: u64,
+    #[serde(default)]
+    pub fodder_seen: u64,
 }
 
 /// A persisted growing crop. Resource names keep the entry stable across
@@ -168,12 +177,20 @@ pub struct SavedAnimal {
     /// Production accumulator (quantity-ticks toward the next unit).
     #[serde(default)]
     pub prod_acc: u32,
+    /// Trough-feeding accumulator in nano-units (session 48, additive):
+    /// the fractional part of consumption between whole fodder units.
+    #[serde(default)]
+    pub feed_acc_nano: u64,
+    /// Consecutive unfed ticks (session 48 starvation timer).
+    #[serde(default)]
+    pub hunger: u64,
 }
 
 impl SaveData {
-    /// v6: tamed-animal persistence (session 47). Additive only - older
-    /// files load through the per-field serde defaults.
-    pub const VERSION: u32 = 6;
+    /// v7: trough fodder + animal feeding/starvation fields (session
+    /// 48). Additive only - older files load through the per-field
+    /// serde defaults.
+    pub const VERSION: u32 = 7;
 
     pub fn new(seed: u64) -> Self {
         SaveData {

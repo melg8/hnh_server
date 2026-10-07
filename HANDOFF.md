@@ -3206,3 +3206,75 @@ NEXT (handoff):
 - GL client e2e with a production walkthrough (tame a cow, wait out
   the milk meter with HNH tick acceleration or a debug grant, milk it
   on screen).
+
+## Session 48 (2026-10-07)
+
+Closed the carried "Feeding depth" NEXT item: the Food Trough object
+(fodder store, quality averaging, itemact loading), the trough-feeding
+preference in the production sweep, the Legacy:Cattle consumption
+rates, and the starvation policy. Save bumped to v7 (additive).
+
+WHAT:
+
+- FOOD TROUGH BUILDABLE (animals-and-husbandry.md "Feeding: troughs
+  and grazing"): Buildable "trough" -> gfx/terobjs/trough (the 2009
+  pack ships both the terobjs resource and paginae/build/trough).
+  Demand policy: branch x4, one stage (the doc names no build
+  materials). complete_plan opens an empty TroughState
+  (units/ql_sum/ql_seen) in world.troughs; the trough pagina joins
+  the login paginae push.
+- FODDER LOADING (itemact): fodder_units() matches the doc's fodder
+  list intersected with the 2009 jar - any seed-* resource + flaxseed,
+  apple, applecore, mulberry, straw, pumpkinflesh, carrot,
+  flower-poppy, one unit per item (blueberries, chantrelles, bloated
+  bolete, peapod, beetroot/leaves and giant pumpkin have NO pack
+  resources; recorded). One item per click (oven-fuel policy);
+  refusals chat and destroy nothing; cap 200 units (doc).
+- QUALITY AVERAGING: the store keeps a running sum/count of every
+  unit EVER placed; the average is the doc's arithmetic (q5 + q12 +
+  q16 -> q11). Consumption drains units, not the history. Product
+  quality stays GRAZE_PRODUCT_QL (Open question).
+- FEEDING PREFERENCE + CONSUMPTION: the production sweep resolves
+  food per fully tamed producer: the nearest trough with fodder
+  within 18 tiles (euclidean, 11 subtiles/tile) wins over the grazing
+  fallback; trough feeding keeps production on ANY tile. Legacy:Cattle
+  rates: cow 4.8 units/day (1 in-game day = 8 real hours) + the
+  lactating surcharge 0.1 unit per liter produced (bound to the
+  production rate, exactly the doc's wording); sheep 2.4/day (policy,
+  no doc number). Integer nano-unit accumulation (feed_acc_nano)
+  drains one whole unit per ~60000 ticks; hunger resets on any feed.
+- STARVATION: a producer with no trough fodder in radius and no
+  grazing tile accumulates hunger; at 3 in-game days (STARVE_DEATH_
+  TICKS = 864000 ticks) it dies - despawn, tame row drop, tamer
+  chatted; no corpse/loot (corpse pipeline not implemented, policy).
+  Mid-taming and wild animals are out of scope.
+- PERSISTENCE (save v7, additive): SavedStructure + fodder fields for
+  trough rows; SavedAnimal + feed_acc_nano/hunger; restore rebuilds
+  the trough store (clamped at the cap) and the feeding fields. A v6
+  save loads under the v7 binary (verified on the live server: the
+  repo save with 4 chars loaded cleanly).
+
+EVIDENCE: 274 unit tests green (7 new: fodder table, trough quality
+averaging + take, trough itemact load/refusal/cap, trough feeding
+production + drain, radius bounds + grazing fallback, starvation
+death teardown, trough + feeding persistence roundtrip), clippy -D
+warnings clean, fmt clean. Release binary probe: WORLD ENTRY OK
+(save v6 file loaded by the v7 code path). Commits pushed to
+origin/master.
+
+NOT DONE THIS SESSION (rolled to NEXT):
+- Trough-to-trough fodder transfer (the doc's lift-and-right-click
+  flow) waits on a lift mechanic; the 2x1 footprint likewise.
+- GL client e2e with a production walkthrough (unchanged from
+  session 47).
+- Recipe breadth (~150 shipped paginae) - unchanged.
+
+NEXT (handoff):
+- Recipe breadth: pick a large implementable batch (tools, furniture,
+  containers); the tool/station fields are in place for oven-gated
+  recipes (flour/bread need a grain item the 2009 pack lacks -
+  sprout/grist only, see farm.rs).
+- Feeding depth leftovers: Food Trough transfer needs lift; per-animal
+  breed stat rows (Milk Quantity / Wool Quality are flat constants).
+- GL client e2e with a production walkthrough (tame a cow, wait out
+  the milk meter, milk it on screen).

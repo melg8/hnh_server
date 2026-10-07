@@ -594,6 +594,17 @@ impl Game {
                         quality: saved.quality,
                     },
                 );
+            } else if buildable.id == "trough" {
+                // Session 48: restore the fodder store the trough was
+                // flushed with (units + the quality history).
+                world.troughs.insert(
+                    gob,
+                    crate::state::TroughState {
+                        units: saved.fodder_units.min(crate::state::TROUGH_CAP_UNITS),
+                        ql_sum: saved.fodder_ql_sum,
+                        ql_seen: saved.fodder_seen,
+                    },
+                );
             }
         }
         let restored = world.crops.len();
@@ -631,6 +642,8 @@ impl Game {
                 tame.milk_units = saved.milk_units;
                 tame.wool = saved.wool;
                 tame.prod_acc = saved.prod_acc;
+                tame.feed_acc_nano = saved.feed_acc_nano;
+                tame.hunger = saved.hunger;
                 world.tamed.insert(gob, tame);
             }
         }
@@ -890,6 +903,9 @@ impl Game {
                 fuel: station.fuel,
                 fuel_ql_sum: station.fuel_ql_sum,
                 fuel_seen: station.fuel_seen,
+                fodder_units: 0,
+                fodder_ql_sum: 0,
+                fodder_seen: 0,
                 input: station.input.map(|(r, q, l)| {
                     (
                         self.world
@@ -920,6 +936,9 @@ impl Game {
                 .name(self.world.gobs.res_idx[slot])
                 .map(|_| 10) // plain structures: natural default Q10
                 .unwrap_or(10);
+            // The Food Trough (session 48) is a plain structure that
+            // carries a fodder store - snapshot it with the row.
+            let fodder = self.world.troughs.get(gob).copied();
             structures.push(crate::persist::SavedStructure {
                 spec,
                 tile: *tile,
@@ -929,6 +948,9 @@ impl Game {
                 fuel_seen: 0,
                 input: None,
                 progress: 0,
+                fodder_units: fodder.map(|t| t.units).unwrap_or(0),
+                fodder_ql_sum: fodder.map(|t| t.ql_sum).unwrap_or(0),
+                fodder_seen: fodder.map(|t| t.ql_seen).unwrap_or(0),
             });
         }
         self.save.world_state.structures = structures;
@@ -968,6 +990,8 @@ impl Game {
                 milk_units: tame.milk_units,
                 wool: tame.wool,
                 prod_acc: tame.prod_acc,
+                feed_acc_nano: tame.feed_acc_nano,
+                hunger: tame.hunger,
             });
         }
         self.save.world_state.animals = animals;
@@ -1702,6 +1726,7 @@ impl Game {
             "paginae/build/cons",
             "paginae/build/oven",
             "paginae/build/smelter",
+            "paginae/build/trough",
         ]);
         for r in crate::craft::RECIPES {
             pages.push(r.pagina);
@@ -6680,6 +6705,14 @@ impl Game {
                 self.sync_cursor_widget(sid);
                 return;
             }
+            // Food Trough (session 48): fodder deliveries top up the
+            // store. Cross-node troughs are an open policy (like guest
+            // quell) - the local authority owns its own troughs.
+            if self.world.troughs.contains_key(&gob) {
+                self.trough_itemact(sid, gob, cursor);
+                self.sync_cursor_widget(sid);
+                return;
+            }
             // Guest station (session 33): fuel/input delivery relays the
             // held stack to the station's authority. The cursor stack is
             // NOT consumed before the ack (seed-safe): the authority
@@ -7757,6 +7790,14 @@ impl Game {
             );
             self.world.structure_at.insert(plan.tile, gob);
         } else {
+            // The Food Trough is a plain structure with a fodder store:
+            // open an empty one the moment it completes (itemact fills
+            // it; the production sweep drains it).
+            if buildable.id == "trough" {
+                self.world
+                    .troughs
+                    .insert(gob, crate::state::TroughState::default());
+            }
             self.world.structure_at.insert(plan.tile, gob);
         }
         self.restage_gob(gob);
@@ -7791,6 +7832,48 @@ impl Game {
                 Self::record_unacked(out, gob, frame, block);
             }
         }
+    }
+
+    /// itemact on a finished Food Trough (session 48; animals-and-
+    /// husbandry.md "Feeding: troughs and grazing"): a fodder item on
+    /// the cursor tops up the store, one item per click (the oven-fuel
+    /// accounting policy keeps the quality average exact). Refusals
+    /// chat and destroy nothing. The doc's lift-and-right-click
+    /// trough-to-trough transfer stays out of scope until a lift
+    /// mechanic exists (Open questions).
+    fn trough_itemact(&mut self, sid: SessionId, gob: GobId, mut cursor: InvStack) {
+        let resname = match self.world.res.name(cursor.res) {
+            Some(n) => n,
+            None => return,
+        };
+        let Some(per_item) = crate::state::fodder_units(resname) else {
+            self.system_line(sid, "The trough does not accept that as fodder.");
+            return;
+        };
+        let Some(trough) = self.world.troughs.get_mut(&gob) else {
+            return;
+        };
+        let free = crate::state::TROUGH_CAP_UNITS - trough.units;
+        if free == 0 {
+            self.system_line(sid, "The trough is full.");
+            return;
+        }
+        let take = per_item.min(free);
+        trough.units += take;
+        trough.ql_sum += u64::from(cursor.ql) * u64::from(take);
+        trough.ql_seen += u64::from(take);
+        let avg = trough.avg_ql();
+        cursor.count -= 1;
+        if let Some(out) = self.sessions.get_mut(&sid) {
+            out.cursor = if cursor.count == 0 {
+                None
+            } else {
+                Some(cursor)
+            };
+        }
+        self.refresh_inventory(sid);
+        self.system_line(sid, "Fodder added to the trough.");
+        info!(sid, gob, taken = take, avg, "trough loaded");
     }
 
     /// itemact on a finished station: fuel deliveries fill the fuel
@@ -8777,12 +8860,18 @@ impl Game {
                 self.break_leash(id, "and re-attacks");
             }
         }
-        // Production sweep (session 47; animals-and-husbandry.md "Animal
-        // products and collection flows"): fully tamed cows accrue milk,
-        // fully tamed sheep accrue wool, but only while grazing (moor,
-        // heath, grassland tiles count as quality-10 food per the doc).
-        // Same rare-event shape as the leash sweep: O(tamed) with the
-        // steady state empty; runs each tick so the meters keep game-time
+        // Production sweep (session 47; session 48 adds the Food Trough;
+        // animals-and-husbandry.md "Feeding: troughs and grazing" +
+        // "Animal products and collection flows"): fully tamed cows
+        // accrue milk, fully tamed sheep accrue wool, but only while
+        // FED - a trough with fodder inside the 18-tile radius wins
+        // over grazing (the doc's "animals inside a trough's radius
+        // prefer the trough over grazing"), grazing tiles (moor, heath,
+        // grassland) are the fallback. Feeding drains the trough at the
+        // Legacy:Cattle rates; an unfed animal starves (session 48
+        // policy: death after 3 in-game days without a bite). Same
+        // rare-event shape as the leash sweep: O(tamed) with the steady
+        // state empty; runs each tick so the meters keep game-time
         // based pacing (doc: "lagg-relative" wording -> game time).
         if !self.world.tamed.is_empty() {
             // Phase A0 (immutable): collect fully tamed producers with
@@ -8792,8 +8881,9 @@ impl Game {
                 .tamed
                 .iter()
                 .filter_map(|(&id, tame)| {
-                    // Only fully tamed domestic producers keep producing;
-                    // mid-taming beasts still run the leash protocol.
+                    // Only fully tamed domestic producers feed and
+                    // produce; mid-taming beasts still run the leash
+                    // protocol (wild animals forage on their own).
                     if tame.tameness < crate::state::TAMENESS_FULL {
                         return None;
                     }
@@ -8807,23 +8897,90 @@ impl Game {
                     Some((id, species, self.world.gobs.pos[slot]))
                 })
                 .collect();
-            // Phase A1 (mutable): resolve grazing tiles - tile_at may
-            // generate a grid on demand, so it runs after the tamed
-            // iteration ended (two-phase pass, same shape as tick_animals).
-            let producers: Vec<(GobId, Species)> = candidates
-                .into_iter()
-                .filter_map(|(id, species, (px, py))| {
-                    // tile_at takes SUBTILE coordinates (it does the
-                    // per-tile division itself).
-                    let grazing = self
-                        .tile_at((px, py))
-                        .map(crate::state::tile_grazes)
-                        .unwrap_or(false);
-                    grazing.then_some((id, species))
-                })
-                .collect();
-            // Phase B (mutable): accrue the meters.
-            for (id, species) in producers {
+            // Phase A1 (mutable): feeding resolution. The trough scan
+            // is O(troughs) per producer (both populations are small);
+            // tile_at may generate a grid on demand, so tile reads run
+            // here too - after the tamed iteration ended (two-phase
+            // pass, same shape as tick_animals).
+            let mut fed: Vec<(GobId, Species)> = Vec::new();
+            let mut starved: Vec<GobId> = Vec::new();
+            for (id, species, pos) in candidates {
+                // 1. Trough preference: the nearest trough with fodder
+                //    inside TROUGH_RADIUS (18 tiles = 198 subtiles,
+                //    euclidean over subtile coords).
+                let mut best: Option<(GobId, i64)> = None;
+                for (&tid, trough) in self.world.troughs.iter() {
+                    if trough.units == 0 {
+                        continue;
+                    }
+                    let Some(tslot) = self.world.gobs.get(tid) else {
+                        continue;
+                    };
+                    let (tx, ty) = self.world.gobs.pos[tslot];
+                    let (dx, dy) = (i64::from(tx - pos.0), i64::from(ty - pos.1));
+                    let dist_sq = dx * dx + dy * dy;
+                    if dist_sq <= i64::from(crate::state::TROUGH_RADIUS_SQ)
+                        && best.is_none_or(|(_, bd)| dist_sq < bd)
+                    {
+                        best = Some((tid, dist_sq));
+                    }
+                }
+                let rate_nano = match species {
+                    Species::Cow => {
+                        // Lactating surcharge (0.1 unit per L produced):
+                        // this cow produces milk while fed, so the
+                        // surcharge applies in the same tick.
+                        crate::state::COW_EAT_NANO_PER_TICK + crate::state::LACTATE_NANO_PER_TICK
+                    }
+                    _ => crate::state::SHEEP_EAT_NANO_PER_TICK,
+                };
+                if let Some((tid, _)) = best {
+                    // Drain whole units as the accumulator crosses one;
+                    // the fractional part stays banked (persisted).
+                    let Some(tame) = self.world.tamed.get_mut(&id) else {
+                        continue;
+                    };
+                    tame.feed_acc_nano += rate_nano;
+                    if tame.feed_acc_nano >= 1_000_000_000 {
+                        let want = (tame.feed_acc_nano / 1_000_000_000) as u32;
+                        let got = self
+                            .world
+                            .troughs
+                            .get_mut(&tid)
+                            .map(|t| t.take(want))
+                            .unwrap_or(0);
+                        tame.feed_acc_nano -= u64::from(got) * 1_000_000_000;
+                    }
+                    tame.hunger = 0;
+                    fed.push((id, species));
+                    continue;
+                }
+                // 2. Grazing fallback: the standing tile counts as
+                //    quality-10 food (tile_at takes SUBTILE coordinates
+                //    and does the per-tile division itself).
+                let grazing = self
+                    .tile_at(pos)
+                    .map(crate::state::tile_grazes)
+                    .unwrap_or(false);
+                let Some(tame) = self.world.tamed.get_mut(&id) else {
+                    continue;
+                };
+                if grazing {
+                    tame.hunger = 0;
+                    fed.push((id, species));
+                } else {
+                    // 3. Starvation: no trough fodder, no grazing tile.
+                    //    Production is gated on feeding below, so the
+                    //    doc's "kill or stop production" reduces to the
+                    //    death timer here.
+                    tame.hunger = tame.hunger.saturating_add(1);
+                    if tame.hunger >= crate::state::STARVE_DEATH_TICKS {
+                        starved.push(id);
+                    }
+                }
+            }
+            // Phase B (mutable): accrue the meters for fed animals.
+            for (id, species) in fed {
                 let Some(tame) = self.world.tamed.get_mut(&id) else {
                     continue;
                 };
@@ -8856,6 +9013,13 @@ impl Game {
                     }
                     _ => {}
                 }
+            }
+            // Phase C (terminal): starvation deaths. Same teardown
+            // shape as the damage path (kill, retract, drop the fight
+            // rows); no corpse and no loot (the corpse pipeline is not
+            // implemented - server policy, documented in the doc).
+            for id in starved {
+                self.starve_kill(id);
             }
         }
         // The dirty set served this tick's visibility pass; spawn marks
@@ -10517,6 +10681,44 @@ impl Game {
             &m.finish(),
         );
         self.world.perf.fx_batch_n += 1;
+    }
+
+    /// Starvation death of a fully tamed producer (session 48 policy):
+    /// the animal despawns without a corpse or loot (the corpse
+    /// pipeline is not implemented - documented in the livestock doc),
+    /// the tame row drops, and the tamer is chatted when online.
+    fn starve_kill(&mut self, target: GobId) {
+        let Some(tame) = self.world.tamed.remove(&target) else {
+            return;
+        };
+        let label = match self
+            .world
+            .gobs
+            .get(target)
+            .map(|slot| self.world.gobs.kind[slot])
+        {
+            Some(Kind::Animal {
+                species: Species::Cow,
+            }) => "cow",
+            Some(Kind::Animal {
+                species: Species::Sheep,
+            }) => "sheep",
+            _ => "animal",
+        };
+        self.world.gobs.kill(target);
+        self.broadcast_retract(target);
+        self.world.animal_gobs.retain(|&g| g != target);
+        self.world.animal_fights.remove(&target);
+        self.world.guest_attackers.remove(&target);
+        if let Some(pidx) = self.world.players.iter().position(|p| p.gob == tame.tamer) {
+            let sid = self.world.players[pidx].session;
+            self.chat_line(
+                sid,
+                &format!("Your {label} has starved to death."),
+                Some((255, 128, 128)),
+            );
+        }
+        info!(gob = target, label, "animal starved to death");
     }
 
     /// Break a leash: the beast re-aggros, the follow ends, the rope
@@ -18666,5 +18868,301 @@ mod tests {
             .find(|s| s.res == buckete)
             .expect("bucket produced");
         assert_eq!(bucket.count, 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Food Trough + feeding (session 48; animals-and-husbandry.md
+    // "Feeding: troughs and grazing").
+    // ------------------------------------------------------------------
+
+    /// Spawn a completed Food Trough at a subtile offset from the
+    /// player, the way `complete_plan` would leave it.
+    fn built_trough(g: &mut Game, units: u32, ql_sum: u64, ql_seen: u64) -> GobId {
+        let pslot = g.world.gobs.get(pgob_of(g)).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        let res = g.world.res.intern("gfx/terobjs/trough");
+        let gob = g.world.gobs.spawn(
+            Kind::Structure {
+                spec: crate::build::buildable_by_ad("trough").unwrap() as u8,
+            },
+            (px + 22, py),
+            res,
+            1,
+            0,
+        );
+        let tile = ((px + 22).div_euclid(11), py.div_euclid(11));
+        g.world.structure_at.insert(tile, gob);
+        g.world.troughs.insert(
+            gob,
+            crate::state::TroughState {
+                units,
+                ql_sum,
+                ql_seen,
+            },
+        );
+        gob
+    }
+
+    /// itemact of a fodder item tops up the trough, one item per click,
+    /// and the running quality average matches the doc's arithmetic
+    /// (q5 + q12 + q16 -> q11). A non-fodder item is refused untouched.
+    #[tokio::test]
+    async fn trough_itemact_loads_fodder_and_averages_quality() {
+        let (mut g, _rx, _raw) = entered_game("s48troughload");
+        let gob = built_trough(&mut g, 0, 0, 0);
+        let (fx, fy) = {
+            let slot = g.world.gobs.get(gob).unwrap();
+            g.world.gobs.pos[slot]
+        };
+        let deliver = |g: &mut Game, res: &'static str, ql: u8| {
+            let idx = g.world.res.intern(res);
+            g.sessions.get_mut(&1).unwrap().cursor = Some(InvStack {
+                res: idx,
+                count: 2,
+                ql,
+                label: "Fodder",
+            });
+            let args = vec![
+                hnh_proto::ListArg::Coord(0, 0),
+                hnh_proto::ListArg::Coord(fx, fy),
+                hnh_proto::ListArg::Int(0),
+                hnh_proto::ListArg::Int(gob),
+                hnh_proto::ListArg::Int(0),
+            ];
+            g.on_map_itemact(1, &args);
+        };
+        deliver(&mut g, "gfx/invobjs/apple", 5);
+        deliver(&mut g, "gfx/invobjs/straw", 12);
+        deliver(&mut g, "gfx/invobjs/seed-wheat", 16);
+        let t = g.world.troughs.get(&gob).unwrap();
+        assert_eq!(t.units, 3, "one item per click");
+        assert_eq!(t.ql_seen, 3);
+        assert_eq!(t.ql_sum, 33);
+        assert_eq!(t.avg_ql(), 11, "q5 + q12 + q16 -> q11 (the doc's example)");
+        // Each delivery consumed exactly one cursor item.
+        assert_eq!(
+            g.sessions.get(&1).and_then(|o| o.cursor).map(|c| c.count),
+            Some(1),
+            "the third delivery left one item on the cursor"
+        );
+        // A non-fodder item is refused: nothing consumed, nothing added.
+        deliver(&mut g, "gfx/invobjs/branch", 10);
+        let t = g.world.troughs.get(&gob).unwrap();
+        assert_eq!(t.units, 3, "the branch is not fodder");
+        assert_eq!(
+            g.sessions.get(&1).and_then(|o| o.cursor).map(|c| c.count),
+            Some(2),
+            "the refusal keeps the cursor stack"
+        );
+        // Filling to the cap: 197 more deliveries of one item each - the
+        // take path clamps at the cap instead of overflowing.
+        for _ in 0..197 {
+            deliver(&mut g, "gfx/invobjs/apple", 10);
+        }
+        let t = g.world.troughs.get(&gob).unwrap();
+        assert_eq!(t.units, crate::state::TROUGH_CAP_UNITS, "the cap holds");
+        // One delivery past the cap: refused, the cursor stack stays.
+        deliver(&mut g, "gfx/invobjs/apple", 10);
+        let t = g.world.troughs.get(&gob).unwrap();
+        assert_eq!(t.units, crate::state::TROUGH_CAP_UNITS, "still at the cap");
+    }
+
+    /// A cow inside the trough radius eats from the trough (even on a
+    /// non-grazing tile) and keeps producing milk; the trough drains a
+    /// whole unit when the nano-accumulator crosses one.
+    #[tokio::test]
+    async fn trough_feeding_produces_and_drains() {
+        let (mut g, _rx, _raw) = entered_game("s48troughfeed");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let gob = built_trough(&mut g, 5, 110, 11);
+        let (fx, fy) = {
+            let slot = g.world.gobs.get(gob).unwrap();
+            g.world.gobs.pos[slot]
+        };
+        let cow = spawn_species_at(&mut g, pidx, 300, Species::Cow.max_hp(), Species::Cow);
+        // Park the cow on the trough (SAND under it - grazing must not
+        // be the food source) and put sand under the trough too, so the
+        // trough itself never grazes.
+        {
+            let slot = g.world.gobs.get(cow).unwrap();
+            g.world.gobs.set_pos(slot, (fx, fy));
+            let sub = (fx, fy);
+            force_tile(&mut g, sub, hnh_world::gen::tile::SAND);
+        }
+        full_tame(&mut g, cow, pgob);
+        // 601 ticks of feeding: production accrues exactly like on
+        // pasture (0.1 L per 10 min), the trough is still draining its
+        // FIRST unit (60000 ticks per unit at the doc's 4.8/day).
+        for _ in 0..601 {
+            g.tick();
+        }
+        let tame = g.world.tamed.get(&cow).unwrap();
+        assert_eq!(tame.milk_units, 1, "trough feeding keeps production");
+        assert_eq!(tame.hunger, 0, "fed animals never starve");
+        assert!(tame.feed_acc_nano > 0, "consumption accumulates");
+        assert_eq!(
+            g.world.troughs.get(&gob).unwrap().units,
+            5,
+            "the first unit is still in the trough (60000-tick cadence)"
+        );
+        // Force the accumulator to the edge: the next fed tick drains a
+        // whole unit (16.7 nano/tick + 1667 lactating).
+        {
+            let tame = g.world.tamed.get_mut(&cow).unwrap();
+            tame.feed_acc_nano = 1_000_000_000 - (16_667 + 1_667);
+        }
+        g.tick();
+        let tame = g.world.tamed.get(&cow).unwrap();
+        assert!(
+            tame.feed_acc_nano < 1_000_000_000,
+            "the accumulator banks only the fractional part"
+        );
+        assert_eq!(
+            g.world.troughs.get(&gob).unwrap().units,
+            4,
+            "one whole fodder unit was consumed"
+        );
+    }
+
+    /// Outside the trough radius the fallback rules apply: grazing
+    /// tiles feed (q10), sand does not - hunger climbs and production
+    /// stops while the trough keeps its fodder.
+    #[tokio::test]
+    async fn trough_radius_bounds_feeding() {
+        let (mut g, _rx, _raw) = entered_game("s48troughradius");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let gob = built_trough(&mut g, 5, 50, 5);
+        let (fx, fy) = {
+            let slot = g.world.gobs.get(gob).unwrap();
+            g.world.gobs.pos[slot]
+        };
+        let cow = spawn_species_at(&mut g, pidx, 300, Species::Cow.max_hp(), Species::Cow);
+        // 18 tiles = 198 subtiles; park the cow 20 tiles (220 subtiles)
+        // east of the trough on SAND - outside the feeding radius.
+        {
+            let slot = g.world.gobs.get(cow).unwrap();
+            g.world.gobs.set_pos(slot, (fx + 220, fy));
+            force_tile(&mut g, (fx + 220, fy), hnh_world::gen::tile::SAND);
+        }
+        full_tame(&mut g, cow, pgob);
+        for _ in 0..601 {
+            g.tick();
+        }
+        let tame = g.world.tamed.get(&cow).unwrap();
+        assert_eq!(
+            tame.milk_units, 0,
+            "no trough in radius, no pasture: no production"
+        );
+        assert_eq!(tame.hunger, 601, "unfed ticks accumulate toward death");
+        assert_eq!(g.world.troughs.get(&gob).unwrap().units, 5);
+        // Same spot on GRASS: the grazing fallback feeds the cow.
+        {
+            force_tile(&mut g, (fx + 220, fy), hnh_world::gen::tile::GRASS);
+        }
+        for _ in 0..601 {
+            g.tick();
+        }
+        let tame = g.world.tamed.get(&cow).unwrap();
+        assert_eq!(tame.milk_units, 1, "grazing feeds the cow again");
+        assert_eq!(tame.hunger, 0, "grazing resets the hunger timer");
+    }
+
+    /// Starvation: a producer left on sand with no fodder in radius
+    /// dies at STARVE_DEATH_TICKS - the gob despawns, the tame row
+    /// drops, and the online tamer is chatted.
+    #[tokio::test]
+    async fn starvation_kills_unfed_producers() {
+        let (mut g, _rx, _raw) = entered_game("s48starve");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let sheep = spawn_species_at(&mut g, pidx, 300, Species::Sheep.max_hp(), Species::Sheep);
+        let slot = g.world.gobs.get(sheep).unwrap();
+        let sub = g.world.gobs.pos[slot];
+        force_tile(&mut g, sub, hnh_world::gen::tile::SAND);
+        full_tame(&mut g, sheep, pgob);
+        // Two ticks short of the threshold: the first tick lands one
+        // before it, the second crosses and kills.
+        {
+            let tame = g.world.tamed.get_mut(&sheep).unwrap();
+            tame.hunger = crate::state::STARVE_DEATH_TICKS - 2;
+        }
+        g.tick();
+        assert!(
+            g.world.gobs.get(sheep).is_some(),
+            "not yet at the threshold"
+        );
+        g.tick();
+        assert!(
+            g.world.gobs.get(sheep).is_none(),
+            "starved at the threshold"
+        );
+        assert!(
+            !g.world.tamed.contains_key(&sheep),
+            "the tame row drops with the beast"
+        );
+        assert!(
+            !g.world.animal_gobs.contains(&sheep),
+            "the animal leaves the AI roster"
+        );
+    }
+
+    /// Persistence: the trough fodder store and the animal feeding
+    /// fields round-trip through flush -> load (save v7, additive).
+    #[tokio::test]
+    async fn trough_and_feeding_persistence_roundtrip() {
+        // Stale tmp saves from earlier runs of THIS test would restore
+        // their own cows (every run appends another row); start clean.
+        let stale = std::env::temp_dir().join("hnh-equip-test-s48persist.json");
+        let _ = std::fs::remove_file(&stale);
+        let (mut g, _rx, _raw) = entered_game("s48persist");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let gob = built_trough(&mut g, 42, 9 * 42, 42);
+        let _ = gob;
+        let cow = spawn_species_at(&mut g, pidx, 300, Species::Cow.max_hp(), Species::Cow);
+        full_tame(&mut g, cow, pgob);
+        {
+            let tame = g.world.tamed.get_mut(&cow).unwrap();
+            tame.milk_units = 250;
+            tame.feed_acc_nano = 123_456_789;
+            tame.hunger = 777;
+        }
+        // The account names the tamer key resolves from.
+        g.save_all_and_flush();
+        // Structures: exactly one row with the fodder fields.
+        let trough_spec = crate::build::buildable_by_ad("trough").unwrap() as u8;
+        let row = g
+            .save
+            .world_state
+            .structures
+            .iter()
+            .find(|s| s.spec == trough_spec)
+            .expect("the trough row was flushed");
+        assert_eq!(row.fodder_units, 42);
+        assert_eq!(row.fodder_ql_sum, 9 * 42);
+        assert_eq!(row.fodder_seen, 42);
+        // Animals: the feeding fields ride the v7 row.
+        let (feed_acc_nano, hunger) = {
+            let a = g
+                .save
+                .world_state
+                .animals
+                .first()
+                .expect("the cow row was flushed");
+            (a.feed_acc_nano, a.hunger)
+        };
+        assert_eq!(feed_acc_nano, 123_456_789);
+        assert_eq!(hunger, 777);
+        // Restore arithmetic: the fodder fields rebuild the store.
+        let restored = crate::state::TroughState {
+            units: row.fodder_units,
+            ql_sum: row.fodder_ql_sum,
+            ql_seen: row.fodder_seen,
+        };
+        assert_eq!(restored.units, 42);
+        assert_eq!(restored.avg_ql(), 9, "the quality history survives");
+        assert!(trough_spec < crate::build::BUILDABLES.len() as u8);
     }
 }
