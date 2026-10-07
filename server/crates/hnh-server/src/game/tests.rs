@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// Enter the world as `name` on a fresh single-session game and return
