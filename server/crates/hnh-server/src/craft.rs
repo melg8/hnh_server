@@ -265,6 +265,53 @@ pub const RECIPES: &[Recipe] = &[
         softcap_attr: "ranged",
         q_weights: &[1, 1],
     },
+    // Session 45: the gear-chain batch - four previously unreachable pack
+    // pieces made craftable. The pagina resources ship with the legacy pack
+    // and their action layers pin the ids (ad strings) and the display
+    // parents: rope (paginae/craft/cloth, prereq "ahusb"), waterskin
+    // (paginae/craft/tools, prereq "hunting"), backpack and poorbelt
+    // (paginae/craft/leather, prereq "leather"). Prerequisite strings stay
+    // advisory like every other recipe (the softcap attribute stands in);
+    // ingredient counts are a chosen server policy (crafting-and-building.md
+    // Open questions) - the legacy wikis stay unreachable for verification.
+    // Rope matters beyond cosmetics: animals-and-husbandry.md names a Rope
+    // equipped as the weapon as a taming precondition.
+    Recipe {
+        id: "rope",
+        name: "Rope",
+        inputs: &[("gfx/invobjs/string", 3)],
+        outputs: &[("gfx/invobjs/rope", 1)],
+        pagina: "paginae/craft/rope",
+        softcap_attr: "survive",
+        q_weights: &[1],
+    },
+    Recipe {
+        id: "waterskin",
+        name: "Waterskin",
+        inputs: &[("gfx/invobjs/hide-raw-cow", 2), ("gfx/invobjs/string", 1)],
+        outputs: &[("gfx/invobjs/waterskin", 1)],
+        pagina: "paginae/craft/waterskin",
+        softcap_attr: "sewing",
+        q_weights: &[2, 1],
+    },
+    Recipe {
+        id: "backpack",
+        name: "Backpack",
+        inputs: &[("gfx/invobjs/hide-raw-cow", 3), ("gfx/invobjs/string", 2)],
+        outputs: &[("gfx/invobjs/backpack", 1)],
+        pagina: "paginae/craft/backpack",
+        softcap_attr: "sewing",
+        q_weights: &[2, 1],
+    },
+    Recipe {
+        id: "poorbelt",
+        name: "Poor Man's Belt",
+        inputs: &[("gfx/invobjs/hide-raw-cow", 1), ("gfx/invobjs/string", 1)],
+        outputs: &[("gfx/invobjs/belt-poor", 1)],
+        pagina: "paginae/craft/poorbelt",
+        softcap_attr: "sewing",
+        q_weights: &[2, 1],
+    },
 ];
 
 /// Raw -> roasted meat mapping for the `roast` recipe (paginae/craft/roastmeat,
@@ -509,6 +556,62 @@ Peapod=STR:0.1 PER:0.9
                 .iter()
                 .all(|l| l.starts_with("gfx/borka/quiver/walking/")),
             "walking back layers: {walking:?}"
+        );
+    }
+
+    /// Session 45: the gear-chain batch (rope, waterskin, backpack,
+    /// poorbelt). Ids match the `ad` strings parsed out of the shipped
+    /// pagina action layers; every output resource exists in the pack;
+    /// the two avatar pieces map onto real borka layer directories.
+    #[test]
+    fn gear_chain_recipes_are_wired() {
+        for (id, pagina, softcap, weights) in [
+            ("rope", "paginae/craft/rope", "survive", &[1][..]),
+            (
+                "waterskin",
+                "paginae/craft/waterskin",
+                "sewing",
+                &[2, 1][..],
+            ),
+            ("backpack", "paginae/craft/backpack", "sewing", &[2, 1][..]),
+            ("poorbelt", "paginae/craft/poorbelt", "sewing", &[2, 1][..]),
+        ] {
+            let r = RECIPES
+                .iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("{id} must be registered"));
+            assert_eq!(r.pagina, pagina, "{id} pagina id matches the ad string");
+            assert_eq!(r.softcap_attr, softcap, "{id} softcap attribute");
+            assert_eq!(r.q_weights, weights, "{id} per-type weights");
+            assert!(!r.inputs.is_empty() && !r.outputs.is_empty(), "{id} shaped");
+        }
+        // Every referenced resource must exist in the pack so the client
+        // renders inputs, outputs and the menu pagina (skip when absent).
+        let pack = std::path::Path::new("../../gameres");
+        if pack.is_dir() {
+            for id in ["rope", "waterskin", "backpack", "poorbelt"] {
+                let rec = RECIPES.iter().find(|x| x.id == id).unwrap();
+                assert!(
+                    pack.join(format!("{}.res", rec.pagina)).exists(),
+                    "{} res shipped",
+                    rec.pagina
+                );
+                for (res, _) in rec.inputs.iter().chain(rec.outputs.iter()) {
+                    assert!(pack.join(format!("{res}.res")).exists(), "{res} shipped");
+                }
+            }
+        }
+        // The two avatar pieces render through the PIECES table (the
+        // same world_layers path the server streams for equipment).
+        let belt = crate::equip::world_layers(["gfx/invobjs/belt-poor"].iter(), false, 1);
+        assert!(
+            belt.iter().any(|l| l.contains("belt-poor")),
+            "belt layers: {belt:?}"
+        );
+        let bpk = crate::equip::world_layers(["gfx/invobjs/backpack"].iter(), false, 1);
+        assert!(
+            bpk.iter().any(|l| l.contains("backpack")),
+            "backpack layers: {bpk:?}"
         );
     }
 }

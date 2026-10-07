@@ -226,6 +226,20 @@ All of them share the same server shape: an inventory (per-gob item store), a fu
   x6, stone x4, string x2, beef x1 (plus farming seeds and starter
   clothing) so the entire bow chain is playable out of the box; the
   legacy server granted nothing.
+- Session 45 adds the gear-chain batch - four pack pieces that were
+  previously unobtainable: `rope` = string x3 -> rope x1 (ad "rope",
+  type-weighted [1], Survival softcap); `waterskin` = raw cow hide x2
+  + string x1 -> waterskin x1 (ad "waterskin", type-weighted [2, 1],
+  Sewing softcap); `backpack` = raw cow hide x3 + string x2 ->
+  backpack x1 (ad "backpack", type-weighted [2, 1], Sewing softcap);
+  `poor man's belt` = raw cow hide x1 + string x1 -> belt-poor x1 (ad
+  "poorbelt", type-weighted [2, 1], Sewing softcap). The pagina
+  resources ship with the legacy pack and pin the ids, display
+  parents (cloth/tools/leather) and advisory prerequisite codes
+  ("ahusb", "hunting", "leather") parsed from the action layers.
+  belt-poor and backpack render on the avatar through the existing
+  equip.rs PIECES entries; rope is the documented taming
+  precondition (animals-and-husbandry.md).
 
 ## Server implementation notes (this repo, session 15)
 
@@ -307,6 +321,15 @@ All of them share the same server shape: an inventory (per-gob item store), a fu
   container version needs client-side container support the 2009
   client does not ship (ISBox is a craft-window item counter, not a
   container).
+- **Gear-chain unit counts (session 45).** Same situation as the bow
+  chain and the quiver: rope/waterskin/backpack/poorbelt ingredient
+  counts (3 string; 2 hide + 1 string; 3 hide + 2 string; 1 hide +
+  1 string) and type weights are chosen server policy - reconcile
+  against Legacy:Rope / Legacy:Waterskin / Legacy:Backpack /
+  Legacy:Poor Man's Belt when a source is reachable. The waterskin is
+  currently a plain item: container contents (water volume) are a
+  separate mechanic (items-and-quality.md small containers) not yet
+  implemented.
 - **Legacy smelter/kiln/finery numbers.** Fuel amounts, load sizes, and durations quoted above for the smelter are current-world values; the legacy pages exist (Category:Legacy Structures) but were empty or not yet fetched. Fetch Legacy:Ore Smelter, Legacy:Kiln, Legacy:Finery Forge and reconcile.
 - **Craft All stop reporting.** Whether legacy servers sent an error widget/message when batch crafting stopped early, or stopped silently. Determine from a live capture (watch for `RMSG_NEWWDG` text/error widgets after `make 1`).
 - **Pop refresh semantics.** The makewindow `pop` appears to be sent once per window open; whether ingredient counts ever update dynamically (a second `pop` rebuilding the lists) needs a capture of a long-lived window.
