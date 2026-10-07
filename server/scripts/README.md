@@ -61,6 +61,11 @@ taming) that are easier to drive from python.
   new AButton layer, layout verified by scan_paginae.py.
 - `profile_guests.sh` - guest-scan profiling run (session-43 artifact;
   the O(guests) rescan issue it measures is still open in HANDOFF.md).
+- `profile_multinode.sh` - session-59 multi-node scaling harness:
+  `MODE=single|cluster BOTS=<per node> ./profile_multinode.sh` boots
+  the single-node baseline or a 2-node cluster (both nodes loaded) and
+  prints per-node tick/phase/fan-out percentiles over a 60 s window.
+  The gap #2/#7 profiling evidence came from this script.
 
 ## Attic
 
