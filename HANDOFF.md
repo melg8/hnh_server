@@ -3332,3 +3332,77 @@ NEXT (handoff):
   game.rs is ~2.5k lines of pure core.
 - Session 48 NEXT items unchanged: recipe breadth, feeding transfer
   (lift), GL e2e production walkthrough.
+
+## 2026-10-07 - Session 50 (type 4: test pyramid / corpus consolidation)
+
+SESSION TYPE ROTATION LOG: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4. Next
+sessions pick from 5 (performance), 0 (docs hygiene), 1 (architecture
+review) before another 2 or 3.
+
+WHAT:
+
+- BLACK-BOX WIRE INTEGRATION LAYER (the missing pyramid tier). 255
+  white-box unit tests + manual python probes had nothing in between.
+  `server/crates/hnh-server/tests/wire.rs` boots the REAL binary on
+  ephemeral ports (CARGO_BIN_EXE) and speaks the real protocol from
+  Rust: TLS auth through the standard webpki trust path (per-test
+  rcgen cert passed via --cert/--key - no dangerous() shortcut), UDP
+  MSG_SESS handshake, per-submessage reliable seq + cumulative ACK +
+  hold-back, raw MAPDATA/OBJDATA, batched MSG_OBJACK. Three contracts:
+  world entry + the 26-name REQUIRED_CATTR set before the `chr`
+  widget + 3x3 MAPDATA + OBJDATA + attack paginae; bogus cookie ->
+  SESSERR_AUTH; movement click -> own-gob LINBEG (220 subtiles east),
+  monotonic LINSTEP step indices to the LINBEG step count c, bounded
+  per-frame advance, arrival MOVE snapping EXACTLY onto the clicked
+  target. Runs in ~7 s, needs NO gameres (verified: server + WORLD
+  ENTRY work without the pack), so CI and fresh clones run it as-is.
+- OBJDATA op-table parity: the test decoder matched bots.rs
+  parse_objdata and THREE real desync bugs vs the python probe's table
+  were fixed in the process: OD_REM is a no-payload op (leaving its
+  OD_END unconsumed desyncs the next block), OD_OVERLAY raw 65535 is
+  a removal with no sdt, flag-1 blocks carry no ops section.
+- PYTHON CORPUS CONSOLIDATION: `server/scripts/hnhlib.py` is now the
+  single source of the transport plumbing (constants, auth_cookie,
+  ensure_server, parse_objdata, WireClient with an on_event hook and
+  the real client's bootstrap behaviors). test_build.py 723 -> 372
+  lines (shim + scenario runners; re-exports keep the seven
+  from-test_build-import probes working unchanged). test_client.py
+  and probe_walk.py rewritten on WireClient with identical verdict
+  lines; probe_walk's verdict gained the arrival-snap and
+  gob-target-no-walk checks. server/scripts/README.md documents the
+  harness and lists the five legacy self-contained scripts (probe_
+  animals, probe_direction, dump_paginae, test_farming,
+  test_party_chat) for mechanical migration later. Corpus net -27
+  lines while ADDING the shared module; every future wire change is
+  now a one-function patch (parse_objdata) instead of eight.
+- CI: `.github/workflows/rust.yml` - fmt, clippy -D warnings, cargo
+  test --workspace on every push/PR. AGENTS.md verification section
+  updated to name the new tier and the CI contract.
+
+REGRESSION DISCOVERED (pre-existing on master, NOT this session):
+
+- BUILD FLOW: the branch-sink step of the oven chain silently no-ops.
+  Evidence: test_build.py buildbot places the plan, sinks stones
+  (sdt 0->1 works), then the branch itemact neither completes the
+  plan nor logs anything server-side; the assertion
+  "plan never completed (sdt=b'\x01')" fires. The OLD pre-conversion
+  test_build.py fails IDENTICALLY on the same binary and fresh save
+  (A/B run), so this is a master regression, not a harness artifact.
+  Candidate window: the session-48 itemact churn (trough loading
+  touched the shared map_itemact path). Needs a type-3 session to
+  root-cause and fix; the python probe AND a new cargo wire test
+  should pin the fix.
+
+EVIDENCE: 278 tests green (255 unit + 11 proto + 9 world + 3 wire),
+fmt clean, clippy -D warnings clean. Probes on the converted harness:
+WORLD ENTRY OK, CATTR ORDER OK, MOVE PROBE OK (arrival snap verified).
+Commits 3bfdc22, 9234c82 pushed to origin/master.
+
+NEXT (handoff):
+- TOP: root-cause the build-flow branch-sink regression (see above),
+  pin with a wire test, fix.
+- Migrate the five legacy self-contained probes onto hnhlib.py
+  (mechanical; README has the recipe).
+- Session 49 refactoring leftovers (game/interact.rs, game/combat.rs
+  split) and session 48 recipe breadth unchanged.
+- Windows smoke + GL client e2e when a display host exists (carried).

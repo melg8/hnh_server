@@ -168,6 +168,18 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+`cargo test` includes the black-box wire integration layer
+(`server/crates/hnh-server/tests/wire.rs`): it boots the real binary on
+ephemeral ports and asserts the auth/session/bootstrap/movement
+contracts over the real protocol. It needs no gameres pack and no
+python - a fresh clone runs it as-is. The richer scenario probes
+(build, farming, party, stations) live in `server/scripts/` on the
+shared `hnhlib.py` harness (see `server/scripts/README.md`); run the
+relevant one when your change touches its domain. GitHub Actions runs
+fmt + clippy + `cargo test --workspace` on every push to master
+(`.github/workflows/rust.yml`) - a green local run is still mandatory:
+do not rely on CI to catch what you can verify yourself.
+
 If the change touches `unsafe` code, additionally run `cargo miri test` for
 the affected crate. If you cannot run the toolchain in your environment, state
 that explicitly in your summary instead of claiming success.
