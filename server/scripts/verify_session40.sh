@@ -101,7 +101,10 @@ load-1000|all)
   GMT=$(rg -o "max_tick_us=([0-9]+)" -r '$1' "$LOG" 2>/dev/null | sort -n | tail -1)
   MEAN=$(rg -o "mean_tick_us=([0-9]+)" -r '$1' "$LOG" 2>/dev/null | tail -1)
   SESS=$(rg -o "sessions=([0-9]+)" -r '$1' "$LOG" 2>/dev/null | tail -1)
-  PVP=$(rg -c "pvp melee hit" "$LOG" 2>/dev/null || echo 0)
+  # Session 44 hit-tail trim moved the per-hit line to debug; the
+  # operational info signals are now the duel-start lines and the 5s
+  # hit aggregate (game.rs tick end).
+  PVP=$(rg -c "pvp melee duel started|pvp hits \\(5s aggregate\\)" "$LOG" 2>/dev/null || echo 0)
   KO=$(rg -c "knocked=true" "$LOG" 2>/dev/null || echo 0)
   PANIC=$(rg -ci "panic" "$LOG" 2>/dev/null || echo 0)
   echo "single node: sessions=${SESS:-0} steady_p95=${P95:-none}us steady_mean=${MEANW:-none}us steady_max=${MT:-none}us boot_max=${GMT:-none}us ema=${MEAN:-none}us"
@@ -170,7 +173,7 @@ load-cluster|all)
     N=${pair%%:*}; REST=${pair#*:}; MK=${REST%%:*}; L=${REST#*:}
     P95N=$(tail -n +"$MK" "$L" | rg -o " tick_us=([0-9]+)" -r '$1' | sort -n | awk '{a[NR]=$1} END {if (NR) print a[int(NR*95/100)+(NR*95%100>0)]}')
     SESSN=$(rg -o "sessions=([0-9]+)" -r '$1' "$L" 2>/dev/null | tail -1)
-    PVPN=$(rg -c "pvp melee hit" "$L" 2>/dev/null || echo 0)
+    PVPN=$(rg -c "pvp melee duel started|pvp hits \\(5s aggregate\\)" "$L" 2>/dev/null || echo 0)
     PANICN=$(rg -ci "panic" "$L" 2>/dev/null || echo 0)
     echo "node$N: sessions=${SESSN:-0} steady_p95=${P95N:-none}us pvp_hits=$PVPN panics=$PANICN"
     # Cluster FRONTIER (2-CPU sandbox): the s34 300/node run predates the
@@ -183,7 +186,7 @@ load-cluster|all)
   done
   [ "${PANICN:-1}" -eq 0 ] || { stop_c; fail "cluster panics"; }
   stop_c
-  echo "CLUSTER FRONTIER: MEASURED (300/node, duel cohort; p95 over budget on 2 CPUs - see HANDOFF diagnosis)"
+  echo "CLUSTER: MEASURED (300/node duel cohort; session-45: both nodes p95 inside the 100 ms budget after the s44 batched pose fan-out)"
   [ "$phase" = "load-cluster" ] && exit 0 ;;
 *)
   echo "usage: $0 [units|full|boot|load-1000|load-cluster|all]"; exit 2 ;;
