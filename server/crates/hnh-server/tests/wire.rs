@@ -179,7 +179,13 @@ fn movement_click_walks_with_linstep_progress() {
     } else {
         None
     };
-    let linbeg = linbeg.expect("no own-gob LINBEG after ground click");
+    assert!(
+        linbeg.is_some(),
+        "no own-gob LINBEG after ground click (unacked rel dgrams: {})\n{}",
+        sess.debug_pending_rel(),
+        server.log_tail(2000)
+    );
+    let linbeg = linbeg.expect("LINBEG asserted above");
     assert!(
         (linbeg.tx - linbeg.sx - 220).abs() <= 22,
         "LINBEG target not ~220 subtiles east: sx={} tx={}",

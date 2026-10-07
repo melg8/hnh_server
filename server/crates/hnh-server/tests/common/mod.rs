@@ -32,6 +32,20 @@ use hnh_proto::{
 /// A running hnh-server child process on ephemeral ports. Kills the
 /// process on Drop so a failing test cannot leak a server
 /// (test-fixture-raii).
+/// Legacy client retransmit backoff (Session.java RWorker: 80/200/620/
+/// 2000 ms, then every 2 s).
+const REL_BACKOFF_MS: [u64; 4] = [80, 200, 620, 2000];
+
+/// One reliable datagram awaiting its cumulative MSG_ACK.
+struct PendingRel {
+    datagram: Vec<u8>,
+    /// Highest submessage sequence this datagram carries (the ACK is
+    /// cumulative, so covering `last_seq` covers the whole datagram).
+    last_seq: u16,
+    next_at: Instant,
+    attempt: usize,
+}
+
 pub struct ServerGuard {
     child: Option<Child>,
     pub auth_port: u16,
@@ -531,6 +545,15 @@ pub struct Session {
     tseq: u16,
     rseq: u16,
     held: HashMap<u16, (u8, Vec<u8>)>,
+    /// Sent-but-unacked reliable datagrams. The legacy client
+    /// (Session.java RWorker) retransmits these on a backoff table
+    /// until the server's cumulative MSG_ACK covers them - localhost
+    /// UDP loses datagrams under parallel-test CPU load (kernel
+    /// receive-buffer overflow on busy sockets), and a lost WDGMSG
+    /// click that is never resent looks exactly like a server bug.
+    /// Mirroring the client's retransmit duty is what fixed the
+    /// movement wire test (session 56).
+    pending_rel: Vec<PendingRel>,
     /// widget id -> type name
     pub widgets: HashMap<u16, String>,
     /// type name -> widget id
@@ -576,6 +599,7 @@ impl Session {
             tseq: 0,
             rseq: 0,
             held: HashMap::new(),
+            pending_rel: Vec::new(),
             widgets: HashMap::new(),
             widgets_by_name: HashMap::new(),
             cattr_names: HashSet::new(),
@@ -636,6 +660,36 @@ impl Session {
         }
         self.tseq = self.tseq.wrapping_add(subs.len() as u16);
         self.sock.send_to(&out, self.server).expect("send rel");
+        // Track for retransmission until the cumulative ACK covers it.
+        self.pending_rel.push(PendingRel {
+            last_seq: self.tseq.wrapping_sub(1),
+            datagram: out,
+            next_at: Instant::now() + Duration::from_millis(REL_BACKOFF_MS[0]),
+            attempt: 0,
+        });
+    }
+
+    /// Retransmit every reliable datagram whose backoff window elapsed
+    /// (the legacy client's retransmit duty; dedup is the server's
+    /// RelReceiver job - a resent datagram carries the same seq).
+    fn pump_pending_rel(&mut self) {
+        let now = Instant::now();
+        let mut due: Vec<Vec<u8>> = Vec::new();
+        for p in self.pending_rel.iter_mut() {
+            if p.next_at <= now {
+                due.push(p.datagram.clone());
+                p.attempt = (p.attempt + 1).min(REL_BACKOFF_MS.len() - 1);
+                p.next_at = now + Duration::from_millis(REL_BACKOFF_MS[p.attempt]);
+            }
+        }
+        for dgram in due {
+            self.sock.send_to(&dgram, self.server).expect("resend rel");
+        }
+    }
+
+    /// Diagnostics: how many sent reliable datagrams are still unacked.
+    pub fn debug_pending_rel(&self) -> usize {
+        self.pending_rel.len()
     }
 
     /// WDGMSG to a widget; `args` is the pre-encoded arg blob.
@@ -817,6 +871,10 @@ impl Session {
                 }
                 self.last_mapreq = Instant::now();
             }
+            // Legacy RWorker mirror: retransmit unacked reliable
+            // datagrams whose backoff window elapsed (a lost WDGMSG
+            // click that is never resent stalls the server forever).
+            self.pump_pending_rel();
             let mut buf = [0u8; 65536];
             match self.sock.recv_from(&mut buf) {
                 Ok((n, _)) => self.on_datagram(&buf[..n]),
@@ -857,6 +915,14 @@ impl Session {
                 }
             }
             MSG_REL => self.on_rel_stream(&data[1..]),
+            MSG_ACK if data.len() >= 3 => {
+                // Cumulative server ACK: drop every sent datagram it
+                // covers (same wrapping-window compare the server's
+                // RelSender::on_ack uses).
+                let ack = u16::from_le_bytes([data[1], data[2]]);
+                self.pending_rel
+                    .retain(|p| ack.wrapping_sub(p.last_seq) >= 0x8000);
+            }
             _ => {}
         }
     }
