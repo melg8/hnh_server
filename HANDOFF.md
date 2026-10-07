@@ -2897,3 +2897,99 @@ NEXT (handoff):
   client verification the top trust gap).
 - Crafting paginae/Makewindow flow (top feature gap).
 - Perf table on a quiet multi-core host.
+
+## 2026-10-07 - Session 45: real-client e2e green on the batched wire, gear-chain recipes, Windows smoke, cluster regression confirmed fixed
+
+The session-44 NEXT top items are CLOSED: the real GL client e2e
+against the post-wire-fix batched datagram format, the crafting
+gear-chain gap, the carried-since-38 Windows smoke, and the cluster
+load re-measurement (the s40-41 regression is now measured FIXED).
+
+WHAT:
+
+- REAL GL CLIENT E2E: GREEN (two full harness runs, s45 and s45b - the
+  second after the craft pagina additions). scripts/jogl/ boot: Temurin
+  8 + JOGL 1.1.1 natives + X11 libs + Ant 1.10.15 + DriveAgent +
+  gameres regen (6382 files, fix_gameres_versions: corrupt=0) on a
+  FRESH sandbox (no persisted tools) - the deploy script is fully
+  reproducible. Client under Xvfb + llvmpipe: login through the real
+  widget chain, portrait layers, MOVEMENT MOVED + MOVEMENT2, SPEED
+  VERDICT OK (3.43 tiles/s), NO TELEPORT OK, RAPID CLICKS GLIDING,
+  five directional legs ARRIVED (E/N/S/UP/LEFT), EQUIP DOLL
+  ava-rend=OK, EQUIPVIS VERDICT OK (dress/undress recomposite), CURSOR
+  drag, GROUNDDROP gob spawn. ZERO Exception/PaginaException lines in
+  the client log. THE SESSION-44 HEADERLESS BATCH BLOCKS RENDER AND
+  INTERPOLATE CORRECTLY ON THE UNMODIFIED 2009 CLIENT - the wire trust
+  gap is closed. Screenshots read (equipment/map/menugrid/chat all
+  render; avatar faces the walk direction). Ant note: `ant jar` fails
+  on Debian JDK 21 ("release version 8 not supported"); build with
+  Temurin 8 (JAVA_HOME=jdk8u504-b01) - documented here, HANDOFF
+  how-to stays valid otherwise.
+
+- GEAR-CHAIN RECIPES (craft.rs, the s44 "crafting top feature gap"):
+  rope, waterskin, backpack, poorbelt - four pack pieces that were
+  previously unobtainable. Ids, display parents and advisory prereq
+  codes parsed from the shipped pagina action layers (rope ->
+  paginae/craft/cloth, prereq "ahusb"; waterskin -> tools/"hunting";
+  backpack + poorbelt -> leather/"leather"). Ingredient counts are
+  documented server policy (crafting-and-building.md Open questions,
+  same discipline as quiver/woodbow). belt-poor + backpack render on
+  the avatar through the existing equip.rs PIECES entries (layer
+  mapping unit-tested); rope is the documented taming precondition
+  (animals-and-husbandry.md) - the taming protocol itself is NEXT.
+  test_craft.py on the release binary: CRAFT FLOW OK, EAT FLOW OK.
+
+- WINDOWS SMOKE CLOSED (carried since session 38): PowerShell Core
+  7.4.6 installed in the sandbox from the GitHub release tarball
+  (~$HOME/pwsh, tar xzf, chmod +x). windows/make-gameres.ps1 executed
+  END TO END on Linux: jar extract, res/compiled overlay, the
+  session-42 pack-repair python step (scanned=6382 corrupt=0):
+  WIN GAMERES SMOKE: OK. All windows/*.ps1 parse clean under the
+  PowerShell language parser (collect-logs, make-gameres,
+  wait-server). The .bat launchers remain structural-check-only (no
+  cmd.exe on Linux).
+
+- LOAD RE-MEASUREMENT (post-s44 binary, noisy 2-CPU sandbox):
+  * single node, 1000 dueling bots: cohort settles 1000/1000, mean
+    tick 80-85 ms, samples 89-104 ms, 0 panics - consistent with the
+    s44 baseline; vis_spawn_us 35-37 ms at ~200-370 spawns/tick
+    remains the dominant phase (documented dense-arena frontier).
+  * cluster 2x300 duelists: node0 steady p95 68.4 ms, node1 47.1 ms -
+    BOTH INSIDE the 100 ms budget, 0 panics. The s40-41 guest-phase
+    regression is CONFIRMED FIXED: phase_guests_us 2.6-2.9 ms at
+    ~580 guests (was 11-66 ms pre-batching), guests_fanout_us
+    2.1-2.4 ms. Quiet-host re-measure for the final perf table stays
+    NEXT.
+
+- VERIFIER DRIFT FIX (verify_session40.sh): the pvp counter read the
+  per-hit info line that s44 moved to debug; it now counts the
+  duel-start lines plus the 5s aggregate (hits=N mean_hit_us=N). The
+  stale "p95 over budget" cluster message is updated to the measured
+  in-budget state.
+
+EVIDENCE: 247 unit tests green (1 new: gear_chain_recipes_are_wired),
+clippy -D warnings clean, fmt clean. Probes on the final release
+binary: WORLD ENTRY OK, CATTR ORDER OK, MOVE PROBE OK, MELEE WIRE OK.
+Commits af9380a (gear chain), c7b2251 (verifier), plus this handoff,
+pushed to origin/master.
+
+NOT DONE THIS SESSION (rolled to NEXT):
+- Taming protocol (rope now exists; intensity-0 + rope-equipped +
+  Animal Husbandry flow is unimplemented - animals-and-husbandry.md).
+- Waterskin/container contents (water volume) for the drinking loop.
+- Recipe breadth: RECIPES carries 10 hand recipes + roast; the pack
+  ships ~160 craft paginae. Tool/station requirement fields in the
+  Recipe struct are still absent (softcap attribute stands in).
+- Perf table on a quiet multi-core host (carried; noisy-sandbox
+  numbers recorded above).
+- ANIMALS SCREENSHOT phase of the e2e landed on its fallback (no
+  predator inside the viewport this run); probe_animals.py --saturated
+  remains the wire-level animals check.
+
+NEXT (handoff):
+- Taming chain end to end (the rope consumer) - biggest feature gap
+  in the livestock domain.
+- Recipe breadth + tool/station requirement plumbing in the Recipe
+  model.
+- Quiet-host perf table; client smoke re-run after any resource
+  regeneration.
