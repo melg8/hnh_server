@@ -3406,3 +3406,37 @@ NEXT (handoff):
 - Session 49 refactoring leftovers (game/interact.rs, game/combat.rs
   split) and session 48 recipe breadth unchanged.
 - Windows smoke + GL client e2e when a display host exists (carried).
+
+### Session 50 addendum: CI workflow blocked by token scope
+
+The prepared `.github/workflows/rust.yml` (fmt -> clippy -D warnings ->
+cargo test --workspace, Swatinem cache, working-directory server) could
+not be pushed: the PAT refuses to create workflow files without the
+`workflow` scope. The file ships in the repo working tree of the next
+session's clone OR recreate it from this snippet:
+
+    name: rust
+    on:
+      push:
+        branches: [master]
+      pull_request:
+    jobs:
+      test:
+        runs-on: ubuntu-latest
+        defaults:
+          run:
+            working-directory: server
+        steps:
+          - uses: actions/checkout@v4
+          - uses: dtolnay/rust-toolchain@stable
+            with:
+              components: rustfmt, clippy
+          - uses: Swatinem/rust-cache@v2
+            with:
+              workspaces: server
+          - name: fmt
+            run: cargo fmt --all -- --check
+          - name: clippy
+            run: cargo clippy --all-targets -- -D warnings
+          - name: tests (unit + wire integration)
+            run: cargo test --workspace
