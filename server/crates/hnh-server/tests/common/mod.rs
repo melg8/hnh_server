@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use hnh_proto::{
     AUTH_CMD_PASSWD, AUTH_CMD_USR, MSG_ACK, MSG_MAPDATA, MSG_MAPREQ, MSG_OBJACK, MSG_OBJDATA,
-    MSG_REL, MSG_SESS, OD_END, OD_LINBEG, OD_LINSTEP, OD_MOVE, PVER, RMSG_CATTR, RMSG_NEWWDG,
-    RMSG_PAGINAE, RMSG_WDGMSG,
+    MSG_REL, MSG_SESS, OD_END, OD_LINBEG, OD_LINSTEP, OD_MOVE, PVER, RMSG_CATTR, RMSG_DSTWDG,
+    RMSG_NEWWDG, RMSG_PAGINAE, RMSG_RESID, RMSG_WDGMSG,
 };
 
 // ---------------------------------------------------------------------------
@@ -276,6 +276,11 @@ pub struct GobOps {
     pub linbegs: Vec<Linbeg>,
     pub linsteps: Vec<i32>,
     pub removed: bool,
+    /// Last OD_RES wire resource id (sprite state changes ride OD_RES).
+    pub res: Option<u16>,
+    /// Last OD_RES sprite dynamic data (the build-stage / station-lit
+    /// byte for terobjs).
+    pub sdt: Option<Vec<u8>>,
 }
 
 /// One decoded OBJDATA gob block.
@@ -284,6 +289,81 @@ pub struct GobBlock {
     pub frame: i32,
     pub removed: bool,
     pub ops: GobOps,
+}
+
+/// One typed-list element as the server encodes it in NEWWDG args and
+/// WDGMSG uimsgs (hnh_proto ListArg mirror: tag byte + payload).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArgVal {
+    Int(i32),
+    Str(String),
+    Coord(i32, i32),
+    Color(u8, u8, u8, u8),
+}
+
+impl ArgVal {
+    pub fn as_int(&self) -> Option<i32> {
+        match self {
+            ArgVal::Int(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            ArgVal::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn as_coord(&self) -> Option<(i32, i32)> {
+        match self {
+            ArgVal::Coord(x, y) => Some((*x, *y)),
+            _ => None,
+        }
+    }
+}
+
+/// Parse a typed list (`tag byte + payload` elements closed by LIST_END)
+/// starting at `*off`; on return `*off` sits past the LIST_END byte.
+/// Unknown tags stop the parse (the stream is append-only by contract).
+fn parse_args(blob: &[u8], off: &mut usize) -> Vec<ArgVal> {
+    let mut out = Vec::new();
+    while *off < blob.len() {
+        let tag = blob[*off];
+        *off += 1;
+        match tag {
+            0 => return out, // LIST_END
+            1 => out.push(ArgVal::Int(read_i32(blob, off))),
+            2 => {
+                let start = *off;
+                while *off < blob.len() && blob[*off] != 0 {
+                    *off += 1;
+                }
+                let s = String::from_utf8_lossy(&blob[start..*off]).into_owned();
+                *off += 1; // NUL
+                out.push(ArgVal::Str(s));
+            }
+            3 => {
+                let x = read_i32(blob, off);
+                let y = read_i32(blob, off);
+                out.push(ArgVal::Coord(x, y));
+            }
+            4 => {
+                if *off + 4 <= blob.len() {
+                    out.push(ArgVal::Color(
+                        blob[*off],
+                        blob[*off + 1],
+                        blob[*off + 2],
+                        blob[*off + 3],
+                    ));
+                }
+                *off += 4;
+            }
+            _ => return out, // unknown tag: stop
+        }
+    }
+    out
 }
 
 /// Decode one OBJDATA datagram body into per-gob op blocks. The op table
@@ -334,8 +414,11 @@ pub fn decode_objdata(blob: &[u8]) -> Vec<GobBlock> {
                     let resid = read_u16(blob, &mut off);
                     if resid & 0x8000 != 0 {
                         let n = blob[off] as usize;
-                        off += 1 + n;
+                        off += 1;
+                        ops.sdt = Some(blob[off..off + n].to_vec());
+                        off += n;
                     }
+                    ops.res = Some(resid & 0x7FFF);
                 }
                 5 => {
                     // OD_SPEECH: coord + NUL string.
@@ -463,6 +546,16 @@ pub struct Session {
     pub gobs: HashMap<i32, GobOps>,
     objacks: HashMap<i32, i32>,
     last_ack: Instant,
+    /// Last MAPREQ re-send sweep (raw MAPDATA is lossy UDP: the legacy
+    /// MapView re-requests grids whose tiles never arrived).
+    last_mapreq: Instant,
+    /// RMSG_RESID announcements: wire resource id -> resource name.
+    pub res_names: HashMap<u16, String>,
+    /// Server->client WDGMSG uimsgs, in arrival order (wid, name, args).
+    pub wdgmsgs: Vec<(u16, String, Vec<ArgVal>)>,
+    /// Live "item" widgets: wid -> NEWWDG args (res, ql, drag, [coord,]
+    /// label, count). Rebuilt on every inventory refresh.
+    pub items: HashMap<u16, Vec<ArgVal>>,
 }
 
 impl Session {
@@ -494,6 +587,10 @@ impl Session {
             gobs: HashMap::new(),
             objacks: HashMap::new(),
             last_ack: Instant::now(),
+            last_mapreq: Instant::now(),
+            res_names: HashMap::new(),
+            wdgmsgs: Vec::new(),
+            items: HashMap::new(),
         };
 
         // MSG_SESS: flavour "Haven", PVER, username, cookie. The legacy
@@ -585,6 +682,109 @@ impl Session {
         self.send_wdgmsg(wid, "play", &args);
     }
 
+    // ------------------------------------------------------------------
+    // Building-flow helpers (wire.rs build contract; mirrors the wire
+    // choreography of server/scripts/test_build.py run_buildbot).
+    // ------------------------------------------------------------------
+
+    /// Menugrid `act(<word>)` on the scm widget (build pagina arming).
+    pub fn menu_act(&mut self, word: &str) {
+        let wid = self.widgets_by_name["scm"];
+        let mut args = vec![2u8]; // arg tag: string
+        args.extend_from_slice(&nul_str(word));
+        args.push(0);
+        self.send_wdgmsg(wid, "act", &args);
+    }
+
+    /// MapView `place(coord, button, modflags)`: the ghost commit.
+    pub fn send_place(&mut self, mx: i32, my: i32, button: i32, modflags: i32) {
+        let wid = self.widgets_by_name["mapview"];
+        let mut args = Vec::new();
+        args.push(3); // arg tag: coord
+        args.extend_from_slice(&le32(mx));
+        args.extend_from_slice(&le32(my));
+        args.push(1);
+        args.extend_from_slice(&le32(button));
+        args.push(1);
+        args.extend_from_slice(&le32(modflags));
+        args.push(0);
+        self.send_wdgmsg(wid, "place", &args);
+    }
+
+    /// The wid of the inventory item widget whose resource resolves to
+    /// `name` (the drag cursor's widget carries the same resource while
+    /// a stack is held; inventory refreshes rebuild the set).
+    pub fn item_by_res(&self, name: &str) -> Option<u16> {
+        self.items
+            .iter()
+            .filter(|(_, args)| {
+                args.first()
+                    .and_then(|a| a.as_int())
+                    .and_then(|wire| self.res_names.get(&(wire as u16)))
+                    .map(|n| n == name)
+                    .unwrap_or(false)
+            })
+            .map(|(wid, _)| *wid)
+            .min()
+        // Deterministic pick: the lowest wid (widgets allocate upward).
+    }
+
+    /// Inventory item `take(coord)`: move the stack onto the drag cursor.
+    pub fn inv_take(&mut self, wid: u16) {
+        let mut args = Vec::new();
+        args.push(3); // arg tag: coord
+        args.extend_from_slice(&le32(0));
+        args.extend_from_slice(&le32(0));
+        args.push(0);
+        self.send_wdgmsg(wid, "take", &args);
+    }
+
+    /// MapView `itemact(cc, mc, modflags[, gobid, gobrc])`: click the map
+    /// with the held stack; `gob` targets the plan/station gob.
+    pub fn map_itemact(&mut self, mx: i32, my: i32, gob: i32) {
+        let wid = self.widgets_by_name["mapview"];
+        let mut args = Vec::new();
+        args.push(3);
+        args.extend_from_slice(&le32(0)); // cc: screen coord (unused)
+        args.extend_from_slice(&le32(0));
+        args.push(3);
+        args.extend_from_slice(&le32(mx));
+        args.extend_from_slice(&le32(my));
+        args.push(1);
+        args.extend_from_slice(&le32(0)); // modflags
+        args.push(1);
+        args.extend_from_slice(&le32(gob));
+        args.push(3);
+        args.extend_from_slice(&le32(mx));
+        args.extend_from_slice(&le32(my));
+        args.push(0);
+        self.send_wdgmsg(wid, "itemact", &args);
+    }
+
+    /// Inventory `drop`: release the held stack back into the inventory
+    /// grid (the legacy drag-release path; the inv_drop handler ignores
+    /// the slot coordinate). The window ships with the client type "inv"
+    /// (open_inventory: new_wdg "inv" with the 4x8 grid coord).
+    pub fn inv_drop(&mut self) {
+        let wid = self.widgets_by_name["inv"];
+        self.send_wdgmsg(wid, "drop", &[0]);
+    }
+
+    /// The last server->client uimsg named `name` (e.g. the mapview
+    /// `place` ghost-drive uimsg).
+    pub fn last_wdgmsg(&self, name: &str) -> Option<&Vec<ArgVal>> {
+        self.wdgmsgs
+            .iter()
+            .rev()
+            .find(|(_, n, _)| n == name)
+            .map(|(_, _, args)| args)
+    }
+
+    /// The position (last OD_MOVE) of `gob`, if any block carried one.
+    pub fn gob_pos(&self, gob: i32) -> Option<(i32, i32)> {
+        self.gobs.get(&gob).and_then(|g| g.moves.last().copied())
+    }
+
     /// Drain datagrams until `cond` holds or the timeout expires.
     /// Returns true when the condition was observed.
     pub fn pump_until(&mut self, mut cond: impl FnMut(&Self) -> bool, secs: u64) -> bool {
@@ -605,6 +805,17 @@ impl Session {
                 }
                 self.sock.send_to(&msg, self.server).expect("send objack");
                 self.last_ack = Instant::now();
+            }
+            if self.last_mapreq.elapsed() > Duration::from_millis(1000) {
+                // Client MapView mirror: re-request the 3x3 neighborhood
+                // while grids are unfulfilled - raw MAPDATA rides lossy
+                // UDP with no reliability layer.
+                for gy in -1..=1 {
+                    for gx in -1..=1 {
+                        self.send_mapreq(gx, gy);
+                    }
+                }
+                self.last_mapreq = Instant::now();
             }
             let mut buf = [0u8; 65536];
             match self.sock.recv_from(&mut buf) {
@@ -627,6 +838,12 @@ impl Session {
                         entry.linbegs.extend(block.ops.linbegs);
                     }
                     entry.linsteps.extend(block.ops.linsteps);
+                    if block.ops.res.is_some() {
+                        entry.res = block.ops.res;
+                    }
+                    if block.ops.sdt.is_some() {
+                        entry.sdt = block.ops.sdt;
+                    }
                     if block.removed {
                         entry.removed = true;
                     }
@@ -725,6 +942,48 @@ impl Session {
                         // by the time the `chr` widget is created.
                         self.send_wdgmsg(wid, "chr", &[0]);
                     }
+                    if name == "item" {
+                        // Item factory args (game/items.rs): [I(res), I(ql),
+                        // I(drag), (C grab)|C(coord), S(label), I(count)]
+                        // past the type-name coord + parent.
+                        let mut o = off + 8 + 2;
+                        let args = parse_args(body, &mut o);
+                        self.items.insert(wid, args);
+                    }
+                }
+            }
+            RMSG_DSTWDG => {
+                if body.len() >= 2 {
+                    let wid = u16::from_le_bytes([body[0], body[1]]);
+                    self.widgets.remove(&wid);
+                    self.items.remove(&wid);
+                    self.widgets_by_name.retain(|_, v| *v != wid);
+                }
+            }
+            RMSG_WDGMSG => {
+                if body.len() < 2 {
+                    return;
+                }
+                let wid = u16::from_le_bytes([body[0], body[1]]);
+                let mut off = 2usize;
+                skip_nul_str(body, &mut off);
+                if off > 2 {
+                    let name = String::from_utf8_lossy(&body[2..off - 1]).into_owned();
+                    let args = parse_args(body, &mut off);
+                    self.wdgmsgs.push((wid, name, args));
+                }
+            }
+            RMSG_RESID => {
+                // u16 wire id + NUL name + u16 version.
+                if body.len() < 4 {
+                    return;
+                }
+                let wire = u16::from_le_bytes([body[0], body[1]]);
+                let mut off = 2usize;
+                skip_nul_str(body, &mut off);
+                if off > 2 {
+                    let name = String::from_utf8_lossy(&body[2..off - 1]).into_owned();
+                    self.res_names.insert(wire, name);
                 }
             }
             RMSG_CATTR => {

@@ -9,7 +9,7 @@ mod common;
 
 use std::net::ToSocketAddrs;
 
-use common::{ServerGuard, Session, REQUIRED_CATTR};
+use common::{ArgVal, ServerGuard, Session, REQUIRED_CATTR};
 use hnh_proto::{MSG_SESS, PVER, SESSERR_AUTH};
 
 /// Contract: dev TLS auth -> cookie -> MSG_SESS -> full bootstrap
@@ -70,11 +70,16 @@ fn world_entry_bootstrap_contract() {
         "cattr missing at chr creation: {missing:?}"
     );
     // 3x3 grids requested; every grid answers with at least one MAPDATA
-    // datagram (fragments only add more).
+    // datagram (fragments only add more). Wait rather than assert: raw
+    // MAPDATA rides lossy UDP and the harness re-requests grids on the
+    // legacy client cadence, so under parallel-test CPU load the nine
+    // answers may land seconds apart.
+    let nine = sess.pump_until(|s| s.mapdata_datagrams >= 9, 20);
     assert!(
-        sess.mapdata_datagrams >= 9,
-        "mapdata datagrams {} < 9",
-        sess.mapdata_datagrams
+        nine,
+        "mapdata datagrams {} < 9\n{}",
+        sess.mapdata_datagrams,
+        server.log_tail(2000)
     );
     assert!(sess.objdata_datagrams > 0, "no objdata stream");
     assert!(
@@ -243,5 +248,192 @@ fn movement_click_walks_with_linstep_progress() {
         last_move,
         (linbeg.tx, linbeg.ty),
         "gob did not arrive exactly at the clicked target"
+    );
+}
+
+/// Contract: the oven build pipeline over the real wire, including the
+/// cursor-remainder rule the session-51 probe fix pinned. The plan sink
+/// caps at the demand line; the undelivered remainder of the held stack
+/// STAYS on the drag cursor (legacy behavior) and the inventory `drop`
+/// wdgmsg returns it. Without the return, the next inv take is refused
+/// (one cursor item at a time) and the plan stalls at stage 1 - the
+/// regression that hid between the session-36 kit bump and session 50.
+#[test]
+fn build_flow_sinks_partial_stack_then_completes_after_cursor_return() {
+    // Arrange: full bootstrap + the inventory window (the slen button).
+    let server = ServerGuard::boot("buildflow");
+    let mut sess = Session::connect(&server, "builder");
+    assert!(
+        sess.pump_until(|s| s.widgets_by_name.contains_key("charlist"), 10),
+        "no charlist\n{}",
+        server.log_tail(2000)
+    );
+    sess.send_play("builder");
+    assert!(
+        sess.pump_until(|s| s.widgets_by_name.contains_key("mapview"), 15),
+        "no mapview\n{}",
+        server.log_tail(2000)
+    );
+    assert!(
+        sess.pump_until(|s| s.player_gob.is_some() && s.objdata_datagrams > 0, 15),
+        "no player gob / objdata\n{}",
+        server.log_tail(2000)
+    );
+    // Open the inventory the way SlenHud does, then wait until the
+    // starter stacks (and their RESID announcements) are visible.
+    let slen = sess.widgets_by_name["slen"];
+    sess.send_wdgmsg(slen, "inv", &[0]);
+    let items_ready = |s: &Session| {
+        s.item_by_res("gfx/invobjs/stone").is_some()
+            && s.item_by_res("gfx/invobjs/branch").is_some()
+    };
+    assert!(
+        sess.pump_until(items_ready, 10),
+        "starter stone/branch widgets never appeared\n{}",
+        server.log_tail(2000)
+    );
+
+    // Act 1: arm the oven build pagina; the mapview must answer with the
+    // ghost-drive uimsg naming the resource and the on-tile flag.
+    sess.menu_act("oven");
+    assert!(
+        sess.pump_until(|s| s.last_wdgmsg("place").is_some(), 10),
+        "no mapview place uimsg\n{}",
+        server.log_tail(2000)
+    );
+    let place = sess.last_wdgmsg("place").expect("place seen").clone();
+    assert_eq!(
+        place.first().and_then(|a| a.as_str()),
+        Some("gfx/terobjs/oven"),
+        "place uimsg names the wrong resource: {place:?}"
+    );
+    assert_eq!(
+        place.get(2).and_then(|a| a.as_int()),
+        Some(1),
+        "on-tile flag missing from the place uimsg: {place:?}"
+    );
+
+    // Act 2: commit the ghost one tile east of the player.
+    let ppos = sess
+        .gob_pos(sess.player_gob.expect("player gob"))
+        .expect("player MOVE op");
+    let (ptx, pty) = (ppos.0.div_euclid(11), ppos.1.div_euclid(11));
+    let mc = ((ptx + 1) * 11 + 5, pty * 11 + 5);
+    sess.send_place(mc.0, mc.1, 1, 0);
+    let oven_wire = sess
+        .res_names
+        .iter()
+        .find(|(_, n)| n.as_str() == "gfx/terobjs/oven")
+        .map(|(w, _)| *w)
+        .expect("oven resource announced");
+    let plan_seen = |s: &Session| {
+        s.gobs
+            .values()
+            .any(|g| g.res == Some(oven_wire) && g.sdt.as_deref() == Some(&[0u8][..]))
+    };
+    assert!(
+        sess.pump_until(plan_seen, 10),
+        "plan gob never spawned\n{}",
+        server.log_tail(2000)
+    );
+    let plan_gob = sess
+        .gobs
+        .iter()
+        .find(|(_, g)| g.res == Some(oven_wire) && g.sdt.as_deref() == Some(&[0u8][..]))
+        .map(|(gid, _)| *gid)
+        .expect("plan gob id");
+
+    // Act 3: sink the stone stack. Demand is stone x2; the starter stack
+    // carries 4, so the plan advances to stage 1 and keeps 2 stones on
+    // the cursor.
+    let stone_wid = sess.item_by_res("gfx/invobjs/stone").expect("stone wid");
+    sess.inv_take(stone_wid);
+    sess.map_itemact(mc.0, mc.1, plan_gob);
+    assert!(
+        sess.pump_until(
+            |s| s.gobs.get(&plan_gob).and_then(|g| g.sdt.clone()).as_deref() == Some(&[1u8][..]),
+            10
+        ),
+        "stage never advanced after the stone sink\n{}",
+        server.log_tail(2000)
+    );
+
+    // The cursor now holds the remainder (2 stones, drag flag set).
+    let cursor_held = |s: &Session| {
+        s.items
+            .values()
+            .any(|a| a.get(2).and_then(ArgVal::as_int) == Some(1))
+    };
+    assert!(
+        sess.pump_until(cursor_held, 5),
+        "stone remainder never appeared on the cursor\n{}",
+        server.log_tail(2000)
+    );
+
+    // Act 4: the KEY regression contract - return the remainder to the
+    // inventory, then take the branch and finish the plan. Without the
+    // drop the take below would be silently refused and the plan would
+    // stall at stage 1.
+    sess.inv_drop();
+    assert!(
+        sess.pump_until(|s| !cursor_held(s), 5),
+        "cursor never emptied after the inventory drop\n{}",
+        server.log_tail(2000)
+    );
+    // The stone remainder is back in the inventory as its own stack:
+    // the take removed the whole stack (4), the plan credited 2, so the
+    // drop returns exactly 2. (Checked on the stone stack itself - other
+    // stacks, e.g. string, also carry count 2.)
+    let stone_stack_count = |s: &Session| -> Option<i32> {
+        let wid = s.item_by_res("gfx/invobjs/stone")?;
+        s.items.get(&wid)?.get(4).and_then(ArgVal::as_int)
+    };
+    let merged = sess.pump_until(|s| stone_stack_count(s) == Some(2), 5);
+    let items_dump: Vec<_> = sess
+        .items
+        .iter()
+        .map(|(wid, a)| {
+            (
+                *wid,
+                a.iter()
+                    .map(|v| match v {
+                        ArgVal::Int(v) => v.to_string(),
+                        ArgVal::Str(s) => format!("{s:?}"),
+                        ArgVal::Coord(x, y) => format!("({x},{y})"),
+                        ArgVal::Color(r, g, b, c) => format!("col({r},{g},{b},{c})"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+        })
+        .collect();
+    let stone_seen = stone_stack_count(&sess);
+    assert!(
+        merged,
+        "stone remainder never returned to the inventory (stone stack count = {stone_seen:?}); items={items_dump:?}\n{}",
+        server.log_tail(2000)
+    );
+
+    let branch_wid = sess
+        .item_by_res("gfx/invobjs/branch")
+        .expect("branch wid after cursor return");
+    sess.inv_take(branch_wid);
+    sess.map_itemact(mc.0, mc.1, plan_gob);
+
+    // Assert: the last demand line fills -> the plan completes in place
+    // (station conversion re-renders with the unlit sdt byte 0).
+    assert!(
+        sess.pump_until(
+            |s| s.gobs.get(&plan_gob).and_then(|g| g.sdt.clone()).as_deref() == Some(&[0u8][..]),
+            10
+        ),
+        "plan never completed after the branch sink\n{}",
+        server.log_tail(2000)
+    );
+    let plan = &sess.gobs[&plan_gob];
+    assert_eq!(
+        plan.res,
+        Some(oven_wire),
+        "completion must convert the plan in place (same gob id and resource)"
     );
 }
