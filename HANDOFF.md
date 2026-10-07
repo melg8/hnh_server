@@ -3280,3 +3280,55 @@ NEXT (handoff):
   breed stat rows (Milk Quantity / Wool Quality are flat constants).
 - GL client e2e with a production walkthrough (tame a cow, wait out
   the milk meter, milk it on screen).
+
+## 2026-10-07 - Session 49 (type 2: refactoring / tech debt)
+
+SESSION TYPE ROTATION LOG (per the alternating-goal rule; one goal per
+session): 45=3, 46=3, 47=3, 48=3, 49=2. Next sessions should pick from
+the under-served types: 4 (test pyramid), 5 (performance), 0 (docs
+hygiene), 1 (architecture review) - another 3 only after those rotate.
+
+WHAT (pure move refactoring, zero behavior change):
+
+- game.rs was a 19,233-line monolith: one `impl Game` with 191 methods
+  plus a 7,400-line test module. Split by feature (proj-mod-by-feature,
+  proj-mod-rs-dir) into `src/game/`:
+  - game/tests.rs - the whole test module (#[cfg(test)] #[path] child
+    module: private-item visibility for tests preserved without
+    pub-super noise).
+  - game/animals.rs - animal AI, quell/taming, the production+feeding
+    sweep, starvation, animal damage paths (1483).
+  - game/building.rs - build placement, plans, stations, the Food
+    Trough store (669).
+  - game/craft.rs - make widget, recipes, roast chain (346).
+  - game/farming.rs - plow/mutate/plant/crop menus/harvest + crop tick
+    (496).
+  - game/items.rs - drops, inventory/equipment windows, drag cursor,
+    map itemact, food menu, eating (894).
+  - game/stream.rs - mapreq, gob block encoder, spawn/retract,
+    visibility pass, cluster helpers (693).
+  - game/cluster.rs - node messages, guest mirroring/republishing,
+    subscriptions, authority transfer, relay paths (2012).
+  - game.rs keeps the Game core: construction, world entry, session
+    lifecycle, tick dispatcher, movement, player interaction,
+    party/skills, PvP vitals (5323 lines).
+- Submodules are children of `game`, so items private to the module
+  stay visible to them and to tests; cross-file methods are
+  `pub(super)` (proj-pub-super-parent). No signatures, types, or logic
+  changed - only module placement + visibility markers.
+- Rust-skills rules consulted: proj-mod-by-feature, proj-lib-main-split,
+  proj-mod-rs-dir, proj-pub-use-reexport.
+
+EVIDENCE: 275 unit tests green after every split step; clippy -D
+warnings clean; fmt clean; release binary rebuilt; wire probe WORLD
+ENTRY OK (twice). Commits e86631b, a024bd1, f5ade59 pushed to
+origin/master.
+
+NEXT (handoff):
+- Refactoring leftovers (next type-2 session): interact/movement and
+  combat/party/skills still live in game.rs (~5.3k lines); candidate
+  split: game/interact.rs (map click/walk/interact/movement/batch) and
+  game/combat.rs (fights, arrows, vitals, criminal). After that
+  game.rs is ~2.5k lines of pure core.
+- Session 48 NEXT items unchanged: recipe breadth, feeding transfer
+  (lift), GL e2e production walkthrough.
