@@ -1519,7 +1519,14 @@ impl Game {
                 return;
             }
         };
-        let was_guest = self.world.guests.remove(&id).is_some();
+        // Guest -> local authority claim. The guest row goes away; the
+        // visidx entry needs NO manual fixup: a previously-ingested guest
+        // is already indexed at exactly this position, and
+        // `spawn_with_id`'s VisIndex::insert is idempotent for a
+        // same-cell re-insert (it marks the cell dirty instead of
+        // duplicating the bucket entry - the pre-session-54 double-insert
+        // made the scan return the id twice).
+        self.world.guests.remove(&id);
         self.world
             .gobs
             .spawn_with_id(id, spawn_kind, pos, res_idx, Vitals { hp, max_hp, speed });
@@ -1549,7 +1556,6 @@ impl Game {
             Kind::Drop { .. } => tracing::debug!(id, "drop authority claimed"),
             _ => unreachable!("the match above only yields Animal or Drop"),
         }
-        let _ = was_guest;
         // My subscribers may already render this gob (border viewers):
         // announce so their sessions re-acquire it if it left their view
         // while it was a guest elsewhere.

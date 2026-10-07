@@ -51,12 +51,33 @@ pub struct VisIndex {
 }
 
 impl VisIndex {
+    /// Index a gob at `pos`. Idempotent per (id, cell): re-inserting an
+    /// id that already lives in this cell must NOT push a second bucket
+    /// entry - the scan would return it twice and cell counts lie. The
+    /// real-world trigger was the cluster authority handoff
+    /// (`promote_transfer` re-spawning a gob that was already ingested
+    /// as a guest at the same position while `spawn_with_id` inserts
+    /// unconditionally).
     pub fn insert(&mut self, gob: GobId, pos: (i32, i32)) {
         let c = cell_of(pos.0, pos.1);
-        self.cells.entry(c).or_default().push(gob);
-        self.cell_of_gob.insert(gob, c);
-        self.dirty.insert(c);
-        self.touched.entry(c).or_default().push(gob);
+        match self.cell_of_gob.get(&gob) {
+            // Same cell: behave like a same-cell reposition - mark the
+            // cell dirty/touched, never duplicate the bucket entry.
+            Some(&oc) if oc == c => {
+                self.dirty.insert(c);
+                self.touched.entry(c).or_default().push(gob);
+            }
+            // Stale mapping (the bucket drifted from cell_of_gob):
+            // heal through reposition, which moves the entry and
+            // dirties both cells.
+            Some(_) => self.reposition(gob, pos),
+            None => {
+                self.cells.entry(c).or_default().push(gob);
+                self.cell_of_gob.insert(gob, c);
+                self.dirty.insert(c);
+                self.touched.entry(c).or_default().push(gob);
+            }
+        }
     }
 
     pub fn remove(&mut self, gob: GobId) {
@@ -307,6 +328,46 @@ mod tests {
             .collect();
         full.sort();
         assert_eq!(from_index, full, "cell query must equal the full scan");
+    }
+
+    #[test]
+    fn reinsert_same_cell_does_not_duplicate_bucket_entry() {
+        // The promote_transfer class of bug: an id already indexed in a
+        // cell gets inserted again at the same position (cluster
+        // authority handoff). The bucket must hold it exactly once.
+        let mut v = VisIndex::default();
+        v.insert(1, (10, 10));
+        v.insert(1, (20, 20)); // same cell, second insert
+        assert_eq!(v.gobs_in_view(0, 0, 500), vec![1], "listed exactly once");
+        assert_eq!(v.cell_count(), 1);
+        // The re-insert still marks the cell (same-cell reposition's
+        // semantics: viewers must rescan).
+        assert!(v.any_dirty_in_view(0, 0, 500));
+        // A later boundary move cleans up the single entry (no ghost
+        // copies left behind).
+        v.reposition(1, (300, 0));
+        assert!(v.gobs_in_view(0, 0, 100).is_empty());
+        assert_eq!(v.gobs_in_view(250, 0, 100), vec![1]);
+    }
+
+    #[test]
+    fn reinsert_into_a_different_cell_heals_the_stale_bucket() {
+        // Inserting an already-indexed id at a NEW position must move
+        // the entry (reposition semantics), never leave it indexed
+        // twice.
+        let mut v = VisIndex::default();
+        v.insert(1, (10, 10));
+        v.insert(1, (300, 0)); // different cell
+        assert!(v.gobs_in_view(0, 0, 100).is_empty(), "old cell emptied");
+        assert_eq!(
+            v.gobs_in_view(300, 0, 100),
+            vec![1],
+            "new cell holds it once"
+        );
+        // Both the old and the new cell are dirty (a boundary exit's
+        // semantics: the leaving viewer must rescan).
+        assert!(v.any_dirty_in_view(0, 0, 100));
+        assert!(v.any_dirty_in_view(300, 0, 100));
     }
 
     #[test]

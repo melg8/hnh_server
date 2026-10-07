@@ -674,9 +674,17 @@ impl Game {
     /// In-range gob scan around a point: query the dirty-cell index for
     /// the view cells, then apply the exact distance filter (cells are
     /// coarse buckets; the filter preserves the old O(all gobs) result).
-    /// Cluster guests merge in (foreign-authority gobs rendered locally);
-    /// the guest table only holds gobs some local session subscribed to,
-    /// so the scan cost stays bounded by what this node actually views.
+    /// Cluster guests merge in (foreign-authority gobs rendered locally).
+    /// Guests live in the SAME cell buckets as local gobs - ingest_guest,
+    /// the authority-demote paths and remove_guest keep that invariant -
+    /// so the compaction below resolves an id through the SoA columns
+    /// first and the guest table second. The pre-session-54 design
+    /// dropped guests in the compaction and then re-walked the WHOLE
+    /// guest table per rescan: O(node guest population) per session per
+    /// scan - fine single-node (the table is empty), a landmine at
+    /// multi-node 10k where the table holds every foreign gob any local
+    /// session ever subscribed to. The scan cost is now bounded by the
+    /// guest population of the VIEW cells only.
     pub(super) fn scan_visible_into(&self, px: i32, py: i32, out: &mut Vec<GobId>) {
         out.clear();
         self.world
@@ -689,23 +697,21 @@ impl Game {
         let mut w = 0usize;
         for r in 0..out.len() {
             let id = out[r];
-            let Some(slot) = self.world.gobs.get(id) else {
-                continue;
+            let gpos = match self.world.gobs.get(id) {
+                Some(slot) => self.world.gobs.pos[slot],
+                None => match self.world.guests.get(&id) {
+                    Some(g) => g.pos,
+                    // Neither table: a dead gob between bucket updates.
+                    None => continue,
+                },
             };
-            let (gx, gy) = self.world.gobs.pos[slot];
-            if (gx - px).abs() > VIEW_RADIUS || (gy - py).abs() > VIEW_RADIUS {
+            if (gpos.0 - px).abs() > VIEW_RADIUS || (gpos.1 - py).abs() > VIEW_RADIUS {
                 continue;
             }
             out[w] = id;
             w += 1;
         }
         out.truncate(w);
-        for (&id, g) in &self.world.guests {
-            if (g.pos.0 - px).abs() > VIEW_RADIUS || (g.pos.1 - py).abs() > VIEW_RADIUS {
-                continue;
-            }
-            out.push(id);
-        }
     }
 
     pub(super) fn on_objack(&mut self, sid: SessionId, acks: Vec<(GobId, u32)>) {

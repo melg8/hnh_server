@@ -1844,6 +1844,70 @@ async fn guest_ingest_update_reach_sessions() {
     assert!(!g.world.guests.contains_key(&gid));
 }
 
+/// Session 54 pin: the cluster authority handoff (a guest promoted back
+/// to a local gob by GuestTransfer) must not duplicate the id in the
+/// vis index - the scan lists it exactly once before AND after the
+/// promotion, and the promoted gob stays visible to the same viewers.
+#[tokio::test]
+async fn guest_promotion_does_not_duplicate_the_vis_bucket_entry() {
+    let (mut g, _rx, _raw, _mesh) = clustered_game("promoteuser", 0, 2);
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    let pslot = g.world.gobs.get(pgob).unwrap();
+    let (px, py) = g.world.gobs.pos[pslot];
+
+    let gid = foreign_node_gob_id(0, 2, 7);
+    assert_ne!(gid, pgob, "guest id must never collide with local ids");
+    let st = crate::nodes::GuestState {
+        id: gid,
+        pos: (px + 60, py),
+        mv: None,
+        moving: false,
+        facing: 1,
+        kind: crate::nodes::GuestKind::Animal {
+            species: Species::Wolf.index(),
+        },
+        hp: 50,
+        max_hp: 50,
+        speed: 33,
+    };
+    g.on_node_msg(crate::nodes::NodeMsg::GuestAnnounce(st.clone()));
+    g.tick();
+    let mut scan = Vec::new();
+    g.scan_visible_into(px, py, &mut scan);
+    assert_eq!(
+        scan.iter().filter(|&&id| id == gid).count(),
+        1,
+        "an ingested guest is listed exactly once"
+    );
+
+    // The owner hands authority back: the same id re-materializes as a
+    // LOCAL gob at the same position. spawn_with_id re-inserts into the
+    // vis index - the insert must be idempotent (no second bucket
+    // entry; the pre-session-54 code listed the id twice after this).
+    g.on_node_msg(crate::nodes::NodeMsg::GuestTransfer(st));
+    g.tick();
+    assert!(
+        !g.world.guests.contains_key(&gid),
+        "the guest row is dropped on promotion"
+    );
+    assert!(g.world.gobs.get(gid).is_some(), "the local gob is claimed");
+    let mut scan2 = Vec::new();
+    g.scan_visible_into(px, py, &mut scan2);
+    assert_eq!(
+        scan2.iter().filter(|&&id| id == gid).count(),
+        1,
+        "the promoted gob is listed exactly once (no duplicate bucket entry)"
+    );
+    // The promoted gob did not vanish from the viewer: the session's
+    // cached result keeps rendering it (authority changes are invisible
+    // to players by design).
+    assert!(
+        g.sessions[&1].visible.contains(&gid),
+        "a promoted gob must stay visible to its existing viewers"
+    );
+}
+
 /// G5: an animal standing in a foreign cell transfers to its owner
 /// (GuestTransfer on the mesh), demotes to a guest locally with the
 /// SAME id, and the receiver claims it into its sim tables.
