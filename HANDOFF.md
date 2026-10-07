@@ -2993,3 +2993,55 @@ NEXT (handoff):
   model.
 - Quiet-host perf table; client smoke re-run after any resource
   regeneration.
+
+### Session 45 addendum: taming MVP - Quell the Beast end to end
+
+The livestock domain's biggest feature gap now has a working core:
+Quell the Beast tames animals through the real combat model.
+
+WHAT:
+
+- QUELL GATES (selection time, on_maneuver): the static fight gates
+  (2 IP, advantage >= 3 in tenths - docs quote Jorb's prerequisite
+  list) plus target-specific checks in quell_gate: LOCAL animal,
+  rope (gfx/invobjs/rope) equipped in any slot, this tamer's rope not
+  already bound to a partially-tamed beast, beast not already
+  quelled, guest animals refuse (cross-node leashes are an open MVP
+  limitation). Refusals chat and mutate nothing.
+- QUELL RESOLUTION (tick_combat animal branch): the queued quell
+  intercepts the swing cadence - same offence-bar economics as a
+  normal swing, but no defence chip and no damage. One quell:
+  +20 tameness, battle ends (animal_fights row removed, fight window
+  torn down, engagement cleared), the beast follows client-side via
+  a batched OD_FOLLOW broadcast (gob ids are global, so the block
+  needs no per-session patching - Session 44 start-batch fan-out),
+  and the rope binds.
+- LEASH LIFECYCLE: game-tick break deadline (6000 ticks = 10 min,
+  the docs' 5-15 min floor as policy), rearmed on every quell below
+  100; at TAMENESS_FULL (100) the beast never breaks. Damaging the
+  beast kills ALL tameness (server policy) and frees the rope. The
+  tick sweep (placed before the batch fan-out) breaks due leashes
+  with an OD_FOLLOW removal (oid -1) and chats the tamer. Tamed
+  animals skip animal AI entirely; tame rows drop on authority
+  transfer (no leaks).
+
+EVIDENCE: 251 unit tests green (5 new: quell-refuses-without-a-rope,
+quell-tames-and-binds-the-rope incl. the second-beast binding refusal,
+damage-kills-tameness-and-leashes-break, full-tame-never-breaks-
+loose, plus the gear-chain wiring test), clippy -D warnings clean,
+fmt clean. Probes on the release binary: WORLD ENTRY OK, MELEE WIRE
+OK. Commit 9d9d742 pushed. Docs: animals-and-husbandry.md gained the
+session-45 implementation notes; the MVP gaps (intensity meter,
+ahusb skill gate, species morph, tamed-state persistence) are
+recorded in its Open questions.
+
+NEXT (handoff):
+- Taming depth: intensity de-escalation meter in animal fights, the
+  Animal Husbandry skill gate, the species morph at 100 (boar->pig,
+  mouflon->sheep, aurochs->cow/bull), weapon-slot-only rope check.
+- Tamed-state persistence once animals themselves persist (animals
+  are spawned wildlife today).
+- Recipe breadth + tool/station requirement plumbing in the Recipe
+  model (the earlier NEXT item, unchanged).
+- Quiet-host perf table; GL client e2e re-run after any resource
+  regeneration.
