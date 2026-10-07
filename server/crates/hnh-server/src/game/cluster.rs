@@ -616,7 +616,11 @@ impl Game {
             .to_string()
     }
 
-    pub(super) fn guest_state_from_slot(&self, id: GobId, slot: usize) -> Option<crate::nodes::GuestState> {
+    pub(super) fn guest_state_from_slot(
+        &self,
+        id: GobId,
+        slot: usize,
+    ) -> Option<crate::nodes::GuestState> {
         use crate::nodes::{GuestKind, GuestLinMove, GuestState};
         let kind = match self.world.gobs.kind[slot] {
             Kind::Animal { species } => GuestKind::Animal {
