@@ -37,6 +37,7 @@ taming) that are easier to drive from python.
 | probe_melee.py / probe_pvp.py | PvP fight chain | `MELEE WIRE: OK` / PvP verdict |
 | probe_drop.py | cross-node drop authority transfer | drop verdict |
 | probe_plow.py | cross-node plow relay (TileMutation) | plow verdict |
+| probe_guest_walk.py | wire client walks across peer-owned cells (needs a RUNNING 2-node cluster; guest evidence lives in the node logs) | `GUEST WALK: OK` |
 | probe_station.py | station fuel/input/light/output | `STATION FLOW: OK` |
 | test_build.py | build pipeline + persistence | `BUILD FLOW: OK` |
 | test_farming.py | plow/plant/harvest | farming verdict |
