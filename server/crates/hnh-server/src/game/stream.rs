@@ -415,45 +415,51 @@ impl Game {
             let per_task: Vec<ScanSegment> = parts
                 .par_iter()
                 .map(|part| {
-                    let mut flat: Vec<GobId> = Vec::with_capacity(part.len() * 512);
+                    // seg is the per-session working buffer (the scan
+                    // functions clear it); flat accumulates the results
+                    // of the whole partition and is NEVER cleared.
+                    let mut seg: Vec<GobId> = Vec::with_capacity(512);
                     let mut scratch: Vec<GobId> = Vec::new();
+                    let mut flat: Vec<GobId> = Vec::with_capacity(part.len() * 512);
                     let mut triples = Vec::with_capacity(part.len());
                     for &i in part {
+                        self.scan_for_entry_into(&to_scan[i], &mut seg, &mut scratch);
                         let start = flat.len() as u32;
-                        self.scan_for_entry_into(&to_scan[i], &mut flat, &mut scratch);
+                        flat.extend_from_slice(&seg);
                         let len = flat.len() as u32 - start;
                         triples.push((i, start, len));
                     }
                     (triples, flat)
                 })
                 .collect();
-            // Merge in to_scan order: copy each session's segment into the
-            // shared flat, remapping the task-local offsets (memmove only).
+            // Merge the task segments: ranges are written BY to_scan
+            // INDEX so Phase B's ranges[i] always pairs with to_scan[i].
+            // The flat buffer holds the segments in whatever order the
+            // tasks finished; each (offset, len) range is self-contained,
+            // so no global reordering is needed.
             let total: usize = per_task.iter().map(|(t, f)| t.len() + f.len()).sum();
             let mut merged = ScanRanges {
-                ranges: Vec::with_capacity(to_scan.len()),
+                ranges: vec![(0, 0); to_scan.len()],
                 flat: Vec::with_capacity(total),
             };
-            let mut order: Vec<ScanSegment> = per_task;
-            // Sort task segments by their first scan index so the merged
-            // flat buffer lists sessions in to_scan order.
-            order.sort_unstable_by_key(|(triples, _)| triples.first().map_or(usize::MAX, |x| x.0));
-            for (triples, flat) in order {
-                for (_, start, len) in triples {
+            for (triples, flat) in per_task {
+                for (i, start, len) in triples {
                     let start = start as usize;
                     let end = start + len as usize;
-                    merged.ranges.push((merged.flat.len() as u32, len));
+                    merged.ranges[i] = (merged.flat.len() as u32, len);
                     merged.flat.extend_from_slice(&flat[start..end]);
                 }
             }
             merged
         } else {
-            let mut flat: Vec<GobId> = Vec::with_capacity(to_scan.len() * 512);
+            let mut seg: Vec<GobId> = Vec::with_capacity(512);
             let mut scratch: Vec<GobId> = Vec::new();
+            let mut flat: Vec<GobId> = Vec::with_capacity(to_scan.len() * 512);
             let mut ranges = Vec::with_capacity(to_scan.len());
             for e in &to_scan {
+                self.scan_for_entry_into(e, &mut seg, &mut scratch);
                 let start = flat.len() as u32;
-                self.scan_for_entry_into(e, &mut flat, &mut scratch);
+                flat.extend_from_slice(&seg);
                 let len = flat.len() as u32 - start;
                 ranges.push((start, len));
             }
