@@ -600,6 +600,46 @@ impl Game {
         if restored > 0 {
             info!(crops = restored, "persisted crops restored");
         }
+        // Restore tamed animals (session 47): the saved species IS the
+        // domestic morph, hp clamps to the species max, and the tame row
+        // re-arms its leash window (partial tameness) or never breaks
+        // (full tameness). The tamer gob id cannot survive restarts
+        // (gob ids are runtime identities); the binding re-establishes
+        // on the tamer's next quell.
+        for saved in &save.world_state.animals {
+            let Some(species) = crate::state::Species::from_index(saved.species) else {
+                tracing::warn!(species = saved.species, tile = ?saved.tile, "saved animal species out of range: dropped");
+                continue;
+            };
+            let res_idx = world.res.intern(species.resname());
+            let gob = world.gobs.spawn(
+                Kind::Animal { species },
+                (saved.tile.0 * 11 + 5, saved.tile.1 * 11 + 5),
+                res_idx,
+                saved.hp.clamp(1, species.max_hp()),
+                species.speed(),
+            );
+            world.animal_gobs.push(gob);
+            if saved.tameness > 0 {
+                let break_at = if saved.tameness >= crate::state::TAMENESS_FULL {
+                    0
+                } else {
+                    world.tick + crate::state::LEASH_BREAK_TICKS
+                };
+                let mut tame = crate::state::TameState::new(0, break_at);
+                tame.tameness = saved.tameness;
+                tame.milk_units = saved.milk_units;
+                tame.wool = saved.wool;
+                tame.prod_acc = saved.prod_acc;
+                world.tamed.insert(gob, tame);
+            }
+        }
+        if !save.world_state.animals.is_empty() {
+            info!(
+                animals = save.world_state.animals.len(),
+                "persisted tamed animals restored"
+            );
+        }
         if !world.plans.is_empty() || !world.stations.is_empty() {
             info!(
                 plans = world.plans.len(),
@@ -892,6 +932,45 @@ impl Game {
             });
         }
         self.save.world_state.structures = structures;
+        // Tamed animals (session 47): tameness > 0 rows only - spawned
+        // wildlife is seed-regenerated, but the tame state, the meters
+        // and the domestic morph are runtime state that must survive
+        // restarts (animals-and-husbandry.md: "Tameness is per-animal
+        // persistent server state").
+        let mut animals = Vec::with_capacity(self.world.tamed.len());
+        for (gob, tame) in &self.world.tamed {
+            if tame.tameness <= 0 {
+                continue;
+            }
+            let Some(slot) = self.world.gobs.get(*gob) else {
+                continue;
+            };
+            let Kind::Animal { species } = self.world.gobs.kind[slot] else {
+                continue;
+            };
+            let (px, py) = self.world.gobs.pos[slot];
+            // The tamer's save key when it is an online character;
+            // offline tamers re-bind on the next quell (apply_quell
+            // overwrites the row's tamer).
+            let tamer_key = self
+                .world
+                .players
+                .iter()
+                .find(|p| p.gob == tame.tamer)
+                .map(|p| crate::persist::save_key(&p.account, &p.name))
+                .unwrap_or_default();
+            animals.push(crate::persist::SavedAnimal {
+                species: species.index(),
+                tile: (px.div_euclid(11), py.div_euclid(11)),
+                hp: self.world.gobs.hp[slot],
+                tameness: tame.tameness,
+                tamer_key,
+                milk_units: tame.milk_units,
+                wool: tame.wool,
+                prod_acc: tame.prod_acc,
+            });
+        }
+        self.save.world_state.animals = animals;
         if let Err(e) = self.save.flush(seed) {
             tracing::warn!(error = %e, "autosave failed");
         }
@@ -1005,6 +1084,7 @@ impl Game {
             item_menu: None,
             item_wids: HashMap::new(),
             crop_menu: None,
+            animal_menu: None,
             chat_wid: 0,
             party_wid: 0,
             player_menu: None,
@@ -4591,6 +4671,14 @@ impl Game {
                 self.broadcast_retract(target);
             }
             Kind::Animal { species } => {
+                // Fully tamed domestic producers open the collection menu
+                // instead of the fight window (session 47): Milking a cow
+                // / shearing a sheep are flower-menu interactions (docs
+                // "Animal products and collection flows"). Mid-taming
+                // beasts and non-producers keep the fight path.
+                if self.open_animal_menu(sid, target, species) {
+                    return;
+                }
                 // Bow-equipped players take the ranged path instead of
                 // the fight window (archery.rs; the aim meter is the
                 // accuracy meter of Legacy:Combat_Actions).
@@ -6973,6 +7061,186 @@ impl Game {
         self.show_crop_menu(sid, target, spec, stage)
     }
 
+    /// Click on a fully tamed domestic producer (session 47; docs
+    /// "Animal products and collection flows"): open the collection
+    /// flower menu - Milk on a cow, Shear on a sheep. Returns true when
+    /// the click is consumed (menu opened, or a hint chat for an empty
+    /// meter); false when the click falls through to the fight path
+    /// (wild, mid-taming, or non-producing animal). A fully tamed
+    /// producer never opens a fight: tamed livestock cannot be aggroed.
+    fn open_animal_menu(&mut self, sid: SessionId, target: GobId, species: Species) -> bool {
+        if !matches!(species, Species::Cow | Species::Sheep) {
+            return false;
+        }
+        let Some(tame) = self.world.tamed.get(&target) else {
+            return false;
+        };
+        if tame.tameness < crate::state::TAMENESS_FULL {
+            return false;
+        }
+        let (option, hint) = match species {
+            Species::Cow => {
+                if tame.milk_units >= crate::state::MILK_PER_BUCKET_UNITS {
+                    ("Milk", "")
+                } else {
+                    ("", "The cow has no milk yet.")
+                }
+            }
+            _ => {
+                if tame.wool > 0 {
+                    ("Shear", "")
+                } else {
+                    ("", "The sheep has no wool to shear.")
+                }
+            }
+        };
+        if option.is_empty() {
+            self.system_line(sid, hint);
+            return true;
+        }
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return true;
+        };
+        // One flower menu at a time per session.
+        if let Some((old, _)) = out.crop_menu {
+            out.send(wdg::dst_wdg(old));
+        }
+        if let Some((old, _)) = out.item_menu {
+            out.send(wdg::dst_wdg(old));
+        }
+        let w = out.new_wid("sm");
+        out.send(wdg::new_wdg(
+            w,
+            "sm",
+            -1,
+            -1,
+            0,
+            &[ListVal::S(option.to_owned())],
+        ));
+        out.animal_menu = Some((w, target));
+        true
+    }
+
+    /// Flower-menu choice on a tamed producer (session 47). Milk draws
+    /// one bucket: consumes an empty bucket (inventory first, then any
+    /// equipment slot - the same any-slot policy as the crafting tool
+    /// scan and the taming rope check), drains MILK_PER_BUCKET_UNITS
+    /// from the cow and grants a bucket-milk item at the grazing quality
+    /// (10). Shear collects the whole stored wool into the inventory.
+    /// The meter is re-validated against live state: the menu can sit
+    /// open while the meter drains or the animal dies.
+    fn apply_animal_choice(&mut self, sid: SessionId, wid: u16, choice: i32) {
+        let pending = self
+            .sessions
+            .get(&sid)
+            .and_then(|o| o.animal_menu)
+            .filter(|(w, _)| *w == wid);
+        let Some((_, gob)) = pending else {
+            return;
+        };
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        out.animal_menu = None;
+        out.send(wdg::dst_wdg(wid));
+        if choice != 0 {
+            out.send(wdg::wdgmsg(wid, "cancel", &[]));
+            return;
+        }
+        out.send(wdg::wdgmsg(wid, "act", &[ListVal::I(0)]));
+        // Re-validate (data phase): species, live meters.
+        let Some(slot) = self.world.gobs.get(gob) else {
+            return;
+        };
+        let Kind::Animal { species } = self.world.gobs.kind[slot] else {
+            return;
+        };
+        let Some(tame) = self.world.tamed.get(&gob) else {
+            return;
+        };
+        let (milk_units, wool) = (tame.milk_units, tame.wool);
+        match species {
+            Species::Cow => {
+                if milk_units < crate::state::MILK_PER_BUCKET_UNITS {
+                    self.system_line(sid, "The cow has no milk yet.");
+                    return;
+                }
+                let Some(pidx) = self.world.by_session.get(&sid).copied() else {
+                    return;
+                };
+                let buckete = self.world.res.intern("gfx/invobjs/buckete");
+                let inv_has = self.world.players[pidx]
+                    .inv
+                    .iter()
+                    .any(|s| s.res == buckete && s.count > 0);
+                let equip_has = self.world.players[pidx]
+                    .equip
+                    .iter()
+                    .flatten()
+                    .any(|s| s.res == buckete && s.count > 0);
+                if !inv_has && !equip_has {
+                    self.system_line(sid, "You need an empty bucket to milk a cow.");
+                    return;
+                }
+                // Mutate phase: drain the bucket (inventory first), the
+                // meter, then grant the filled bucket.
+                if inv_has {
+                    let inv = &mut self.world.players[pidx].inv;
+                    if let Some(s) = inv.iter_mut().find(|s| s.res == buckete && s.count > 0) {
+                        s.count -= 1;
+                    }
+                    self.world.players[pidx].inv.retain(|s| s.count > 0);
+                } else if let Some(e) = self.world.players[pidx]
+                    .equip
+                    .iter_mut()
+                    .find(|e| matches!(e, Some(s) if s.res == buckete && s.count > 0))
+                {
+                    if let Some(s) = e.as_mut() {
+                        s.count -= 1;
+                        if s.count == 0 {
+                            *e = None;
+                        }
+                    }
+                }
+                if let Some(tame) = self.world.tamed.get_mut(&gob) {
+                    tame.milk_units -= crate::state::MILK_PER_BUCKET_UNITS;
+                }
+                self.refresh_inventory(sid);
+                let milk_res = self.world.res.intern("gfx/invobjs/bucket-milk");
+                self.grant_pickup(
+                    sid,
+                    InvStack {
+                        res: milk_res,
+                        count: 1,
+                        ql: crate::state::GRAZE_PRODUCT_QL,
+                        label: "",
+                    },
+                );
+            }
+            Species::Sheep => {
+                if wool == 0 {
+                    self.system_line(sid, "The sheep has no wool to shear.");
+                    return;
+                }
+                if let Some(tame) = self.world.tamed.get_mut(&gob) {
+                    let stored = tame.wool;
+                    tame.wool = 0;
+                    let wool_res = self.world.res.intern("gfx/invobjs/wool");
+                    self.grant_pickup(
+                        sid,
+                        InvStack {
+                            res: wool_res,
+                            count: u32::from(stored),
+                            ql: crate::state::GRAZE_PRODUCT_QL,
+                            label: "",
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Flower menu UI for one crop (local and guest clicks share it;
     /// `spec`/`stage` come from the authoritative state or the guest
     /// view). The menu choice is applied by `harvest_crop`, which routes
@@ -8234,6 +8502,16 @@ impl Game {
             self.harvest_crop(sid, wid, choice);
             return;
         }
+        // Tamed-animal production menus (session 47): Milk / Shear.
+        let animal_menu = self
+            .sessions
+            .get(&sid)
+            .and_then(|o| o.animal_menu)
+            .map(|(w, _)| w);
+        if animal_menu == Some(wid) {
+            self.apply_animal_choice(sid, wid, choice);
+            return;
+        }
         // Station Light/Extinguish menus.
         let station_menu = self
             .sessions
@@ -8497,6 +8775,87 @@ impl Game {
             }
             for id in broke {
                 self.break_leash(id, "and re-attacks");
+            }
+        }
+        // Production sweep (session 47; animals-and-husbandry.md "Animal
+        // products and collection flows"): fully tamed cows accrue milk,
+        // fully tamed sheep accrue wool, but only while grazing (moor,
+        // heath, grassland tiles count as quality-10 food per the doc).
+        // Same rare-event shape as the leash sweep: O(tamed) with the
+        // steady state empty; runs each tick so the meters keep game-time
+        // based pacing (doc: "lagg-relative" wording -> game time).
+        if !self.world.tamed.is_empty() {
+            // Phase A0 (immutable): collect fully tamed producers with
+            // species + position.
+            let candidates: Vec<(GobId, Species, (i32, i32))> = self
+                .world
+                .tamed
+                .iter()
+                .filter_map(|(&id, tame)| {
+                    // Only fully tamed domestic producers keep producing;
+                    // mid-taming beasts still run the leash protocol.
+                    if tame.tameness < crate::state::TAMENESS_FULL {
+                        return None;
+                    }
+                    let slot = self.world.gobs.get(id)?;
+                    let Kind::Animal { species } = self.world.gobs.kind[slot] else {
+                        return None;
+                    };
+                    if !matches!(species, Species::Cow | Species::Sheep) {
+                        return None;
+                    }
+                    Some((id, species, self.world.gobs.pos[slot]))
+                })
+                .collect();
+            // Phase A1 (mutable): resolve grazing tiles - tile_at may
+            // generate a grid on demand, so it runs after the tamed
+            // iteration ended (two-phase pass, same shape as tick_animals).
+            let producers: Vec<(GobId, Species)> = candidates
+                .into_iter()
+                .filter_map(|(id, species, (px, py))| {
+                    // tile_at takes SUBTILE coordinates (it does the
+                    // per-tile division itself).
+                    let grazing = self
+                        .tile_at((px, py))
+                        .map(crate::state::tile_grazes)
+                        .unwrap_or(false);
+                    grazing.then_some((id, species))
+                })
+                .collect();
+            // Phase B (mutable): accrue the meters.
+            for (id, species) in producers {
+                let Some(tame) = self.world.tamed.get_mut(&id) else {
+                    continue;
+                };
+                match species {
+                    Species::Cow => {
+                        tame.prod_acc = tame.prod_acc.saturating_add(crate::state::MILK_QUANTITY);
+                        while tame.prod_acc >= crate::state::MILK_ACC_PER_UNIT
+                            && tame.milk_units < crate::state::MILK_CAP_UNITS
+                        {
+                            tame.prod_acc -= crate::state::MILK_ACC_PER_UNIT;
+                            tame.milk_units += 1;
+                        }
+                        // At the cap the accumulator stops banking time:
+                        // production resumes from zero after milking.
+                        if tame.milk_units >= crate::state::MILK_CAP_UNITS {
+                            tame.prod_acc = 0;
+                        }
+                    }
+                    Species::Sheep => {
+                        tame.prod_acc = tame.prod_acc.saturating_add(crate::state::WOOL_QUANTITY);
+                        while tame.prod_acc >= crate::state::WOOL_ACC_PER_UNIT
+                            && tame.wool < crate::state::WOOL_CAP
+                        {
+                            tame.prod_acc -= crate::state::WOOL_ACC_PER_UNIT;
+                            tame.wool += 1;
+                        }
+                        if tame.wool >= crate::state::WOOL_CAP {
+                            tame.prod_acc = 0;
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         // The dirty set served this tick's visibility pass; spawn marks
@@ -10009,11 +10368,7 @@ impl Game {
                 .world
                 .tamed
                 .entry(target)
-                .or_insert(crate::state::TameState {
-                    tamer: tamer_gob,
-                    tameness: 0,
-                    break_at_tick: 0,
-                });
+                .or_insert_with(|| crate::state::TameState::new(tamer_gob, 0));
             entry.tamer = tamer_gob;
             entry.tameness = (entry.tameness + crate::state::TAMENESS_PER_QUELL)
                 .min(crate::state::TAMENESS_FULL);
@@ -17925,6 +18280,341 @@ mod tests {
                 .any(|(r, _, _)| *r == "gfx/invobjs/wool"),
             "sheep loot carries wool"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Tamed-animal production (session 47; animals-and-husbandry.md
+    // "Animal products and collection flows").
+    // ------------------------------------------------------------------
+
+    /// Force the tile under a gob to `tile` in the LIVE grid (mutate_tile
+    /// patches the resident grid and records the override), keeping the
+    /// test independent of the seed's terrain roll at the spawn spot.
+    fn force_tile(g: &mut Game, sub: (i32, i32), tile: u8) {
+        let tx = sub.0.div_euclid(11);
+        let ty = sub.1.div_euclid(11);
+        let gc = (tx.div_euclid(100), ty.div_euclid(100));
+        let ix = tx.rem_euclid(100) as usize;
+        let iy = ty.rem_euclid(100) as usize;
+        g.world.grids.mutate_tile(gc, ix, iy, tile);
+    }
+
+    fn full_tame(g: &mut Game, gob: crate::state::GobId, tamer: crate::state::GobId) {
+        let mut tame = crate::state::TameState::new(tamer, 0);
+        tame.tameness = crate::state::TAMENESS_FULL;
+        g.world.tamed.insert(gob, tame);
+    }
+
+    /// Milk accrues at the doc rate (quantity 10 -> 0.1 L per 10 min =
+    /// 1 unit of 0.01 L per 600 ticks) while the cow stands on pasture,
+    /// and pauses off it (moor/heath/grass are the q10 foods).
+    #[tokio::test]
+    async fn cow_production_accrues_on_pasture_only() {
+        let (mut g, _rx, _raw) = entered_game("s47milk");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let cow = spawn_species_at(&mut g, pidx, 300, Species::Cow.max_hp(), Species::Cow);
+        full_tame(&mut g, cow, pgob);
+        let slot = g.world.gobs.get(cow).unwrap();
+        let sub = g.world.gobs.pos[slot];
+        force_tile(&mut g, sub, hnh_world::gen::tile::GRASS);
+        for _ in 0..601 {
+            g.tick();
+        }
+        let tame = g.world.tamed.get(&cow).unwrap();
+        assert_eq!(
+            tame.milk_units, 1,
+            "q10 accrues 1 unit of 0.01 L per 600 ticks (0.1 L / 10 min)"
+        );
+        assert_eq!(tame.prod_acc, 10, "601 ticks * 10 - 6000 banked");
+        // Off-pasture: production pauses and the accumulator does not
+        // bank off-grass time.
+        force_tile(&mut g, sub, hnh_world::gen::tile::SAND);
+        for _ in 0..601 {
+            g.tick();
+        }
+        let tame = g.world.tamed.get(&cow).unwrap();
+        assert_eq!(tame.milk_units, 1, "no accrual off the pasture");
+        assert_eq!(
+            tame.prod_acc, 10,
+            "the accumulator stays frozen off-pasture"
+        );
+    }
+
+    /// The 10 L cap stops the meter and the accumulator stops banking
+    /// time; milking frees the meter and production resumes.
+    #[tokio::test]
+    async fn milk_caps_at_ten_liters() {
+        let (mut g, _rx, _raw) = entered_game("s47milkcap");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let cow = spawn_species_at(&mut g, pidx, 300, Species::Cow.max_hp(), Species::Cow);
+        full_tame(&mut g, cow, pgob);
+        let slot = g.world.gobs.get(cow).unwrap();
+        let sub = g.world.gobs.pos[slot];
+        force_tile(&mut g, sub, hnh_world::gen::tile::GRASS);
+        {
+            let tame = g.world.tamed.get_mut(&cow).unwrap();
+            tame.milk_units = crate::state::MILK_CAP_UNITS - 1;
+            tame.prod_acc = crate::state::MILK_ACC_PER_UNIT - crate::state::MILK_QUANTITY;
+        }
+        g.tick();
+        let tame = g.world.tamed.get(&cow).unwrap();
+        assert_eq!(
+            tame.milk_units,
+            crate::state::MILK_CAP_UNITS,
+            "the cap lands"
+        );
+        g.tick();
+        let tame = g.world.tamed.get(&cow).unwrap();
+        assert_eq!(
+            tame.milk_units,
+            crate::state::MILK_CAP_UNITS,
+            "no overflow past the cap"
+        );
+        assert_eq!(
+            tame.prod_acc, 0,
+            "the accumulator stops banking time at the cap"
+        );
+    }
+
+    /// Wool accrual (q5: one wool per 8 h = 48000 ticks) lands through
+    /// the accumulator and caps at 3.
+    #[tokio::test]
+    async fn wool_accrues_and_caps() {
+        let (mut g, _rx, _raw) = entered_game("s47wool");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let sheep = spawn_species_at(&mut g, pidx, 300, Species::Sheep.max_hp(), Species::Sheep);
+        full_tame(&mut g, sheep, pgob);
+        let slot = g.world.gobs.get(sheep).unwrap();
+        let sub = g.world.gobs.pos[slot];
+        force_tile(&mut g, sub, hnh_world::gen::tile::HEATH);
+        {
+            let tame = g.world.tamed.get_mut(&sheep).unwrap();
+            tame.prod_acc = crate::state::WOOL_ACC_PER_UNIT - crate::state::WOOL_QUANTITY;
+        }
+        g.tick();
+        assert_eq!(
+            g.world.tamed.get(&sheep).unwrap().wool,
+            1,
+            "the quantity-tick threshold mints one wool"
+        );
+        {
+            let tame = g.world.tamed.get_mut(&sheep).unwrap();
+            tame.wool = crate::state::WOOL_CAP;
+            tame.prod_acc = crate::state::WOOL_ACC_PER_UNIT - crate::state::WOOL_QUANTITY;
+        }
+        g.tick();
+        let tame = g.world.tamed.get(&sheep).unwrap();
+        assert_eq!(tame.wool, crate::state::WOOL_CAP, "the wool cap holds");
+        assert_eq!(tame.prod_acc, 0, "the accumulator stops at the cap");
+    }
+
+    /// Milking: the flower menu opens on a producing cow, the choice
+    /// consumes an empty bucket, drains the meter and grants a
+    /// bucket-milk item at the grazing quality.
+    #[tokio::test]
+    async fn milking_consumes_a_bucket_and_grants_bucket_milk() {
+        let (mut g, _rx, _raw) = entered_game("s47milkflow");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let cow = spawn_species_at(&mut g, pidx, 30, Species::Cow.max_hp(), Species::Cow);
+        full_tame(&mut g, cow, pgob);
+        {
+            let tame = g.world.tamed.get_mut(&cow).unwrap();
+            tame.milk_units = crate::state::MILK_PER_BUCKET_UNITS;
+        }
+        let buckete = g.world.res.intern("gfx/invobjs/buckete");
+        g.world.players[pidx].inv.push(crate::state::InvStack {
+            res: buckete,
+            count: 1,
+            ql: 7,
+            label: "",
+        });
+        g.player_interact(1, pgob, cow, (0, 0));
+        let (wid, target) = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .animal_menu
+            .expect("the milk menu opens on a producing cow");
+        assert_eq!(target, cow);
+        g.on_flower_choice(1, wid, 0);
+        let inv = &g.world.players[pidx].inv;
+        let buckets_left = inv
+            .iter()
+            .filter(|s| s.res == buckete)
+            .map(|s| s.count)
+            .sum::<u32>();
+        assert_eq!(buckets_left, 0, "the empty bucket is consumed");
+        let milk = g.world.res.intern("gfx/invobjs/bucket-milk");
+        assert_eq!(
+            inv.iter().find(|s| s.res == milk).map(|s| (s.count, s.ql)),
+            Some((1, crate::state::GRAZE_PRODUCT_QL)),
+            "bucket-milk granted at the grazing quality"
+        );
+        assert_eq!(
+            g.world.tamed.get(&cow).unwrap().milk_units,
+            0,
+            "the meter drains by one bucket"
+        );
+    }
+
+    /// Milking without an empty bucket refuses on the choice: no item is
+    /// granted and the meter keeps its milk.
+    #[tokio::test]
+    async fn milking_without_a_bucket_refuses() {
+        let (mut g, _rx, _raw) = entered_game("s47nobucket");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let cow = spawn_species_at(&mut g, pidx, 30, Species::Cow.max_hp(), Species::Cow);
+        full_tame(&mut g, cow, pgob);
+        {
+            let tame = g.world.tamed.get_mut(&cow).unwrap();
+            tame.milk_units = crate::state::MILK_PER_BUCKET_UNITS;
+        }
+        g.player_interact(1, pgob, cow, (0, 0));
+        let (wid, _) = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .animal_menu
+            .expect("the menu opens; the bucket is checked on the choice");
+        g.on_flower_choice(1, wid, 0);
+        let milk = g.world.res.intern("gfx/invobjs/bucket-milk");
+        assert!(
+            !g.world.players[pidx].inv.iter().any(|s| s.res == milk),
+            "no bucket-milk without a bucket"
+        );
+        assert_eq!(
+            g.world.tamed.get(&cow).unwrap().milk_units,
+            crate::state::MILK_PER_BUCKET_UNITS,
+            "the refusal keeps the meter"
+        );
+    }
+
+    /// Shearing collects the whole stored wool at the grazing quality
+    /// and empties the meter.
+    #[tokio::test]
+    async fn shearing_collects_the_stored_wool() {
+        let (mut g, _rx, _raw) = entered_game("s47shear");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let sheep = spawn_species_at(&mut g, pidx, 30, Species::Sheep.max_hp(), Species::Sheep);
+        full_tame(&mut g, sheep, pgob);
+        {
+            let tame = g.world.tamed.get_mut(&sheep).unwrap();
+            tame.wool = 3;
+        }
+        g.player_interact(1, pgob, sheep, (0, 0));
+        let (wid, target) = g
+            .sessions
+            .get(&1)
+            .unwrap()
+            .animal_menu
+            .expect("the shear menu opens on a wooly sheep");
+        assert_eq!(target, sheep);
+        g.on_flower_choice(1, wid, 0);
+        let wool = g.world.res.intern("gfx/invobjs/wool");
+        assert_eq!(
+            g.world.players[pidx]
+                .inv
+                .iter()
+                .find(|s| s.res == wool)
+                .map(|s| (s.count, s.ql)),
+            Some((3, crate::state::GRAZE_PRODUCT_QL)),
+            "all stored wool lands in the inventory"
+        );
+        assert_eq!(
+            g.world.tamed.get(&sheep).unwrap().wool,
+            0,
+            "the meter empties"
+        );
+    }
+
+    /// Wild and mid-taming animals never open the production menu - the
+    /// click keeps the fight path (a fully tamed producer never fights).
+    #[tokio::test]
+    async fn wild_and_midtaming_animals_keep_the_fight_path() {
+        let (mut g, _rx, _raw) = entered_game("s47wild");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let wild = spawn_species_at(&mut g, pidx, 30, Species::Cow.max_hp(), Species::Cow);
+        g.player_interact(1, pgob, wild, (0, 0));
+        assert!(g.sessions.get(&1).unwrap().animal_menu.is_none());
+        assert_eq!(
+            g.world.players[pidx].fight_target,
+            Some(wild),
+            "a wild cow opens the fight"
+        );
+        // Mid-taming: the beast still runs the leash protocol, not the
+        // production menu.
+        let mid = spawn_species_at(&mut g, pidx, 60, Species::Sheep.max_hp(), Species::Sheep);
+        let mut tame = crate::state::TameState::new(pgob, g.world.tick + 6000);
+        tame.tameness = 40;
+        g.world.tamed.insert(mid, tame);
+        g.player_interact(1, pgob, mid, (0, 0));
+        assert!(g.sessions.get(&1).unwrap().animal_menu.is_none());
+        assert_eq!(
+            g.world.players[pidx].fight_target,
+            Some(mid),
+            "a mid-taming beast opens the fight"
+        );
+    }
+
+    /// Tamed animals survive restarts: tameness, the meters and the
+    /// domestic morph restore from the save (only tameness > 0 rows are
+    /// persisted); a fully tamed beast never re-arms its leash, a
+    /// partially tamed one re-arms it.
+    #[tokio::test]
+    async fn tamed_animals_persist_roundtrip() {
+        let (mut g, _rx, _raw) = entered_game("s47roundtrip");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let pgob = g.world.players[pidx].gob;
+        let cow = spawn_species_at(&mut g, pidx, 300, Species::Cow.max_hp(), Species::Cow);
+        full_tame(&mut g, cow, pgob);
+        {
+            let tame = g.world.tamed.get_mut(&cow).unwrap();
+            tame.milk_units = 250;
+            tame.wool = 1;
+            tame.prod_acc = 123;
+        }
+        let mid = spawn_species_at(&mut g, pidx, 330, Species::Boar.max_hp(), Species::Boar);
+        let mut midtame = crate::state::TameState::new(pgob, 0);
+        midtame.tameness = 40;
+        g.world.tamed.insert(mid, midtame);
+        g.save_all_and_flush();
+        drop(g);
+        // Same test name -> the same save path: this game boots from the
+        // snapshot the first one flushed.
+        let (g2, _rx2, _raw2) = entered_game("s47roundtrip");
+        let mut restored_full = None;
+        let mut restored_mid = None;
+        for (id, tame) in g2.world.tamed.iter() {
+            if tame.tameness >= crate::state::TAMENESS_FULL {
+                restored_full = Some((*id, tame.milk_units, tame.wool, tame.prod_acc));
+            } else {
+                restored_mid = Some((*id, tame.tameness, tame.break_at_tick));
+            }
+        }
+        let (cow2, milk, wool, acc) = restored_full.expect("the fully tamed row restores");
+        assert_eq!((milk, wool), (250, 1), "the production meters survive");
+        assert!(
+            acc >= 123,
+            "the accumulator restores and may accrue on pasture"
+        );
+        let slot = g2.world.gobs.get(cow2).unwrap();
+        assert!(matches!(
+            g2.world.gobs.kind[slot],
+            Kind::Animal {
+                species: Species::Cow
+            }
+        ));
+        assert_eq!(g2.world.gobs.max_hp[slot], Species::Cow.max_hp());
+        let (_, tameness, break_at) = restored_mid.expect("the mid-taming row restores");
+        assert_eq!(tameness, 40, "partial tameness survives");
+        assert!(break_at > 0, "the leash window re-arms on load");
     }
 
     /// The tool requirement (session 46): craft_once refuses a tool

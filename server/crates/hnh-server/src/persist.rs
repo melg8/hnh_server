@@ -84,6 +84,10 @@ pub struct SaveData {
     /// Persisted finished structures and stations (v3, additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub structures: Vec<SavedStructure>,
+    /// Persisted tamed animals (session 47, additive): tameness +
+    /// production meters survive restarts (v6; absent in older saves).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub animals: Vec<SavedAnimal>,
 }
 
 /// A persisted construction plan. Credited materials are saved by item
@@ -136,8 +140,40 @@ pub struct SavedCrop {
     pub next_stage_at: u64,
 }
 
+/// A persisted tamed animal (session 47; additive). Spawned wildlife is
+/// seed-regenerated and never saved; tamed animals carry runtime state
+/// the doc requires to survive restarts: tameness, the production
+/// meters and the domestic morph (the saved species IS the morph).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedAnimal {
+    /// Species index (state::Species::index; the append-only order).
+    pub species: u8,
+    /// Tile coordinates (11x11 map units per tile).
+    pub tile: (i32, i32),
+    /// Current hit points (clamped to the species max on load).
+    pub hp: i32,
+    /// Accumulated tameness (0..=100; only rows with tameness > 0 save).
+    pub tameness: i32,
+    /// The tamer's character save key (`account:name`). Empty when the
+    /// tamer is unknown (offline at save time): the binding
+    /// re-establishes on the next quell, which overwrites the row.
+    #[serde(default)]
+    pub tamer_key: String,
+    /// Stored milk in 0.01 L units (cows).
+    #[serde(default)]
+    pub milk_units: u32,
+    /// Stored wool count (sheep).
+    #[serde(default)]
+    pub wool: u8,
+    /// Production accumulator (quantity-ticks toward the next unit).
+    #[serde(default)]
+    pub prod_acc: u32,
+}
+
 impl SaveData {
-    pub const VERSION: u32 = 4;
+    /// v6: tamed-animal persistence (session 47). Additive only - older
+    /// files load through the per-field serde defaults.
+    pub const VERSION: u32 = 6;
 
     pub fn new(seed: u64) -> Self {
         SaveData {
@@ -150,6 +186,7 @@ impl SaveData {
             tile_overrides: Vec::new(),
             plans: Vec::new(),
             structures: Vec::new(),
+            animals: Vec::new(),
         }
     }
 }
@@ -178,6 +215,8 @@ pub struct WorldState {
     pub tile_overrides: Vec<((i32, i32), u8)>,
     pub plans: Vec<SavedPlan>,
     pub structures: Vec<SavedStructure>,
+    /// Tamed animals (session 47).
+    pub animals: Vec<SavedAnimal>,
 }
 
 impl SaveStore {
@@ -194,6 +233,7 @@ impl SaveStore {
                         tile_overrides: data.tile_overrides.clone(),
                         plans: data.plans.clone(),
                         structures: data.structures.clone(),
+                        animals: data.animals.clone(),
                     };
                     (
                         data.players
@@ -277,6 +317,12 @@ impl SaveStore {
         data.tilth = self.world_state.tilth.clone();
         data.plans = self.world_state.plans.clone();
         data.structures = self.world_state.structures.clone();
+        // Session 47: animals + the tile_overrides fixup. flush()
+        // previously dropped tile_overrides (furrows reverted on every
+        // restart even though world_state carried them) - both fields
+        // now round-trip.
+        data.tile_overrides = self.world_state.tile_overrides.clone();
+        data.animals = self.world_state.animals.clone();
         let bytes = serde_json::to_vec(&data)?;
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, &bytes)?;

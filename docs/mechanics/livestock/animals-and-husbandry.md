@@ -474,15 +474,71 @@ required; Legacy:Hunting). Rules:
   Mouflon to obtain a Sheep"). Sheep-family loot carries the wool
   that feeds the session-46 cloth craft chain.
 
+## Server implementation notes (this repo, session 47)
+
+- Production meters (docs "Animal products and collection flows"):
+  TameState carries `milk_units` (0.01 L units, cows), `wool` (sheep)
+  and a shared integer accumulator `prod_acc`. Milk accrues at the
+  doc's `Milk Quantity * 0.01` L / 10 min: quantity 10 (server policy,
+  no verified bred-stat numbers) adds 10 units per 6000 ticks, i.e.
+  exactly the doc's 0.1 L / 10 min example. Wool accrues 1 per 8 real
+  hours at Wool Quantity 5, scaled linearly with quantity (acc += q
+  per tick; one unit per 240000 quantity-ticks). Both meters cap
+  exactly as documented (10 L / 3 wool); at the cap the accumulator
+  stops banking time, so production resumes from zero after collection.
+- Grazing gate (docs "Feeding: troughs and grazing"): the production
+  sweep (two-phase, O(tamed), same shape as tick_animals) advances a
+  meter only while the animal stands on a moor/heath/grassland tile -
+  the doc's quality-10 foods. Off the pasture production PAUSES and
+  the accumulator freezes (no starvation deaths; the Food Trough
+  object is not implemented yet, so free grazing is the only feeding
+  path - see Open questions). Products inherit the grazing quality
+  (q10, GRAZE_PRODUCT_QL).
+- Collection flows: clicking a fully tamed producer opens the
+  collection flower menu instead of the fight window (tamed livestock
+  cannot be aggroed, so a producer never fights). Cow: the Milk petal
+  consumes ONE empty bucket (`gfx/invobjs/buckete` - inventory first,
+  then any equipment slot, the same any-slot policy as the crafting
+  tool scan and the taming rope check), drains MILK_PER_BUCKET_UNITS
+  (1 L = 100 units; the doc names the bucket but carries no volume -
+  1 L is server policy) and grants `gfx/invobjs/bucket-milk` at q10.
+  Sheep: the Shear petal is barehand (the doc names no shear tool) and
+  grants the whole stored `gfx/invobjs/wool` stack. An empty meter
+  never opens a menu - the click answers with a hint chat line instead
+  ("The cow has no milk yet." / "The sheep has no wool to shear.");
+  the menu re-validates the live meter and the bucket on the choice,
+  so a stale menu cannot overdraw the cow.
+- Tamed-animal persistence (docs "Pens, ownership, and persistence"):
+  rows with tameness > 0 persist as SavedAnimal (species index, tile,
+  hp clamped to the species max on load, tameness, tamer key, meters,
+  accumulator; save v6, additive). The saved species IS the domestic
+  morph - a fully tamed mouflon reloads as a sheep. The tamer gob id
+  cannot survive restarts (gob ids are runtime identities), so the row
+  stores the tamer's character save key when online; a fully tamed
+  beast never re-arms its leash window, a partially tamed one re-arms
+  it at load, and either way the tamer binding re-establishes on the
+  next quell (apply_quell overwrites the row's tamer). Spawned
+  wildlife is seed-regenerated and never saved.
+- Persistence bugfix found while wiring animals in: `flush()` never
+  copied `tile_overrides` into the save document, so furrows and other
+  terraforming silently reverted on every restart even though the
+  in-memory world_state carried them. Both fields now round-trip.
+
 ## Open questions (animals)
 
-- Taming state (post session-46): the "battle intensity == 0",
-  Animal Husbandry skill and species-morph prerequisites are now
-  implemented; still open are tamed-state persistence (animals are
-  spawned wildlife, so tameness evaporates with the world process)
-  and the intensity meter's client rendering (the bar exists only
-  server-side; the legacy Fightview rendered intensity from the uimsg
-  relation, which this server keeps at 0).
+- Taming state (post session-47): the "battle intensity == 0",
+  Animal Husbandry skill, species-morph prerequisite and tamed-state
+  persistence are now implemented (session 47 saves tameness rows +
+  the production meters; the domestic morph survives as the saved
+  species). Still open: the intensity meter's client rendering (the
+  bar exists only server-side; the legacy Fightview rendered
+  intensity from the uimsg relation, which this server keeps at 0).
+- Tamed-animal production depth: breed stats (Milk Quantity / Wool
+  Quality per animal) are flat server-policy constants (10 / 5); the
+  Food Trough object, fodder transfer and starvation are not
+  implemented (free grazing on moor/heath/grass is the only feeding
+  path), and breeding/gestation is out of scope until animals carry
+  per-animal stat rows.
 - The boar morph is unreachable: the 2009 pack ships no pig kritter
   directory, so a fully tamed boar stays a boar. When a pig drawable
   surfaces (a later resource pack or the legacy client's own pack),

@@ -713,6 +713,26 @@ pub struct TameState {
     /// World tick when the leash breaks and the beast re-aggros.
     /// Ignored once tameness reaches TAMENESS_FULL.
     pub break_at_tick: u64,
+    /// Stored milk in 0.01 L units (session 47; cows only). Persisted.
+    pub milk_units: u32,
+    /// Stored wool count (session 47; sheep only). Persisted.
+    pub wool: u8,
+    /// Production accumulator: species quantity ticks toward the next
+    /// unit (MILK_ACC_PER_UNIT / WOOL_ACC_PER_UNIT thresholds).
+    pub prod_acc: u32,
+}
+
+impl TameState {
+    pub fn new(tamer: GobId, break_at_tick: u64) -> Self {
+        TameState {
+            tamer,
+            tameness: 0,
+            break_at_tick,
+            milk_units: 0,
+            wool: 0,
+            prod_acc: 0,
+        }
+    }
 }
 
 /// Tameness added per successful Quell (docs step 3: five cycles to 100).
@@ -723,6 +743,36 @@ pub const TAMENESS_FULL: i32 = 100;
 /// "about ten minutes (5-15, variable)" - the floor as server policy).
 /// 600 s / TICK_MS(100) = 6000 ticks.
 pub const LEASH_BREAK_TICKS: u64 = 6000;
+
+// --- Production meters (session 47; animals-and-husbandry.md "Animal
+// products and collection flows"). ---
+
+/// Milk cap: 10 L stored in 0.01 L units (doc "cows store up to 10 L").
+pub const MILK_CAP_UNITS: u32 = 1000;
+/// Milk rate denominator: the doc's rate is `Milk Quantity * 0.01` L per
+/// 10 minutes, i.e. quantity q accrues q units per 6000 ticks
+/// (10 min = 600 s / TICK_MS 100). Quantity 10 -> 10 units/10 min =
+/// 0.1 L/10 min, the doc's quoted example.
+pub const MILK_ACC_PER_UNIT: u32 = 6000;
+/// Wool cap: 3 (doc "sheep store up to 3 wool").
+pub const WOOL_CAP: u8 = 3;
+/// Wool rate: 1 wool per 8 real hours at Wool Quantity 5 (doc), scaled
+/// linearly with quantity: acc += quantity per tick, 1 unit per
+/// 48000 ticks * 5 = 240000 accumulated quantity-ticks.
+pub const WOOL_ACC_PER_UNIT: u32 = 240_000;
+/// Server-policy breed stats pending legacy verification (the doc
+/// carries no verified per-animal quantity numbers; both default to
+/// the wiki's example quantities).
+pub const MILK_QUANTITY: u32 = 10;
+pub const WOOL_QUANTITY: u32 = 5;
+/// Milk drawn per bucket: 1 L = 100 units of 0.01 L. The doc names the
+/// bucket as the milking interaction but carries no bucket volume;
+/// 1 L is the server policy (documented in the livestock doc).
+pub const MILK_PER_BUCKET_UNITS: u32 = 100;
+/// Milk/wool quality while grazing: the doc's grazing rule counts moor,
+/// heath and grassland as food of quality level 10, so the product
+/// quality follows at 10 (server policy pending bred-stat systems).
+pub const GRAZE_PRODUCT_QL: u8 = 10;
 
 /// A connected, in-world client's outbound message sinks.
 ///
@@ -765,6 +815,9 @@ pub struct SessionOut {
     pub item_wids: HashMap<u16, usize>,
     /// Open harvest flower menu: `sm` widget id -> target crop gob.
     pub crop_menu: Option<(u16, GobId)>,
+    /// Open production flower menu (session 47): `sm` widget id ->
+    /// target tamed-animal gob (Milk on a cow, Shear on a sheep).
+    pub animal_menu: Option<(u16, GobId)>,
     /// Widget id of the Area Chat window (`slenchat`), 0 = none.
     pub chat_wid: u16,
     /// Widget id of the party roster (`pv`), 0 = none.
@@ -862,6 +915,15 @@ pub fn tile_speed_pct(t: u8) -> Option<i32> {
 #[inline]
 pub fn tile_speed(t: u8) -> Option<i32> {
     tile_speed_pct(t).map(|_| 1)
+}
+
+/// Grazing check (session 47): the doc's feeding rule counts moor, heath
+/// and grassland as food of quality level 10. Tamed production meters
+/// advance only while the animal stands on one of these tiles; anything
+/// else pauses production (no starvation deaths - documented policy).
+#[inline]
+pub fn tile_grazes(t: u8) -> bool {
+    matches!(t, tile::GRASS | tile::MOOR | tile::HEATH)
 }
 
 /// Full simulation world.

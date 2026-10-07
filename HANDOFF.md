@@ -3129,3 +3129,80 @@ NEXT (handoff):
   animals persist.
 - GL client e2e re-run with a morph walkthrough (tame a mouflon to
   100 and read the sheep sprite off the screen).
+
+## Session 47 (2026-10-07)
+
+Closed both carried taming items: tamed-animal persistence and
+tamed-animal production (milk/wool timers + collection flows). Also
+fixed a persistence bug found while wiring the animals in.
+
+WHAT:
+
+- PRODUCTION METERS (animals-and-husbandry.md "Animal products and
+  collection flows"): TameState gains milk_units (0.01 L units),
+  wool, and a shared prod_acc accumulator. Milk: quantity 10 accrues
+  10 units per 6000 ticks = the doc's 0.1 L / 10 min, cap 10 L (1000
+  units). Wool: 1 per 8 h at quantity 5, linear in quantity (acc +=
+  q per tick, unit per 240000 quantity-ticks), cap 3. At the cap the
+  accumulator stops banking time. Quantity constants are server
+  policy (no verified bred-stat numbers; MILK_QUANTITY=10,
+  WOOL_QUANTITY=5).
+- GRAZING GATE: the production sweep runs each tick (two-phase,
+  O(tamed), same shape as tick_animals) and advances a meter only
+  while the animal stands on GRASS/MOOR/HEATH (the doc's q10 foods);
+  off-pasture pauses accrual AND freezes the accumulator. Products
+  carry the grazing quality q10 (GRAZE_PRODUCT_QL). No starvation
+  deaths (the Food Trough is not built; free grazing is the only
+  feeding path - Open questions).
+- COLLECTION FLOWS: clicking a fully tamed producer opens the
+  collection flower menu instead of the fight window (tamed livestock
+  cannot be aggroed). Cow "Milk": consumes one empty bucket
+  (gfx/invobjs/buckete; inventory first, then any equip slot - same
+  any-slot policy as the tool scan and the taming rope), drains 1 L
+  (MILK_PER_BUCKET_UNITS=100; the doc names no bucket volume - policy)
+  and grants gfx/invobjs/bucket-milk at q10. Sheep "Shear": barehand
+  (the doc names no shear tool), grants the whole stored
+  gfx/invobjs/wool stack. An empty meter answers with a hint chat
+  line and never opens a menu; the choice re-validates the live meter
+  and the bucket, so a stale menu cannot overdraw. Wild and
+  mid-taming animals keep the fight path (regression-tested).
+- TAMED-ANIMAL PERSISTENCE (save v6, additive): rows with tameness >
+  0 persist as SavedAnimal (species index, tile, hp clamped to the
+  species max on load, tameness, tamer save_key, meters, acc). The
+  saved species IS the domestic morph (a fully tamed mouflon reloads
+  as a sheep). The tamer gob id cannot survive restarts; fully tamed
+  beasts never re-arm the leash, partially tamed ones re-arm at load,
+  and the tamer binding re-establishes on the next quell. Wildlife is
+  seed-regenerated and never saved.
+- PERSISTENCE BUGFIX: flush() never copied tile_overrides into the
+  save document - furrows/terraforming silently reverted on every
+  restart even though world_state carried them. Both tile_overrides
+  and animals now round-trip (persist.rs).
+
+EVIDENCE: 267 unit tests green (8 new: pasture-only accrual at the
+documented rate, cap + accumulator reset, wool accrual/cap, milk flow
+with bucket consumption, no-bucket refusal, shear flow, wild/mid-tame
+fight-path regression, persistence roundtrip), clippy -D warnings
+clean, fmt clean. Wire probes on the release binary: WORLD ENTRY OK,
+MELEE WIRE OK, ANIMALS WIRE OK. Commits pushed to origin/master.
+
+NOT DONE THIS SESSION (rolled to NEXT):
+- Food Trough object + fodder transfer + starvation rules; per-animal
+  breed stat rows (Milk Quantity / Wool Quality are flat constants).
+- Breeding/gestation lifecycle (calves, lambs, coop eggs).
+- GL client e2e with a full morph walkthrough (tame to 100, read the
+  sheep sprite off the screen) - the wire path is covered by the
+  session-46 OD_RES probes.
+- Recipe breadth (~150 shipped paginae) - unchanged from session 46.
+
+NEXT (handoff):
+- Recipe breadth: ~150 shipped craft paginae remain unimplemented;
+  the tool/station fields are in place for oven-gated recipes (flour/
+  bread need a grain item the 2009 pack lacks - sprout/grist only,
+  see farm.rs). Picking a large implementable batch (tools, furniture,
+  containers) is the highest-value breadth move.
+- Feeding depth: Food Trough (2x1 lift-able, 200 fodder units, 18
+  tile radius) + fodder quality averaging; then starvation.
+- GL client e2e with a production walkthrough (tame a cow, wait out
+  the milk meter with HNH tick acceleration or a debug grant, milk it
+  on screen).
