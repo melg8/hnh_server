@@ -3662,3 +3662,65 @@ NEXT (handoff):
 - Windows smoke + GL client e2e still carried (no display host here).
 
 ---
+## 2026-10-08 - Session 56 (type 4: test coverage / test pyramid)
+
+SESSION TYPE ROTATION LOG: 52=5, 53=0, 54=1, 55=2, 56=4. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: de-flake the wire suite (the top carried item): reproduce
+movement_click_walks_with_linstep_progress's parallel-load flake,
+root-cause it, fix it in the HARNESS (or the server - whichever the
+evidence points at), and prove the fix under stress.
+
+REPRODUCED: full-suite run 3 of 8 (default cargo parallelism, no added
+load) - the test panicked at wire.rs:182, "no own-gob LINBEG after
+ground click": the own LINBEG never appeared within 10 s of the map
+click.
+
+ROOT CAUSE (harness, not server): the harness sent every reliable
+datagram (the WDGMSG click, play, take, itemact, ...) exactly ONCE.
+On localhost, parallel-test CPU load overflows kernel receive
+buffers and silently drops datagrams; a lost click is never resent,
+the server never starts the walk, and the failure is indistinguish-
+able from a server bug. The legacy client owns this duty (Session.java
+RWorker retransmits unacked on the 80/200/620/2000 ms backoff until
+the server's cumulative MSG_ACK covers them) - the harness had simply
+never implemented that half of the contract. The server side was
+verified sound: RelSender retransmits its own stream on a 20 ms
+scheduler, and RelReceiver dedups resent client datagrams by seq.
+
+FIX (tests/common/mod.rs, the black-box client side):
+
+- pending_rel: every sent MSG_REL datagram is tracked (last submessage
+  seq, next retry time, attempt) until its cumulative ACK arrives.
+- MSG_ACK handling drops covered datagrams with the same
+  wrapping-window compare the server's RelSender::on_ack uses.
+- pump_until retransmits due datagrams each cycle (granularity = the
+  200 ms recv timeout; the legacy cadence tolerates that).
+- The LINBEG assert now reports the unacked-datagram count.
+
+The build-flow test inherits the protection (all take/itemact/place
+traffic rides the same path). Server code untouched.
+
+VERIFICATION:
+
+- 15/15 green full-suite runs after the fix: 10 standard + 5 with two
+  busy-loop CPU hogs added (the unfixed baseline failed on run 3 of
+  8). fmt + clippy -D warnings clean; 285 tests green.
+- CI workflow push retried once (rule): REJECTED again - the PAT still
+  lacks the `workflow` scope. Rolled back AFTER the fix commit was
+  already safe on its own commit (the session-55 lesson, applied).
+
+COMMITS: 742871a (the de-flake) + this handoff entry.
+
+NEXT (handoff):
+- Remaining gaps (8 items): per-window max-tick perf field (cheap),
+  batch_move_broadcast profiling (type 5), probe migration
+  (mechanical), recipe breadth (type 3), feeding lift, GL e2e +
+  Windows smoke (carried), guest GC at scale (revisit with multi-node
+  profiling only).
+- The duplicate-ACK note: the server's RelReceiver drops duplicates
+  without re-ACKing (legacy-faithful); a lost ACK therefore keeps a
+  harness entry pending until the next send - harmless, recorded for
+  anyone debugging pending_rel growth.
+

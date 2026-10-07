@@ -170,9 +170,14 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    revisit only with a multi-node profile that says otherwise.
 3. **Probe migration**: move the five legacy self-contained probes onto
    hnhlib.py (mechanical; recipe in server/scripts/README.md).
-4. **Recipe breadth**: ~150 shipped paginae; oven-gated tools/
-   furniture/containers; flour/bread blocked (the 2009 pack has no
-   grain item - sprout/grist only, see farm.rs).
+4. **Recipe breadth**: MOSTLY CLOSED (session 58): 35 recipes total;
+   the stone/bone tools, farm headwear, fishing gear, linen tier and
+   the leather tier (via the tanhide/string fork pages) now craft.
+   Remaining dead ends: metal chain (no ore gathering/smelter numbers),
+   pottery/kiln (clay items exist, no station), wurst/sausage and
+   baking doughs (station cooking depth), flour/bread (the 2009 pack
+   has no grain item - sprout/grist only, see farm.rs), world GATHERING
+   of branch/stone (bough/stone picking - the starter kit stands in).
 5. **Feeding depth**: trough-to-trough fodder transfer needs the lift
    mechanic; per-animal breed stat rows (Milk Quantity / Wool Quality
    are flat constants).
@@ -189,8 +194,8 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0, 54=1, 55=2, 56=4, 57=5. All six types have been served - pick
-freely, but avoid serving the same type as the previous session.
+53=0, 54=1, 55=2, 56=4, 57=5, 58=3. All six types have been served -
+pick freely, but avoid serving the same type as the previous session.
 
 ## Session index (one line each; full entries in the archive)
 
@@ -246,70 +251,9 @@ freely, but avoid serving the same type as the previous session.
 - S55 (type 2): game/interact.rs + game/combat.rs extracted from game.rs (pure move, 5.3k -> 3.5k lines); split-verification process note.
 - S56 (type 4): wire-test de-flake - the harness now retransmits unacked reliable datagrams on the legacy RWorker backoff (lost WDGMSG click root-caused); 15/15 green full-suite runs.
 - S57 (type 5): mv-phase profile first (new mvbat_* attribution), then dense sorted cell index for the fan-out, allocation-free movement encode, per-window max-tick perf field; 1k wall time confirmed scheduler-bound on 2 cores.
+- S58 (type 3): recipe breadth batch - 19 recipes (35 total), static paginae scanner (scan_paginae.py), fork pages string/tanhide unlock the leather tier, test_newcraft.py wire probe.
 
 ---
-
-## 2026-10-08 - Session 56 (type 4: test coverage / test pyramid)
-
-SESSION TYPE ROTATION LOG: 52=5, 53=0, 54=1, 55=2, 56=4. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: de-flake the wire suite (the top carried item): reproduce
-movement_click_walks_with_linstep_progress's parallel-load flake,
-root-cause it, fix it in the HARNESS (or the server - whichever the
-evidence points at), and prove the fix under stress.
-
-REPRODUCED: full-suite run 3 of 8 (default cargo parallelism, no added
-load) - the test panicked at wire.rs:182, "no own-gob LINBEG after
-ground click": the own LINBEG never appeared within 10 s of the map
-click.
-
-ROOT CAUSE (harness, not server): the harness sent every reliable
-datagram (the WDGMSG click, play, take, itemact, ...) exactly ONCE.
-On localhost, parallel-test CPU load overflows kernel receive
-buffers and silently drops datagrams; a lost click is never resent,
-the server never starts the walk, and the failure is indistinguish-
-able from a server bug. The legacy client owns this duty (Session.java
-RWorker retransmits unacked on the 80/200/620/2000 ms backoff until
-the server's cumulative MSG_ACK covers them) - the harness had simply
-never implemented that half of the contract. The server side was
-verified sound: RelSender retransmits its own stream on a 20 ms
-scheduler, and RelReceiver dedups resent client datagrams by seq.
-
-FIX (tests/common/mod.rs, the black-box client side):
-
-- pending_rel: every sent MSG_REL datagram is tracked (last submessage
-  seq, next retry time, attempt) until its cumulative ACK arrives.
-- MSG_ACK handling drops covered datagrams with the same
-  wrapping-window compare the server's RelSender::on_ack uses.
-- pump_until retransmits due datagrams each cycle (granularity = the
-  200 ms recv timeout; the legacy cadence tolerates that).
-- The LINBEG assert now reports the unacked-datagram count.
-
-The build-flow test inherits the protection (all take/itemact/place
-traffic rides the same path). Server code untouched.
-
-VERIFICATION:
-
-- 15/15 green full-suite runs after the fix: 10 standard + 5 with two
-  busy-loop CPU hogs added (the unfixed baseline failed on run 3 of
-  8). fmt + clippy -D warnings clean; 285 tests green.
-- CI workflow push retried once (rule): REJECTED again - the PAT still
-  lacks the `workflow` scope. Rolled back AFTER the fix commit was
-  already safe on its own commit (the session-55 lesson, applied).
-
-COMMITS: 742871a (the de-flake) + this handoff entry.
-
-NEXT (handoff):
-- Remaining gaps (8 items): per-window max-tick perf field (cheap),
-  batch_move_broadcast profiling (type 5), probe migration
-  (mechanical), recipe breadth (type 3), feeding lift, GL e2e +
-  Windows smoke (carried), guest GC at scale (revisit with multi-node
-  profiling only).
-- The duplicate-ACK note: the server's RelReceiver drops duplicates
-  without re-ACKing (legacy-faithful); a lost ACK therefore keeps a
-  harness entry pending until the next send - harmless, recorded for
-  anyone debugging pending_rel growth.
 
 ## 2026-10-08 - Session 57 (type 5: performance)
 
@@ -390,3 +334,87 @@ NEXT (handoff):
   gap #2).
 - Mechanical carried: five-probe hnhlib.py migration, recipe breadth
   (type 3), feeding lift, GL e2e + Windows smoke (no display host).
+
+## 2026-10-08 - Session 58 (type 3: new functionality)
+
+SESSION TYPE ROTATION LOG: 54=1, 55=2, 56=4, 57=5, 58=3. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the top carried type-3 item - recipe breadth. HANDOFF gap #4
+(read: "~150 shipped paginae, 16 implemented"). Scope for this session:
+decode the full shipped paginae tree, implement the largest coherent
+batch, verify on all three tiers.
+
+INVENTORY FIRST (never assume - scan):
+- server/scripts/scan_paginae.py: STATIC AButton decode of every
+  paginae/craft/*.res (165 pages) straight from lib/haven-res.jar.
+  Layer framing + the AButton layout were verified against
+  src/haven/Resource.java (Resource.load layer loop at :1304,
+  AButton(byte[]) at :1023) and reproduce the documented rustroot
+  decode byte for byte. Result: ~140 leaf recipes with ad ids, parent
+  categories, prereq codes; 19 were implemented (S36/S45/S46 batches).
+- Cross-checked ingredient/output resources against gfx/invobjs and
+  the ECONOMY (state.rs loot rows, farm.rs yields, starter kit): the
+  pack is rich but most metal/pottery inputs have no source yet.
+
+THE BATCH (19 new recipes, 35 total) - commits 5d06095:
+- Stone/bone tools: saw (branch 2 + stone 1), bonesaw, pickaxe (pagina
+  paxe.res carries ad ["craft","pickaxe"]), scythe.
+- Farm headwear: straw hat (straw from the wheat early harvest),
+  pumpkin hat, sprucecap.
+- Woodwork: kuksa - the first recipe that CONSUMES a crafted tool
+  (saw), deepening the S46 tool plumbing.
+- Fishing gear: fishing pole, bone hook (fishing itself stays future
+  work; the gear pages ship).
+- Linen tier: toga (linencloth x4), cylinder hat (x3), gauze (x1).
+- Fork pages: the pack has NO page whose ad is ["craft","string"] or
+  ["craft","tanhide"], yet String/Leather are real invobjs the shipped
+  pages consume. res/compiled/paginae/craft/{string,tanhide}.res are
+  composed by server/scripts/make_fork_paginae.py (donor image layer
+  from the invobj icon + a new AButton layer; layout verified by the
+  same scanner; the res framing bug - a double length header - was
+  caught by exactly that cross-check). string: flax fibres x2 -> string
+  (flax/hemp early harvest). tanhide: hide-raw-cow x2 -> leather, the
+  hand-tier stand-in for the unimplemented tanning tub - unlocks the
+  shipped lboots/lpants/lcloak/waterflask pages.
+- Starter kit: branch 6->10, stone 4->6 so the stone-tool batch is
+  craftable without world gathering (bough/stone picking recorded as a
+  new gap; gathering-with-nothing-to-hit was NOT invented here).
+
+TEST PYRAMID (all three tiers, AGENTS.md rule):
+- Unit (+4): leather_chain_tans_and_consumes (tanhide -> leather ->
+  lboots with the full quality math: hides q40 -> leather q25 -> boots
+  q15 through the [2,1] type weights and the sewing softcap),
+  string_spins_from_flax_fibres, saw_crafts_from_starter_and_unlocks_
+  bucket (the S46 saw-gap loop closes), recipe_registry_is_consistent.
+- Wire: build_flow... de-hardcoded - the stone remainder expectation
+  now derives from the actual starter count (starter - demand), so kit
+  bumps cannot break it again; 4/4 wire green.
+- Live wire probe server/scripts/test_newcraft.py ON hnhlib.py (the
+  migration exemplar): act("craft","saw") -> make widget -> pop ->
+  make 0 -> saw item; bucket with the CRAFTED saw; fork paginae served
+  by res_http with a valid signature. NEWCRAFT: OK on the release
+  binary; WORLD ENTRY/CRAFT/EAT base probes green.
+
+VERIFICATION: 289 cargo tests green (11 proto + 265 unit + 4 wire +
+9 world); fmt + clippy -D warnings clean; release binary probes green.
+
+INCIDENT (recorded): the routine CI-workflow retry was run BEFORE the
+main commit with a dirty tree; the push was rejected (PAT still lacks
+the `workflow` scope) and the follow-up `git reset --hard` wiped the
+uncommitted tracked-file edits (untracked scripts survived). Restored
+byte-identically from the session transcript and re-verified (289
+green + NEWCRAFT: OK re-run) BEFORE committing. Rule for future
+sessions: commit the session's work FIRST, run the CI retry LAST.
+CI workflow push retried once per the session-53 rule: REJECTED again
+(no `workflow` scope).
+
+COMMITS: 5d06095 (recipe breadth batch) + this handoff entry.
+
+NEXT (handoff):
+- World GATHERING (bough/stone picking from trees/rocks) - the natural
+  next type-3 item; makes the starter-kit stand-in unnecessary and
+  feeds the metal chain.
+- Feeding lift (trough-to-trough fodder transfer), GL e2e + Windows
+  smoke (carried), five-probe hnhlib.py migration (test_newcraft.py is
+  the template now), CI push when the token gets the scope.
