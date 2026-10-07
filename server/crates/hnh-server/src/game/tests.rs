@@ -1844,6 +1844,98 @@ async fn guest_ingest_update_reach_sessions() {
     assert!(!g.world.guests.contains_key(&gid));
 }
 
+/// Session 59: guest pose finalizers ride the packed patched start
+/// batch (the session-44 machinery) instead of the old per-(session,
+/// guest) re-encode loop. After the guest's linmove finishes, the
+/// viewer session must receive an OD_LAYERS block whose every wire id
+/// is its own session-local allocation, and the block must be
+/// retransmittable (recorded in `unacked`).
+#[tokio::test]
+async fn guest_pose_finalizer_fans_out_patched_layers() {
+    let (mut g, _rx, mut raw, _mesh) = clustered_game("guestpose", 0, 2);
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    let pslot = g.world.gobs.get(pgob).unwrap();
+    let (px, py) = g.world.gobs.pos[pslot];
+
+    let gid = foreign_node_gob_id(0, 2, 9);
+    let st = crate::nodes::GuestState {
+        id: gid,
+        pos: (px + 60, py),
+        mv: None,
+        moving: false,
+        facing: 1,
+        kind: crate::nodes::GuestKind::Animal {
+            species: Species::Fox.index(),
+        },
+        hp: 40,
+        max_hp: 40,
+        speed: 30,
+    };
+    g.on_node_msg(crate::nodes::NodeMsg::GuestAnnounce(st));
+    g.tick();
+    assert!(g.sessions[&1].visible.contains(&gid), "guest spawned");
+    // Drain the spawn datagrams so the pose check sees only the
+    // finalizer tick's traffic.
+    while raw.try_recv().is_ok() {}
+
+    // Start a short linmove; it must finish within 3 ticks (300 ms).
+    let st2 = crate::nodes::GuestState {
+        id: gid,
+        pos: (px + 60, py),
+        mv: Some(crate::nodes::GuestLinMove {
+            sx: px + 60,
+            sy: py,
+            tx: px + 200,
+            ty: py,
+            steps: 10,
+            step: 0,
+            started_ms: g.world.now_ms,
+            total_ms: 300,
+        }),
+        moving: true,
+        facing: 2,
+        kind: crate::nodes::GuestKind::Animal {
+            species: Species::Fox.index(),
+        },
+        hp: 40,
+        max_hp: 40,
+        speed: 30,
+    };
+    g.on_node_msg(crate::nodes::NodeMsg::GuestUpdate(st2));
+
+    let mut layers: Option<Vec<u16>> = None;
+    for _ in 0..5 {
+        g.tick();
+        while let Ok(block) = raw.try_recv() {
+            if block.first() != Some(&MSG_OBJDATA) {
+                continue;
+            }
+            for (op, ids) in objdata_layer_lists(&block) {
+                if op == OD_LAYERS && block[2..6] == gid.to_le_bytes() && !ids.is_empty() {
+                    layers = Some(ids);
+                }
+            }
+        }
+        if layers.is_some() {
+            break;
+        }
+    }
+    let ids = layers.expect("rest-pose LAYERS block reached the viewer");
+    let out = g.sessions.get(&1).unwrap();
+    for w in &ids {
+        assert!(
+            out.res.wire_is_local(*w),
+            "pose wire id {w} must be session-local (patched from the placeholder)"
+        );
+    }
+    let rec = out.unacked.get(&gid);
+    assert!(
+        rec.is_some() && !rec.unwrap().is_empty(),
+        "the guest pose block must be retransmittable"
+    );
+}
+
 /// Session 54 pin: the cluster authority handoff (a guest promoted back
 /// to a local gob by GuestTransfer) must not duplicate the id in the
 /// vis index - the scan lists it exactly once before AND after the

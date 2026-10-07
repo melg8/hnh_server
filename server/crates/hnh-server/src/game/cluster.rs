@@ -1364,10 +1364,10 @@ impl Game {
                 }
             }
             // Pose flip streams the new layer set (same server-side pose
-            // resolution as local movers), batched into one datagram per
-            // viewer session.
+            // resolution as local movers) through the packed patched
+            // start batch - encode once, fan out per viewer at tick end.
             if pose_flipped {
-                self.stream_guest_poses_batched(viewers.iter().map(|sid| (*sid, id)).collect());
+                self.queue_guest_pose(id);
             }
         }
         if hp_changed {
@@ -1716,19 +1716,17 @@ impl Game {
         self.broadcast_batch(&mut batch);
         self.move_scratch = batch;
         self.world.perf.guests_fanout_us = fanout_t.elapsed().as_micros() as u64;
-        // Rest pose for finished movers: the standing layer block per
-        // viewer, batched into one datagram per session (rare - only on
-        // movement finalization; statics skip).
+        // Rest pose for finished movers: encode ONCE per guest with
+        // global-index placeholders and fan out through the packed
+        // start batch (session 44 machinery). The old per-(session,
+        // guest) loop re-encoded every OD_LAYERS block per pair; at the
+        // 2x500 single-box cluster profile that measured 22-52 ms
+        // windows (vs 0.5 ms at 2x300) - the dominant cluster-phase
+        // cost after the movement fan-out itself.
         let pose_t = Instant::now();
-        let mut pose_jobs: Vec<(SessionId, GobId)> = Vec::new();
         for id in finished_ids {
-            for (sid, out) in &self.sessions {
-                if out.visible.contains(&id) {
-                    pose_jobs.push((*sid, id));
-                }
-            }
+            self.queue_guest_pose(id);
         }
-        self.stream_guest_poses_batched(pose_jobs);
         self.world.perf.guests_pose_us = pose_t.elapsed().as_micros() as u64;
     }
 
@@ -1929,92 +1927,78 @@ impl Game {
         }
     }
 
-    /// Stream the rest-pose blocks for finished guest movers, batched:
-    /// ONE OBJDATA datagram per session carries ALL of that session's
-    /// finished guests' layer blocks. The duel-cohort crowd finalizes
-    /// dozens of guests per tick with ~300 viewers each - the per-(guest,
-    /// viewer) datagram and the per-call GuestGob clone were the dominant
-    /// pose-phase cost (p50 11 ms at 300 sessions). Guest rows are read
-    /// in place (no clone); wire ids resolve through the session table.
-    fn stream_guest_poses_batched(&mut self, mut jobs: Vec<(SessionId, GobId)>) {
+    /// Encode the rest-pose (OD_LAYERS) block of ONE guest with every
+    /// wire slot as a global-index placeholder and push it into the
+    /// packed start batch; `broadcast_batch` resolves each session's
+    /// wire ids, first-announces unseen resources, filters by
+    /// visibility and lands the patched block in `unacked` — the exact
+    /// path local poses already ride (session 44). Encoding once per
+    /// guest removes the intern lookups and layer allocations that the
+    /// old per-pair loop paid for every viewer session.
+    fn queue_guest_pose(&mut self, id: GobId) {
         use crate::nodes::GuestKind;
-        if jobs.is_empty() {
+        let Some(g) = self.world.guests.get(&id) else {
+            return;
+        };
+        // Statics have no pose (OD_RES alone renders them): an empty
+        // layer list would carry the same bare-0xFFFF defect the
+        // session-34 probe caught in the spawn block.
+        if matches!(g.kind, GuestKind::Static { .. }) {
             return;
         }
-        jobs.sort_unstable();
-        let mut i = 0;
-        while i < jobs.len() {
-            let sid = jobs[i].0;
-            let mut j = i;
-            while j < jobs.len() && jobs[j].0 == sid {
-                j += 1;
+        let frame = g.frame;
+        let moving = g.moving;
+        let facing = g.facing;
+        let pos = g.pos;
+        let (base_name, layer_names): (&'static str, Vec<&'static str>) = match &g.kind {
+            GuestKind::Player { equip, .. } => {
+                // equip names are leaked already; no GuestGob clone.
+                let equip_static: Vec<&'static str> =
+                    equip.iter().map(|s| leak_static(s)).collect();
+                (
+                    "gfx/borka/body",
+                    avatar_pose_layers(moving, facing)
+                        .iter()
+                        .copied()
+                        .chain(crate::equip::world_layers(&equip_static, moving, facing))
+                        .collect(),
+                )
             }
-            let Some(out) = self.sessions.get_mut(&sid) else {
-                i = j;
-                continue;
-            };
-            // Datagram materializes lazily: sessions whose guests all
-            // vanished allocate nothing.
-            let mut m: Option<MessageBuf> = None;
-            for (_, id) in &jobs[i..j] {
-                let Some(g) = self.world.guests.get(id) else {
-                    continue;
+            GuestKind::Animal { species } => {
+                let Some(sp) = crate::state::Species::from_index(*species) else {
+                    return;
                 };
-                // Statics have no pose (OD_RES alone renders them): an
-                // empty layer list would carry the same bare-0xFFFF defect
-                // the session-34 probe caught in the spawn block.
-                if matches!(g.kind, GuestKind::Static { .. }) {
-                    continue;
-                }
-                let frame = g.frame;
-                let moving = g.moving;
-                let facing = g.facing;
-                let kind = &g.kind;
-                let mm = m.get_or_insert_with(|| MessageBuf::with_capacity(256));
-                mm.uint8(MSG_OBJDATA)
-                    .uint8(0)
-                    .int32(*id)
-                    .int32(frame as i32)
-                    .uint8(OD_LAYERS);
-                match kind {
-                    GuestKind::Player { equip, .. } => {
-                        let base = "gfx/borka/body";
-                        let bi = self.world.res.intern(base);
-                        mm.uint16(out.res.wire_named(bi, base));
-                        for part in avatar_pose_layers(moving, facing) {
-                            let gi = self.world.res.intern(part);
-                            mm.uint16(out.res.wire_named(gi, part));
-                        }
-                        // equip names are leaked already; no GuestGob clone.
-                        let equip_static: Vec<&'static str> =
-                            equip.iter().map(|s| leak_static(s)).collect();
-                        for part in crate::equip::world_layers(&equip_static, moving, facing) {
-                            let gi = self.world.res.intern(part);
-                            mm.uint16(out.res.wire_named(gi, part));
-                        }
-                        mm.uint16(65535);
-                    }
-                    GuestKind::Animal { species } => {
-                        let Some(sp) = crate::state::Species::from_index(*species) else {
-                            continue;
-                        };
-                        let base = kritter_base(sp);
-                        let bi = self.world.res.intern(base);
-                        mm.uint16(out.res.wire_named(bi, base));
-                        let part = kritter_pose_layer(sp, moving, facing);
-                        let gi = self.world.res.intern(part);
-                        mm.uint16(out.res.wire_named(gi, part));
-                        mm.uint16(65535);
-                    }
-                    GuestKind::Static { .. } => {}
-                }
-                mm.uint8(OD_END);
+                (
+                    kritter_base(sp),
+                    vec![kritter_pose_layer(sp, moving, facing)],
+                )
             }
-            if let Some(m) = m {
-                out.send_raw(m.finish());
-            }
-            i = j;
+            GuestKind::Static { .. } => return,
+        };
+        let base_global = self.world.res.intern(base_name);
+        // Headerless block: [fl][id][frame][OD_LAYERS][wire u16 xN][ffff]
+        // [ff]; every wire slot is a global-index placeholder recorded
+        // as a patch entry (offset 9 = fl+id+frame, then +1 for
+        // OD_LAYERS).
+        let mut m = MessageBuf::new();
+        m.uint8(0).int32(id).int32(frame as i32).uint8(OD_LAYERS);
+        let mut entries: Vec<(u16, u32)> = Vec::with_capacity(layer_names.len() + 1);
+        entries.push((base_global, m.len() as u32));
+        m.uint16(base_global);
+        for n in &layer_names {
+            let gi = self.world.res.intern(n);
+            entries.push((gi, m.len() as u32));
+            m.uint16(gi);
         }
+        m.uint16(65535).uint8(OD_END);
+        self.start_scratch.push_patched(
+            id,
+            frame,
+            crate::visidx::cell_of(pos.0, pos.1),
+            true,
+            Some(crate::move_batch::Patch::Many { entries }),
+            &m.finish(),
+        );
     }
 
     // Player commands
