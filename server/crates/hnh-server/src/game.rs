@@ -18875,6 +18875,71 @@ mod tests {
     // "Feeding: troughs and grazing").
     // ------------------------------------------------------------------
 
+    /// The full build flow: arm the trough pagina, place the plan on a
+    /// free tile in reach, sink the branch demand through the REAL
+    /// material path, and confirm complete_plan opened the fodder
+    /// store (empty, the doc's 200-unit cap open for loading).
+    #[tokio::test]
+    async fn trough_build_flow_opens_fodder_store() {
+        let (mut g, _rx, _raw) = entered_game("s48buildflow");
+        let trough_spec = crate::build::buildable_by_ad("trough").unwrap();
+        // Arm the pagina and place the plan at the player's own tile
+        // (in reach by definition).
+        g.arm_build_placement(1, trough_spec);
+        let pslot = g.world.gobs.get(pgob_of(&g)).unwrap();
+        let (px, py) = g.world.gobs.pos[pslot];
+        // Force the home tile to grass: build placement refuses
+        // impassable terrain, and the seed's spawn spot is not
+        // guaranteed walkable.
+        force_tile(&mut g, (px, py), hnh_world::gen::tile::GRASS);
+        let (mx, my) = (px.div_euclid(11) * 11 + 5, py.div_euclid(11) * 11 + 5);
+        g.on_map_place(
+            1,
+            &[
+                hnh_proto::ListArg::Coord(mx, my),
+                hnh_proto::ListArg::Int(1),
+                hnh_proto::ListArg::Int(0),
+            ],
+        );
+        assert_eq!(g.world.plans.len(), 1, "the plan placed");
+        let gob = *g.world.plans.keys().next().unwrap();
+        assert!(
+            matches!(
+                g.world.gobs.kind[g.world.gobs.get(gob).unwrap()],
+                Kind::Plan { spec: 2, .. }
+            ),
+            "the plan carries the trough spec"
+        );
+        // Sink the demand (branch x4) through the material path.
+        let branch = g.world.res.intern("gfx/invobjs/branch");
+        g.sink_material(
+            1,
+            gob,
+            crate::state::InvStack {
+                res: branch,
+                count: 4,
+                ql: 10,
+                label: "",
+            },
+        );
+        assert!(g.world.plans.is_empty(), "the demand is fully credited");
+        assert_eq!(g.world.plans.len(), 0);
+        assert!(
+            matches!(
+                g.world.gobs.kind[g.world.gobs.get(gob).unwrap()],
+                Kind::Structure { spec: 2 }
+            ),
+            "the plan finished as a trough structure"
+        );
+        let trough = g
+            .world
+            .troughs
+            .get(&gob)
+            .expect("complete_plan opened the fodder store");
+        assert_eq!(trough.units, 0, "the store starts empty");
+        assert_eq!(trough.avg_ql(), 10, "the quality baseline is q10");
+    }
+
     /// Spawn a completed Food Trough at a subtile offset from the
     /// player, the way `complete_plan` would leave it.
     fn built_trough(g: &mut Game, units: u32, ql_sum: u64, ql_seen: u64) -> GobId {

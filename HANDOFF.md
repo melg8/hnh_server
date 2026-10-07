@@ -3254,10 +3254,12 @@ WHAT:
   save loads under the v7 binary (verified on the live server: the
   repo save with 4 chars loaded cleanly).
 
-EVIDENCE: 274 unit tests green (7 new: fodder table, trough quality
+EVIDENCE: 275 unit tests green (8 new: fodder table, trough quality
 averaging + take, trough itemact load/refusal/cap, trough feeding
 production + drain, radius bounds + grazing fallback, starvation
-death teardown, trough + feeding persistence roundtrip), clippy -D
+death teardown, trough + feeding persistence roundtrip, plus the full
+build-flow test (pagina arm -> place -> sink branch x4 -> fodder
+store opens)), clippy -D
 warnings clean, fmt clean. Release binary probe: WORLD ENTRY OK
 (save v6 file loaded by the v7 code path). Commits pushed to
 origin/master.
