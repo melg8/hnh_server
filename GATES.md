@@ -1,50 +1,55 @@
-# Session 45 Gates
+# Session 46 Gates
 
-Scope: close the session-44 NEXT trust gap (the real GL client e2e
-against the post-wire-fix batched datagram format), the crafting
-gear-chain gap, the carried Windows smoke, and the post-fix load
-re-measurement.
+Scope: close the session-45 NEXT taming-depth items that are verifiable
+in this environment (Animal Husbandry skill gate, battle-intensity
+de-escalation, species morph at full tameness) plus the carried recipe
+tool/station plumbing. Weapon-slot-only rope check is NOT gated here:
+slot semantics need real-client verification and stay documented as
+policy (any equipped slot) - see animals-and-husbandry.md.
 
-## G1: full unit battery + clippy + fmt stay green
+unlazy note: the caller requested "tree 99". Depth 99 would create
+filler leaves; per the method, the closest honest decomposition for a
+single 2-hour session is this solo ledger with independently runnable
+gates.
+
+## G1: the unit battery, fmt and clippy stay green
 
 Runnable.
   CHECK: cd server && cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test --release
-  EXPECT: test result: ok (247 tests)
+  EXPECT: test result: ok (258 tests)
 
-## G2: the REAL GL client passes the full e2e loop on the session-44 wire format
-
-Runnable.
-  CHECK: cd /home/z/my-project/hnh_server && bash scripts/jogl/run-real-client-e2e.sh driveuser s45g
-  EXPECT: client log has MOVEMENT: MOVED, WALKDIR legs ARRIVED,
-  EQUIPVIS VERDICT: OK, GROUNDDROP DUMP, and zero
-  Exception|PaginaException lines; screenshots saved under /tmp.
-
-## G3: wire probes on the final release binary
+## G2: the Animal Husbandry skill gates both purchase and quell
 
 Runnable.
-  CHECK: cd server && python3 scripts/test_client.py g3 && python3 scripts/probe_walk.py && python3 scripts/probe_melee.py
-  EXPECT: WORLD ENTRY: OK; MOVE PROBE: OK; MELEE WIRE: OK
+  CHECK: cd server && cargo test --release -- skills:: ahusb
+  EXPECT: ahusb tests pass (prereq enforced in buy, quell refuses without the skill)
 
-## G4: the gear-chain recipes are wired and pack-verified
-
-Runnable.
-  CHECK: cd server && cargo test --release gear_chain
-  EXPECT: gear_chain_recipes_are_wired ... ok
-
-## G5: Windows gameres smoke under real PowerShell Core
+## G3: battle intensity de-escalates and gates the quell
 
 Runnable.
-  CHECK: cd /home/z/my-project/hnh_server && bash server/scripts/verify_windows_gameres.sh
-  EXPECT: WIN GAMERES SMOKE: OK (pwsh 7.4.6; pack-repair step ran,
-  corrupt=0)
+  CHECK: cd server && cargo test --release intensity
+  EXPECT: intensity tests pass (rises on blows, de-escalates when calm, quell requires a calm battle)
 
-## G6: cluster load re-measurement inside the tick budget
+## G4: full tameness morphs the species in place
 
 Runnable.
-  CHECK: cd server && bash scripts/verify_session40.sh load-cluster
-  EXPECT: both nodes report steady_p95 below 100000us and panics=0
+  CHECK: cd server && cargo test --release morph
+  EXPECT: morph tests pass (mouflon->sheep, aurochs->cow, resource swap, non-morphing species stay)
 
-## G7: HANDOFF.md session entry + commits pushed
+## G5: tool requirement plumbing and new recipes
 
-Manual. Session 45 entry appended with measured numbers; commits on
-origin/master.
+Runnable.
+  CHECK: cd server && cargo test --release tool_req
+  EXPECT: tool-requirement tests pass (recipe without the tool refuses, with the tool crafts)
+
+## G6: wire probes on the release binary
+
+Runnable.
+  CHECK: cd server && cargo build --release && python3 scripts/test_client.py s46 && python3 scripts/probe_melee.py
+  EXPECT: WORLD ENTRY: OK; MELEE WIRE: OK
+
+## G7: docs + HANDOFF entry + commits pushed
+
+Manual. animals-and-husbandry.md, crafting-and-building.md, skills doc
+updated with session-46 implementation notes; HANDOFF.md entry appended;
+commits on origin/master.

@@ -159,6 +159,14 @@ pub struct Recipe {
     /// Attribute used as the quality softcap skill (loftar rule: if the
     /// "skill" quality is below the ingredient average, the two are averaged).
     pub softcap_attr: &'static str,
+    /// Tool resource that must be held in the inventory or equipment for
+    /// the craft to fire (session 46 tool plumbing; the craft pagina
+    /// "prereq" code is the advisory hint - e.g. the bucket pagina's
+    /// "crp" carpentry prereq pairs with the saw here). `None` = hands.
+    /// Server policy: the legacy per-recipe tool lists are not
+    /// recoverable from this pack, so tool fields are chosen per recipe
+    /// and recorded in crafting-and-building.md Open questions.
+    pub tool: Option<&'static str>,
     /// Per-INPUT-TYPE quality weights (RoB Legacy:Quality: `q = sum(q_i * w_i)
     /// / sum(w_i)` over ingredient TYPES). Empty = weight by consumed UNIT
     /// count (the pre-session-36 behavior). Per-type weights decouple the
@@ -191,6 +199,7 @@ pub const RECIPES: &[Recipe] = &[
         outputs: &[("gfx/invobjs/axe", 1)],
         pagina: "paginae/craft/axe",
         softcap_attr: "str",
+        tool: None,
         q_weights: &[],
     },
     // First armor entry into the economy: two cow hides sew into a hide
@@ -203,6 +212,7 @@ pub const RECIPES: &[Recipe] = &[
         outputs: &[("gfx/invobjs/cloak-hide", 1)],
         pagina: "paginae/craft/hcloak",
         softcap_attr: "dex",
+        tool: None,
         q_weights: &[],
     },
     // Session 36: the bow chain. RoB Legacy:Bow verifies the ingredient
@@ -220,6 +230,7 @@ pub const RECIPES: &[Recipe] = &[
         outputs: &[("gfx/invobjs/bow", 1)],
         pagina: "paginae/craft/woodbow",
         softcap_attr: "ranged",
+        tool: None,
         q_weights: &[1, 1],
     },
     // Stone arrows: RoB Legacy:Quality documents the arrow example as a
@@ -234,6 +245,7 @@ pub const RECIPES: &[Recipe] = &[
         outputs: &[("gfx/invobjs/arrow-stone", 10)],
         pagina: "paginae/craft/stonearrow",
         softcap_attr: "survive",
+        tool: None,
         q_weights: &[1, 2],
     },
     // Bone arrows: same weighted model as stone arrows (RoB Legacy:Quality
@@ -246,6 +258,7 @@ pub const RECIPES: &[Recipe] = &[
         outputs: &[("gfx/invobjs/arrow-bone", 10)],
         pagina: "paginae/craft/bonearrow",
         softcap_attr: "survive",
+        tool: None,
         q_weights: &[1, 2],
     },
     // Session 37: the quiver. The craft pagina (paginae/craft/quiver,
@@ -263,6 +276,7 @@ pub const RECIPES: &[Recipe] = &[
         outputs: &[("gfx/invobjs/quiver", 1)],
         pagina: "paginae/craft/quiver",
         softcap_attr: "ranged",
+        tool: None,
         q_weights: &[1, 1],
     },
     // Session 45: the gear-chain batch - four previously unreachable pack
@@ -283,6 +297,7 @@ pub const RECIPES: &[Recipe] = &[
         outputs: &[("gfx/invobjs/rope", 1)],
         pagina: "paginae/craft/rope",
         softcap_attr: "survive",
+        tool: None,
         q_weights: &[1],
     },
     Recipe {
@@ -292,6 +307,7 @@ pub const RECIPES: &[Recipe] = &[
         outputs: &[("gfx/invobjs/waterskin", 1)],
         pagina: "paginae/craft/waterskin",
         softcap_attr: "sewing",
+        tool: None,
         q_weights: &[2, 1],
     },
     Recipe {
@@ -301,6 +317,7 @@ pub const RECIPES: &[Recipe] = &[
         outputs: &[("gfx/invobjs/backpack", 1)],
         pagina: "paginae/craft/backpack",
         softcap_attr: "sewing",
+        tool: None,
         q_weights: &[2, 1],
     },
     Recipe {
@@ -310,7 +327,69 @@ pub const RECIPES: &[Recipe] = &[
         outputs: &[("gfx/invobjs/belt-poor", 1)],
         pagina: "paginae/craft/poorbelt",
         softcap_attr: "sewing",
+        tool: None,
         q_weights: &[2, 1],
+    },
+    // Session 46: the cloth chain (wool -> yarn -> linen cloth -> wearable
+    // shirt/pants) plus the bucket. Every pagina id comes from the shipped
+    // action layers (ad = ["craft", id], verified by scanning the res
+    // bytes: yarn/linencloth/linenpants/linenshirt/bucket), and every
+    // input/output invobj resource ships in the pack. Wool enters the
+    // economy through the session-46 sheep/mouflon loot rows (state.rs).
+    // Unit counts are chosen server policy pending legacy verification
+    // (crafting-and-building.md Open questions).
+    Recipe {
+        id: "yarn",
+        name: "Yarn",
+        inputs: &[("gfx/invobjs/wool", 1)],
+        outputs: &[("gfx/invobjs/yarn", 1)],
+        pagina: "paginae/craft/yarn",
+        softcap_attr: "sewing",
+        tool: None,
+        q_weights: &[1],
+    },
+    Recipe {
+        id: "cloth",
+        name: "Linen Cloth",
+        inputs: &[("gfx/invobjs/yarn", 2)],
+        outputs: &[("gfx/invobjs/linencloth", 1)],
+        pagina: "paginae/craft/linencloth",
+        softcap_attr: "sewing",
+        tool: None,
+        q_weights: &[1],
+    },
+    Recipe {
+        id: "shirt",
+        name: "Linen shirt",
+        inputs: &[("gfx/invobjs/linencloth", 3)],
+        outputs: &[("gfx/invobjs/linenshirt", 1)],
+        pagina: "paginae/craft/linenshirt",
+        softcap_attr: "sewing",
+        tool: None,
+        q_weights: &[1],
+    },
+    Recipe {
+        id: "pants",
+        name: "Linen pants",
+        inputs: &[("gfx/invobjs/linencloth", 3)],
+        outputs: &[("gfx/invobjs/linenpants", 1)],
+        pagina: "paginae/craft/linenpants",
+        softcap_attr: "sewing",
+        tool: None,
+        q_weights: &[1],
+    },
+    // The bucket pagina pins ad ["craft", "bucket"] with the carpentry
+    // ("crp") prereq code; the saw is the matching tool (server policy).
+    // The empty bucket resource is gfx/invobjs/buckete.
+    Recipe {
+        id: "bucket",
+        name: "Bucket",
+        inputs: &[("gfx/invobjs/branch", 3)],
+        outputs: &[("gfx/invobjs/buckete", 1)],
+        pagina: "paginae/craft/bucket",
+        softcap_attr: "carpentry",
+        tool: Some("gfx/invobjs/saw"),
+        q_weights: &[1],
     },
 ];
 
@@ -613,5 +692,105 @@ Peapod=STR:0.1 PER:0.9
             bpk.iter().any(|l| l.contains("backpack")),
             "backpack layers: {bpk:?}"
         );
+    }
+
+    /// Session 46: the cloth chain + bucket recipes are wired (pagina
+    /// ids verified against the shipped action layers), the sheep loot
+    /// feeds the wool input, the two wearables render through the
+    /// PIECES table, and the bucket pins the saw tool requirement.
+    #[test]
+    fn cloth_chain_and_bucket_are_wired() {
+        for (id, pagina, softcap, tool) in [
+            ("yarn", "paginae/craft/yarn", "sewing", None),
+            ("cloth", "paginae/craft/linencloth", "sewing", None),
+            ("shirt", "paginae/craft/linenshirt", "sewing", None),
+            ("pants", "paginae/craft/linenpants", "sewing", None),
+            (
+                "bucket",
+                "paginae/craft/bucket",
+                "carpentry",
+                Some("gfx/invobjs/saw"),
+            ),
+        ] {
+            let r = RECIPES
+                .iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("{id} must be registered"));
+            assert_eq!(r.pagina, pagina, "{id} pagina id");
+            assert_eq!(r.softcap_attr, softcap, "{id} softcap");
+            assert_eq!(r.tool, tool, "{id} tool requirement");
+            assert!(!r.inputs.is_empty() && !r.outputs.is_empty(), "{id} shaped");
+        }
+        // The wool -> yarn -> cloth -> wearable chain has no dead ends:
+        // every non-terminal output is the next stage's input resource.
+        for (made, consumed_by) in [
+            ("gfx/invobjs/yarn", "cloth"),
+            ("gfx/invobjs/linencloth", "shirt"),
+        ] {
+            assert!(
+                RECIPES
+                    .iter()
+                    .any(|r| r.id == consumed_by && r.inputs.iter().any(|(res, _)| *res == made)),
+                "{made} must feed {consumed_by}"
+            );
+        }
+        // Sheep/mouflon loot carries the wool that starts the chain.
+        for sp in [crate::state::Species::Mouflon, crate::state::Species::Sheep] {
+            let loot = sp.loot();
+            assert!(
+                loot.iter().any(|(res, _, _)| *res == "gfx/invobjs/wool"),
+                "{sp:?} must drop wool"
+            );
+        }
+        // The two wearables render on the avatar through PIECES.
+        let shirt = crate::equip::world_layers(["gfx/invobjs/linenshirt"].iter(), false, 1);
+        assert!(
+            shirt.iter().any(|l| l.contains("shirt-linen")),
+            "linen shirt layers: {shirt:?}"
+        );
+        let pants = crate::equip::world_layers(["gfx/invobjs/linenpants"].iter(), false, 1);
+        assert!(
+            pants.iter().any(|l| l.contains("pants-linen")),
+            "linen pants layers: {pants:?}"
+        );
+        // Every new input/output/pagina resource ships in the pack
+        // (skip when the pack is absent from the test sandbox).
+        let pack = std::path::Path::new("../../gameres");
+        if pack.is_dir() {
+            for id in ["yarn", "cloth", "shirt", "pants", "bucket"] {
+                let rec = RECIPES.iter().find(|x| x.id == id).unwrap();
+                assert!(
+                    pack.join(format!("{}.res", rec.pagina)).exists(),
+                    "{} res shipped",
+                    rec.pagina
+                );
+                for (res, _) in rec.inputs.iter().chain(rec.outputs.iter()) {
+                    assert!(pack.join(format!("{res}.res")).exists(), "{res} shipped");
+                }
+            }
+            assert!(
+                pack.join("gfx/invobjs/saw.res").exists(),
+                "bucket tool resource shipped"
+            );
+        }
+    }
+
+    /// Species morphology table (session 46): the doc's morph pairs that
+    /// the 2009 pack can render; the boar stays a boar (no pig kritter).
+    #[test]
+    fn species_morphs_follow_the_doc() {
+        use crate::state::Species;
+        assert_eq!(Species::Mouflon.morph(), Some(Species::Sheep));
+        assert_eq!(Species::Aurochs.morph(), Some(Species::Cow));
+        assert_eq!(Species::Boar.morph(), None, "no pig drawable in the pack");
+        assert_eq!(Species::Sheep.morph(), None, "domestic forms do not morph");
+        assert_eq!(Species::Cow.morph(), None);
+        // Wire indices stay append-only for the node link.
+        assert_eq!(Species::Mouflon.index(), 7);
+        assert_eq!(Species::Sheep.index(), 8);
+        assert_eq!(Species::from_index(7), Some(Species::Mouflon));
+        assert_eq!(Species::from_index(8), Some(Species::Sheep));
+        // The sheep family drops Raw Mutton (fep.conf verified).
+        assert_eq!(Species::Sheep.meat_label(), "Raw Mutton");
     }
 }

@@ -40,6 +40,10 @@ pub struct SkillDef {
     /// Chat line shown on purchase (the resource tooltip is client-side
     /// art; the server needs its own readable label).
     pub label: &'static str,
+    /// Catalog name that must already be owned before this skill can be
+    /// bought (docs: Animal Husbandry "requires Hunting", 400 LP).
+    /// `None` = no prerequisite.
+    pub prereq: Option<&'static str>,
 }
 
 /// The purchasable skill catalog. Names are restricted to resources
@@ -49,53 +53,67 @@ pub struct SkillDef {
 /// client and the wiki carries no verifiable table for this fork — the
 /// chosen values keep one farming point affordable from the fresh-char
 /// wallet (see the doc's server notes).
-pub const CATALOG: [SkillDef; 8] = [
+///
+/// Session 46: `ahusb` (Animal Husbandry) joins the catalog. The doc
+/// cites the legacy cost (400 LP) and prerequisite (requires Hunting);
+/// `gfx/hud/skills/ahusb.res` ships in the pack so the nsk list can
+/// render it. It gates Quell the Beast (animals-and-husbandry.md).
+pub const CATALOG: [SkillDef; 9] = [
     SkillDef {
         name: "forage",
         cost: 100,
         label: "Foraging",
+        prereq: None,
     },
     SkillDef {
         name: "fishing",
         cost: 100,
         label: "Fishing",
+        prereq: None,
     },
     SkillDef {
         name: "tools",
         cost: 120,
         label: "Tools",
+        prereq: None,
     },
     SkillDef {
         name: "lumber",
         cost: 120,
         label: "Lumberjacking",
+        prereq: None,
     },
     SkillDef {
         name: "hunting",
         cost: 150,
         label: "Hunting",
+        prereq: None,
     },
     SkillDef {
         name: "masonry",
         cost: 150,
         label: "Masonry",
+        prereq: None,
     },
     SkillDef {
         name: "metal",
         cost: 200,
         label: "Metal Working",
+        prereq: None,
     },
     SkillDef {
         name: "cheese",
         cost: 200,
         label: "Cheese Making",
+        prereq: None,
+    },
+    SkillDef {
+        name: "ahusb",
+        cost: 400,
+        label: "Animal Husbandry",
+        prereq: Some("hunting"),
     },
 ];
-
-/// Lookup a catalog entry by the basename the client sends in `buy`.
-pub fn catalog_get(name: &str) -> Option<&'static SkillDef> {
-    CATALOG.iter().find(|s| s.name == name)
-}
 
 /// Why a purchase failed (rendered as a chat system line).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +121,14 @@ pub enum BuyError {
     Unknown,
     Owned,
     TooExpensive,
+    /// The prerequisite skill is not owned (session 46: ahusb needs
+    /// hunting, per the documented legacy prerequisite list).
+    Prerequisite,
+}
+
+/// Lookup a catalog entry by the basename the client sends in `buy`.
+pub fn catalog_get(name: &str) -> Option<&'static SkillDef> {
+    CATALOG.iter().find(|s| s.name == name)
 }
 
 /// Charge `cost` LP and record the skill. Pure so the wire handler stays
@@ -116,6 +142,11 @@ pub fn buy(
     if owned.contains(def.name) {
         return Err(BuyError::Owned);
     }
+    if let Some(prereq) = def.prereq {
+        if !owned.contains(prereq) {
+            return Err(BuyError::Prerequisite);
+        }
+    }
     // NOTE: checked_sub is the wrong tool here — 90 - 200 = -110 is a valid
     // i32, so the wallet would go negative without ever overflowing. The
     // guard must be the domain rule "wallet may not go below zero".
@@ -125,6 +156,12 @@ pub fn buy(
     *lp -= def.cost; // bounded by the check above
     owned.insert(def.name);
     Ok(def)
+}
+
+/// True when the skill set unlocks Quell the Beast (session 46): the
+/// Animal Husbandry skill must be owned (animals-and-husbandry.md step 1).
+pub fn can_quell(owned: &HashSet<&'static str>) -> bool {
+    owned.contains("ahusb")
 }
 
 /// Legacy sattr cost curve: raising `v` to `v+1` costs `100 * (v+1)` LP
@@ -243,6 +280,43 @@ mod tests {
         assert_eq!(buy(&mut owned, &mut lp, "forage"), Err(BuyError::Owned));
         // No partial charges on any refusal path.
         assert_eq!(lp, 90);
+    }
+
+    /// Session 46: the Animal Husbandry skill ships with the documented
+    /// legacy cost (400 LP) and prerequisite (requires Hunting), and the
+    /// prerequisite is enforced in buy() before any LP charge.
+    #[test]
+    fn ahusb_needs_hunting_and_costs_400() {
+        let def = catalog_get("ahusb").expect("ahusb in the catalog");
+        assert_eq!(def.cost, 400);
+        assert_eq!(def.prereq, Some("hunting"));
+        // Without hunting: refused, wallet untouched.
+        let mut owned = HashSet::new();
+        let mut lp = 1000;
+        assert_eq!(
+            buy(&mut owned, &mut lp, "ahusb"),
+            Err(BuyError::Prerequisite)
+        );
+        assert_eq!(lp, 1000);
+        assert!(!owned.contains("ahusb"));
+        // Hunting alone is affordable at the wallet but still not ahusb.
+        assert_eq!(
+            buy(&mut owned, &mut lp, "hunting"),
+            Ok(catalog_get("hunting").unwrap())
+        );
+        // With hunting: the purchase lands at the full cost.
+        assert_eq!(buy(&mut owned, &mut lp, "ahusb"), Ok(def));
+        assert_eq!(lp, 450, "1000 - 150 hunting - 400 ahusb");
+        assert!(owned.contains("ahusb"));
+    }
+
+    /// The quell gate reads exactly the AH-skill condition.
+    #[test]
+    fn can_quell_tracks_the_ahusb_skill() {
+        let mut owned = HashSet::new();
+        assert!(!can_quell(&owned));
+        assert!(owned.insert("ahusb"));
+        assert!(can_quell(&owned));
     }
 
     #[test]

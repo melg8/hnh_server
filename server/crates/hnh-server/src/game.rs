@@ -114,15 +114,19 @@ struct PoseTable {
     /// The equipment-window doll set (banzai arms, camera facing).
     doll: [&'static str; 6],
     /// [species][pose][dir], one body part per kritter pose.
-    kritter: [[[&'static str; 8]; 2]; 7],
+    kritter: [[[&'static str; 8]; 2]; 9],
     /// [species] pose-router base resources.
-    kritter_base: [&'static str; 7],
+    kritter_base: [&'static str; 9],
 }
 
 static POSES: std::sync::OnceLock<PoseTable> = std::sync::OnceLock::new();
 
 /// Species index order must mirror the enum declaration order (state.rs).
-const SPECIES_FOLDERS: [&str; 7] = ["deer", "fox", "wolf", "boar", "cow", "hare", "aurochs"];
+/// Session 46 appends the mufflon (the pack's directory spelling) and
+/// the sheep - both ship body pose directories like the original seven.
+const SPECIES_FOLDERS: [&str; 9] = [
+    "deer", "fox", "wolf", "boar", "cow", "hare", "aurochs", "mufflon", "sheep",
+];
 
 impl PoseTable {
     fn build() -> PoseTable {
@@ -141,7 +145,7 @@ impl PoseTable {
                 }
             }
         }
-        let mut kritter: [[[&'static str; 8]; 2]; 7] = Default::default();
+        let mut kritter: [[[&'static str; 8]; 2]; 9] = Default::default();
         for (si, sp) in SPECIES_FOLDERS.into_iter().enumerate() {
             for (pi, pose) in ["standing/standing", "walking/walking"]
                 .into_iter()
@@ -166,6 +170,8 @@ impl PoseTable {
                 "gfx/kritter/cow/body",
                 "gfx/kritter/hare/body",
                 "gfx/kritter/aurochs/body",
+                "gfx/kritter/mufflon/body",
+                "gfx/kritter/sheep/body",
             ],
         }
     }
@@ -5136,6 +5142,14 @@ impl Game {
             Err(crate::skills::BuyError::TooExpensive) => {
                 self.system_line(sid, "Not enough learning points.");
             }
+            Err(crate::skills::BuyError::Prerequisite) => {
+                let def = crate::skills::catalog_get(name);
+                let prereq = def
+                    .and_then(|d| d.prereq)
+                    .and_then(crate::skills::catalog_get);
+                let label = prereq.map(|d| d.label).unwrap_or("another skill");
+                self.system_line(sid, &format!("You need to know {label} first."));
+            }
         }
         self.push_lp_msgs(sid);
     }
@@ -5235,6 +5249,7 @@ impl Game {
                 crate::state::AnimalFight {
                     off: 0,
                     def: crate::fight::BAR_FULL,
+                    intensity: 0,
                 },
             );
             info!(sid, target, ?species, "relay fight started");
@@ -5251,6 +5266,7 @@ impl Game {
             .or_insert_with(|| crate::state::AnimalFight {
                 off: 0,
                 def: crate::fight::BAR_FULL,
+                intensity: 0,
             });
         info!(sid, target, ?species, "fight started");
     }
@@ -5292,6 +5308,7 @@ impl Game {
                 .or_insert_with(|| crate::state::AnimalFight {
                     off: 0,
                     def: crate::fight::BAR_FULL,
+                    intensity: 0,
                 });
             self.chat_line(sid, &format!("You attack {vname}!"), Some((255, 200, 128)));
             info!(sid, target, "pvp relay duel started");
@@ -7980,6 +7997,27 @@ impl Game {
         let Some(pidx) = self.world.by_session.get(&sid).copied() else {
             return false;
         };
+        // Tool requirement (session 46): the recipe's tool resource must
+        // sit in the inventory or any equipment slot. Checked before the
+        // consume pass so a refusal never destroys ingredients.
+        if let Some(tool) = recipe.tool {
+            let tool_gidx = self.world.res.intern(tool);
+            let inv_has = self.world.players[pidx]
+                .inv
+                .iter()
+                .any(|s| s.res == tool_gidx);
+            let equip_has = self.world.players[pidx]
+                .equip
+                .iter()
+                .flatten()
+                .any(|s| s.res == tool_gidx);
+            if !inv_has && !equip_has {
+                let tool_name = self.world.res.name(tool_gidx).unwrap_or(tool);
+                let msg = format!("You need the {} to make that.", tool_name);
+                self.chat_line(sid, &msg, Some((255, 128, 128)));
+                return false;
+            }
+        }
         // Validate: every input present in the required quantity.
         for (resname, need) in recipe.inputs {
             let gidx = self.world.res.intern(resname);
@@ -9238,6 +9276,15 @@ impl Game {
         }
         let combat_index_us = t_ix.elapsed().as_micros() as u64;
 
+        // --- battle-intensity de-escalation (session 46) ---
+        // Jorb's quell prerequisite list (animals-and-husbandry.md) needs
+        // "battle intensity reduced to 0": every combat tick without a
+        // landed blow cools each fight a little. One O(fights) pass; the
+        // per-blow raises live in the two bite/damage paths.
+        for af in self.world.animal_fights.values_mut() {
+            af.intensity = (af.intensity - crate::state::INTENSITY_DECAY).max(0);
+        }
+
         // --- player side: offence gen, swings, bar streaming ---
         // Event counters split the phase cost inside the loop (the
         // session-43 load run measured an 18 ms player-phase mean; these
@@ -9577,7 +9624,8 @@ impl Game {
                     let weight = (rel.balance.clamp(-5, 5) as f32) * 0.1 + 1.0;
                     let def_chip = (crate::fight::SWING_DEF_DMG as f32 * weight) as i32;
                     // Chip the animal's defence in the World store (the mirror
-                    // source); rel.defence streams it to the client.
+                    // source); rel.defence streams it to the client. A landed
+                    // swing also heats the battle (quell needs a calm beast).
                     let (_, landed) = {
                         let Some(af) = self.world.animal_fights.get_mut(&target) else {
                             continue;
@@ -9587,6 +9635,8 @@ impl Game {
                         let landed = breaking || af.def <= crate::fight::OPENING_THRESHOLD;
                         if landed {
                             af.def = crate::fight::BAR_FULL;
+                            af.intensity = (af.intensity + crate::state::INTENSITY_PER_BLOW)
+                                .min(crate::fight::BAR_FULL);
                         }
                         (breaking, landed)
                     };
@@ -9714,6 +9764,11 @@ impl Game {
                     }
                 }
                 if let Some(dmg) = bite {
+                    // The beast's landed bite heats the battle too.
+                    if let Some(af) = self.world.animal_fights.get_mut(&id) {
+                        af.intensity = (af.intensity + crate::state::INTENSITY_PER_BLOW)
+                            .min(crate::fight::BAR_FULL);
+                    }
                     self.hurt_player(pidx, dmg, id);
                     // Attack animation: the one-shot bite FX overlay on the
                     // victim (8-frame anim in the resource; the client removes
@@ -9880,13 +9935,18 @@ impl Game {
     // Taming (session 45; animals-and-husbandry.md taming service)
     // ------------------------------------------------------------------
 
-    /// Quell target gate: local animal, rope equipped, this tamer's rope
-    /// not already bound to a partially-tamed beast, and the beast not
+    /// Quell target gate: local animal, Animal Husbandry skill, rope
+    /// equipped, a calm battle (intensity 0), this tamer's rope not
+    /// already bound to a partially-tamed beast, and the beast not
     /// already tamed. Returns the refusal reason or None.
     fn quell_gate(&mut self, pidx: usize, target: GobId) -> Option<String> {
         let tslot = self.world.gobs.get(target)?;
         if !matches!(self.world.gobs.kind[tslot], Kind::Animal { .. }) {
             return Some("You can only quell an animal.".to_owned());
+        }
+        // Docs step 1: the tamer needs the Animal Husbandry skill.
+        if !crate::skills::can_quell(&self.world.players[pidx].skills) {
+            return Some("You need the Animal Husbandry skill to quell a beast.".to_owned());
         }
         // Cross-node guest animals keep their authority on the owner node:
         // the MVP resolves quells on the local authority only.
@@ -9898,6 +9958,13 @@ impl Game {
         }
         if !self.rope_equipped(pidx) {
             return Some("You need a rope equipped to quell a beast.".to_owned());
+        }
+        // Docs step 2 (Jorb's list): battle intensity reduced to 0. A hot
+        // fight must cool down first - stop swinging and wait.
+        if let Some(af) = self.world.animal_fights.get(&target) {
+            if af.intensity > 0 {
+                return Some("The battle is too heated for the beast to quell.".to_owned());
+            }
         }
         // The rope binds to one animal until it turns hostile again
         // (tameness reaches full = permanently tame, binding ends).
@@ -9980,12 +10047,67 @@ impl Game {
             Some((255, 255, 128)),
         );
         if full {
+            // Docs step 6: at 100 tameness the animal "metamorphoses" in
+            // place into its domestic morph, still following the tamer.
+            let morphed = self.apply_species_morph(target).is_some();
             self.chat_line(
                 sid,
-                &format!("The {label} is fully tamed and stays by your side."),
+                if morphed {
+                    "The beast settles into its domestic form."
+                } else {
+                    "The beast is fully tamed and stays by your side."
+                },
                 Some((255, 255, 128)),
             );
         }
+    }
+
+    /// Swap one animal's species at full tameness (session 46): rewrite
+    /// the Kind, the drawable resource and the vitals, then broadcast
+    /// OD_RES so every viewer re-renders the sprite in place (the client
+    /// path is OCache.cres -> ResDrawable reset; Session.java OD_RES = 2).
+    /// Returns the new species, or None when the species does not morph
+    /// (the 2009 pack ships no pig drawable - documented policy).
+    fn apply_species_morph(&mut self, id: GobId) -> Option<crate::state::Species> {
+        let slot = self.world.gobs.get(id)?;
+        let Kind::Animal { species } = self.world.gobs.kind[slot] else {
+            return None;
+        };
+        let new_species = species.morph()?;
+        let res_idx = self.world.res.intern(new_species.resname());
+        self.world.gobs.kind[slot] = Kind::Animal {
+            species: new_species,
+        };
+        self.world.gobs.res_idx[slot] = res_idx;
+        self.world.gobs.max_hp[slot] = new_species.max_hp();
+        self.world.gobs.hp[slot] = self.world.gobs.hp[slot].min(new_species.max_hp());
+        self.world.gobs.speed[slot] = new_species.speed();
+        // OD_RES re-render for every viewer through the packed start
+        // batch: one encoded block, the wire id patched per session
+        // (same pattern as the FX overlay fan-out).
+        let frame = self.world.gobs.frame[slot];
+        let (px, py) = self.world.gobs.pos[slot];
+        // Headerless block: [fl][id(4)][frame(4)][OD_RES][wire(2) <- patch][OD_END].
+        let patch_off = 1 + 4 + 4 + 1;
+        let mut m = MessageBuf::new();
+        m.uint8(0)
+            .int32(id)
+            .int32(frame as i32)
+            .uint8(OD_RES)
+            .uint16(res_idx)
+            .uint8(OD_END);
+        self.start_scratch.push_patched(
+            id,
+            frame,
+            crate::visidx::cell_of(px, py),
+            true,
+            Some(crate::move_batch::Patch::One {
+                slot: [(res_idx, patch_off)],
+            }),
+            &m.finish(),
+        );
+        self.world.perf.fx_batch_n += 1;
+        Some(new_species)
     }
 
     /// Broadcast an OD_FOLLOW block for one gob (leash rendering). Gob
@@ -10592,6 +10714,7 @@ impl Game {
                 crate::state::AnimalFight {
                     off: 0,
                     def: crate::fight::BAR_FULL,
+                    intensity: 0,
                 }
             });
             let breaking = af.def <= crate::fight::OPENING_THRESHOLD;
@@ -10599,6 +10722,8 @@ impl Game {
             let landed = breaking || af.def <= crate::fight::OPENING_THRESHOLD;
             if landed {
                 af.def = crate::fight::BAR_FULL;
+                af.intensity =
+                    (af.intensity + crate::state::INTENSITY_PER_BLOW).min(crate::fight::BAR_FULL);
             }
             landed
         };
@@ -17536,6 +17661,34 @@ mod tests {
         });
     }
 
+    /// Grant the Animal Husbandry skill (plus its documented Hunting
+    /// prerequisite) directly into the player's owned set.
+    fn grant_ahusb(g: &mut Game, pidx: usize) {
+        let p = &mut g.world.players[pidx];
+        p.skills.insert("hunting");
+        p.skills.insert("ahusb");
+    }
+
+    /// Spawn one animal of any species at a tile offset from the player.
+    fn spawn_species_at(
+        g: &mut Game,
+        pidx: usize,
+        d: i32,
+        hp: i32,
+        species: Species,
+    ) -> crate::state::GobId {
+        let pgob = g.world.players[pidx].gob;
+        let pslot = g.world.gobs.get(pgob).expect("player gob");
+        let (px, py) = g.world.gobs.pos[pslot];
+        let res = g.world.res.intern(species.resname());
+        let id = g
+            .world
+            .gobs
+            .spawn(Kind::Animal { species }, (px + d, py), res, hp, 33);
+        g.world.animal_gobs.push(id);
+        id
+    }
+
     /// Satisfy the static quell gates (2 IP in the pool, advantage in
     /// the tamer's favor past 3) and queue the quell selection.
     fn arm_quell(g: &mut Game, sid: SessionId, target: GobId) {
@@ -17555,11 +17708,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quell_refuses_without_the_ahusb_skill() {
+        let (mut g, _rx, _raw) = entered_game("tamenoskill");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let deer = spawn_deer_at(&mut g, pidx, 20, Species::Deer.max_hp());
+        g.start_fight(1, deer, Species::Deer);
+        equip_rope(&mut g, pidx);
+        {
+            let out = g.sessions.get_mut(&1).unwrap();
+            let rel = out.fight.rel_mut(deer).unwrap();
+            rel.ip_self = 5;
+            rel.adv = 40;
+            rel.sync_balance();
+        }
+        g.on_maneuver(1, "quell");
+        assert_ne!(
+            g.sessions.get(&1).unwrap().fight.atk_cur,
+            Some("paginae/atk/quell"),
+            "the selection must be refused without the Animal Husbandry skill"
+        );
+        assert!(g.world.tamed.is_empty());
+        // Buying the skill unlocks the same selection.
+        grant_ahusb(&mut g, pidx);
+        arm_quell(&mut g, 1, deer);
+    }
+
+    #[tokio::test]
     async fn quell_refuses_without_a_rope() {
         let (mut g, _rx, _raw) = entered_game("tamenorope");
         let pidx = *g.world.by_session.get(&1).unwrap();
         let deer = spawn_deer_at(&mut g, pidx, 20, Species::Deer.max_hp());
         g.start_fight(1, deer, Species::Deer);
+        grant_ahusb(&mut g, pidx);
         {
             let out = g.sessions.get_mut(&1).unwrap();
             let rel = out.fight.rel_mut(deer).unwrap();
@@ -17576,6 +17756,44 @@ mod tests {
         assert!(g.world.tamed.is_empty());
     }
 
+    /// Jorb's list (docs taming step 2): the battle intensity must be
+    /// reduced to 0 before the quell fires. A landed blow raises it,
+    /// quiet combat ticks cool it back to zero.
+    #[tokio::test]
+    async fn quell_needs_a_calm_battle() {
+        let (mut g, _rx, _raw) = entered_game("tamehot");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let deer = spawn_deer_at(&mut g, pidx, 20, Species::Deer.max_hp());
+        g.start_fight(1, deer, Species::Deer);
+        equip_rope(&mut g, pidx);
+        grant_ahusb(&mut g, pidx);
+        // A hot battle refuses the selection.
+        g.world.animal_fights.get_mut(&deer).unwrap().intensity = crate::state::INTENSITY_PER_BLOW;
+        {
+            let out = g.sessions.get_mut(&1).unwrap();
+            let rel = out.fight.rel_mut(deer).unwrap();
+            rel.ip_self = 5;
+            rel.adv = 40;
+            rel.sync_balance();
+        }
+        g.on_maneuver(1, "quell");
+        assert_ne!(
+            g.sessions.get(&1).unwrap().fight.atk_cur,
+            Some("paginae/atk/quell"),
+            "a heated battle must refuse the quell"
+        );
+        // Quiet ticks de-escalate: ~7s of no blows cools to 0.
+        for _ in 0..10 {
+            g.tick_combat();
+        }
+        assert_eq!(
+            g.world.animal_fights.get(&deer).unwrap().intensity,
+            0,
+            "the battle cools down without blows"
+        );
+        arm_quell(&mut g, 1, deer);
+    }
+
     #[tokio::test]
     async fn quell_tames_and_binds_the_rope() {
         let (mut g, _rx, _raw) = entered_game("tamerone");
@@ -17584,6 +17802,7 @@ mod tests {
         let deer = spawn_deer_at(&mut g, pidx, 20, Species::Deer.max_hp());
         g.start_fight(1, deer, Species::Deer);
         equip_rope(&mut g, pidx);
+        grant_ahusb(&mut g, pidx);
         arm_quell(&mut g, 1, deer);
         // Resolve: one swing cadence later the quell lands.
         g.sessions.get_mut(&1).unwrap().fight.own_off = crate::fight::BAR_FULL;
@@ -17652,5 +17871,110 @@ mod tests {
             g.world.tamed.contains_key(&deer),
             "the sweep must not touch a fully tamed beast"
         );
+    }
+
+    /// Docs taming step 6: at 100 tameness the animal metamorphoses in
+    /// place into its domestic morph (mouflon -> sheep here; the boar
+    /// stays a boar because the 2009 pack ships no pig drawable).
+    #[tokio::test]
+    async fn full_tame_morphs_the_species() {
+        let (mut g, _rx, _raw) = entered_game("tamemorph");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let mouflon = spawn_species_at(
+            &mut g,
+            pidx,
+            20,
+            Species::Mouflon.max_hp(),
+            Species::Mouflon,
+        );
+        let res_before = g.world.gobs.res_idx[g.world.gobs.get(mouflon).unwrap()];
+        // Damage the beast first: the morph must keep the wounded hp but
+        // clamp it into the new species' vitality range.
+        let tslot = g.world.gobs.get(mouflon).unwrap();
+        g.world.gobs.hp[tslot] = 3;
+        for _ in 0..5 {
+            g.apply_quell(pidx, 1, mouflon);
+        }
+        let slot = g.world.gobs.get(mouflon).unwrap();
+        assert!(
+            matches!(
+                g.world.gobs.kind[slot],
+                Kind::Animal {
+                    species: Species::Sheep
+                }
+            ),
+            "the mouflon becomes a sheep at full tameness"
+        );
+        assert_ne!(
+            g.world.gobs.res_idx[slot], res_before,
+            "the drawable resource swaps to the sheep cdv"
+        );
+        assert_eq!(
+            g.world.gobs.res_idx[slot],
+            g.world.res.intern(Species::Sheep.resname()),
+            "the resource index is the sheep cdv"
+        );
+        assert_eq!(g.world.gobs.max_hp[slot], Species::Sheep.max_hp());
+        assert_eq!(g.world.gobs.hp[slot], 3, "the morph does not heal");
+        assert_eq!(g.world.gobs.speed[slot], Species::Sheep.speed());
+        // Tamed sheep keep the wool -> yarn economy flowing.
+        assert!(
+            Species::Sheep
+                .loot()
+                .iter()
+                .any(|(r, _, _)| *r == "gfx/invobjs/wool"),
+            "sheep loot carries wool"
+        );
+    }
+
+    /// The tool requirement (session 46): craft_once refuses a tool
+    /// recipe without the tool and crafts with it, never destroying the
+    /// ingredients on the refusal path.
+    #[tokio::test]
+    async fn bucket_craft_needs_the_saw() {
+        let (mut g, _rx, _raw) = entered_game("sawbucket");
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let branch = g.world.res.intern("gfx/invobjs/branch");
+        let saw = g.world.res.intern("gfx/invobjs/saw");
+        let buckete = g.world.res.intern("gfx/invobjs/buckete");
+        let give = |g: &mut Game, res: u16, n: u32| {
+            g.world.players[pidx].inv.push(crate::state::InvStack {
+                res,
+                count: n,
+                ql: 10,
+                label: "",
+            });
+        };
+        // Ingredients present, tool absent: refuse, nothing consumed
+        // (the starter kit already carries branches - measure the
+        // baseline and compare).
+        give(&mut g, branch, 3);
+        let branch_before = g.world.players[pidx]
+            .inv
+            .iter()
+            .filter(|s| s.res == branch)
+            .map(|s| s.count)
+            .sum::<u32>();
+        assert!(branch_before >= 3, "branches were granted");
+        assert!(!g.craft_once(1, "bucket"), "no saw -> no bucket");
+        let branch_left = g.world.players[pidx]
+            .inv
+            .iter()
+            .filter(|s| s.res == branch)
+            .map(|s| s.count)
+            .sum::<u32>();
+        assert_eq!(
+            branch_left, branch_before,
+            "the refusal must not consume the ingredients"
+        );
+        // With the saw in the inventory the craft lands.
+        give(&mut g, saw, 1);
+        assert!(g.craft_once(1, "bucket"), "saw + branches -> bucket");
+        let bucket = g.world.players[pidx]
+            .inv
+            .iter()
+            .find(|s| s.res == buckete)
+            .expect("bucket produced");
+        assert_eq!(bucket.count, 1);
     }
 }

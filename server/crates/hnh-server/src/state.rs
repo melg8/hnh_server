@@ -57,6 +57,11 @@ pub enum Species {
     Cow,
     Hare,
     Aurochs,
+    /// Session 46: the third tameable wild beast (animals-and-husbandry
+    /// .md taming list). The pack spells the directory "mufflon".
+    Mouflon,
+    /// Domestic morph of the mouflon; never spawns wild.
+    Sheep,
 }
 
 impl Species {
@@ -64,7 +69,7 @@ impl Species {
     /// roster (e.g. the session-36 bone-loot consistency check in
     /// craft.rs).
     #[cfg(test)]
-    pub const ALL: [Species; 7] = [
+    pub const ALL: [Species; 9] = [
         Species::Deer,
         Species::Fox,
         Species::Wolf,
@@ -72,10 +77,14 @@ impl Species {
         Species::Cow,
         Species::Hare,
         Species::Aurochs,
+        Species::Mouflon,
+        Species::Sheep,
     ];
 
     /// Stable discriminant carried on the node link (GuestKind::Animal);
-    /// the subscriber resolves it back with `from_index`.
+    /// the subscriber resolves it back with `from_index`. Appends only:
+    /// values 0-6 are already live on the node link, renumbering would
+    /// corrupt cross-node guests until every node is upgraded.
     pub fn index(self) -> u8 {
         match self {
             Species::Deer => 0,
@@ -85,6 +94,8 @@ impl Species {
             Species::Cow => 4,
             Species::Hare => 5,
             Species::Aurochs => 6,
+            Species::Mouflon => 7,
+            Species::Sheep => 8,
         }
     }
 
@@ -98,6 +109,8 @@ impl Species {
             4 => Species::Cow,
             5 => Species::Hare,
             6 => Species::Aurochs,
+            7 => Species::Mouflon,
+            8 => Species::Sheep,
             _ => return None,
         })
     }
@@ -115,6 +128,8 @@ impl Species {
             Species::Cow => "gfx/kritter/cow/cdv",
             Species::Hare => "gfx/kritter/hare/cdv",
             Species::Aurochs => "gfx/kritter/aurochs/cdv",
+            Species::Mouflon => "gfx/kritter/mufflon/cdv",
+            Species::Sheep => "gfx/kritter/sheep/cdv",
         }
     }
 
@@ -125,6 +140,10 @@ impl Species {
             Species::Boar | Species::Cow => 70,
             Species::Wolf => 60,
             Species::Aurochs => 90,
+            // Tameable wild beasts sit between the deer and the boar;
+            // the doc carries no verified numbers (server policy).
+            Species::Mouflon => 45,
+            Species::Sheep => 40,
         }
     }
 
@@ -140,6 +159,8 @@ impl Species {
             Species::Wolf => 48,
             Species::Boar => 40,
             Species::Cow | Species::Aurochs => 30,
+            Species::Mouflon => 50,
+            Species::Sheep => 30,
         }
     }
 
@@ -177,6 +198,14 @@ impl Species {
                 ("gfx/invobjs/meat", 1, self.meat_label()),
                 ("gfx/invobjs/bone", 1, ""),
             ],
+            // The mouflon rows mirror the doc's butcher list (Raw Sheep
+            // Skin, Raw Mutton); bones follow the all-species policy.
+            Species::Mouflon | Species::Sheep => vec![
+                ("gfx/invobjs/meat", 2, self.meat_label()),
+                ("gfx/invobjs/hide-raw-sheep", 1, ""),
+                ("gfx/invobjs/wool", 1, ""),
+                ("gfx/invobjs/bone", 1, ""),
+            ],
         }
     }
 
@@ -190,6 +219,8 @@ impl Species {
             Species::Cow => "Cow",
             Species::Hare => "Hare",
             Species::Aurochs => "Aurochs",
+            Species::Mouflon => "Mouflon",
+            Species::Sheep => "Sheep",
         }
     }
 
@@ -206,6 +237,22 @@ impl Species {
             Species::Fox => "Fox Meat",
             Species::Hare => "Rabbit Meat",
             Species::Wolf => "",
+            // fep.conf verifies "Raw Mutton" (HHP:1) for the sheep family.
+            Species::Mouflon | Species::Sheep => "Raw Mutton",
+        }
+    }
+
+    /// The domestic morph at full tameness (animals-and-husbandry.md:
+    /// boar->pig, mouflon->sheep, aurochs->cow/bull). The 2009 pack
+    /// ships NO pig kritter and no standalone bull drawable that the
+    /// cdv pipeline can layer, so the boar maps to None (it stays a
+    /// boar at full tameness - recorded in the doc's Open questions)
+    /// and the aurochs morphs to the cow cdv.
+    pub fn morph(self) -> Option<Species> {
+        match self {
+            Species::Mouflon => Some(Species::Sheep),
+            Species::Aurochs => Some(Species::Cow),
+            _ => None,
         }
     }
 
@@ -221,6 +268,9 @@ impl Species {
             "cow" => Species::Cow,
             "hare" => Species::Hare,
             "aurochs" => Species::Aurochs,
+            // The pack directory spelling, plus the wiki spelling.
+            "mufflon" | "mouflon" => Species::Mouflon,
+            "sheep" => Species::Sheep,
             _ => return None,
         })
     }
@@ -634,7 +684,20 @@ pub struct AnimalFight {
     pub off: i32,
     /// Animal's defence bar against player attacks (scaled percentage).
     pub def: i32,
+    /// Battle intensity (animals-and-husbandry.md taming step 2: Jorb's
+    /// prerequisite list requires "battle intensity reduced to 0" before
+    /// Quell the Beast may fire). Every landed blow (either direction)
+    /// raises it; quiet ticks de-escalate it. Same scaled bar as the
+    /// offence/defence meters (0..=BAR_FULL).
+    pub intensity: i32,
 }
+
+/// Intensity raised by one landed blow (either direction, POLICY: the
+/// doc names the meter but no legacy number survives).
+pub const INTENSITY_PER_BLOW: i32 = 2500;
+/// Intensity de-escalation per combat tick (10 Hz) without a blow
+/// (POLICY: a hot battle cools in ~7 s of no blows).
+pub const INTENSITY_DECAY: i32 = 250;
 
 /// Taming progress for one animal (session 45; animals-and-husbandry.md
 /// taming service). Each successful Quell adds TAMENESS_PER_QUELL; at
@@ -1137,14 +1200,18 @@ impl World {
                 if tile_speed(t).is_none() {
                     continue;
                 }
-                let species = match self.rng.next_bounded(7) {
+                let species = match self.rng.next_bounded(8) {
                     0 => Species::Deer,
                     1 => Species::Fox,
                     2 => Species::Wolf,
                     3 => Species::Boar,
                     4 => Species::Cow,
                     5 => Species::Hare,
-                    _ => Species::Aurochs,
+                    6 => Species::Aurochs,
+                    // Session 46: the third tameable wild beast. Sheep
+                    // NEVER spawns wild - it is reached only through the
+                    // mouflon morph (animals-and-husbandry.md).
+                    _ => Species::Mouflon,
                 };
                 let px = (gc.0 as i64 * 100 + x) as i32 * 11 + 5;
                 let py = (gc.1 as i64 * 100 + y) as i32 * 11 + 5;
@@ -1372,13 +1439,15 @@ mod cluster_tests {
     }
 
     /// Species index round-trip (the node-link discriminant contract).
+    /// Values 0-6 predate session 46 and are frozen on the wire; 7-8
+    /// (mouflon, sheep) append.
     #[test]
     fn species_index_roundtrips() {
-        for i in 0..7u8 {
+        for i in 0..9u8 {
             let sp = Species::from_index(i).expect("valid index");
             assert_eq!(sp.index(), i);
         }
-        assert!(Species::from_index(7).is_none());
+        assert!(Species::from_index(9).is_none());
         assert!(Species::from_index(255).is_none());
     }
 }
