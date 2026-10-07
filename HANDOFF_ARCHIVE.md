@@ -3388,4 +3388,151 @@ now 61a3403 (probe fix 7e8fc40 + wire test 6f32474 + this handoff).
 Nothing to re-push; the saved patches in
 /home/z/my-project/scripts/session51-patches/ are now redundant.
 
+---
 
+## 2026-10-07 - Session 52 (type 5: performance)
+
+SESSION TYPE ROTATION LOG: 47=3, 48=3, 49=2, 50=4, 51=3, 52=5 (5 was
+the last never-served type besides 0/1; next session should pick 0
+(docs hygiene) or 1 (architecture review) before another 2/3/4/5).
+
+GOAL: re-baseline the 1000-bot saturated-world budget on current
+master (~30k lines since session 2's 37 ms measurement) and spend it
+down. All runs: 2-core/4 GB sandbox, seed 42, --saturated, all bots
+walking/fighting (the documented worst case), --perf 5 s reports.
+
+MEASURED (mean tick EWMA, steady state, 1000 sessions):
+
+- base2  (master 29fb4c6, workers=1): 65-67 ms mean, 197 ms max,
+  phase_vis 24-52 ms dominant (scan 8-35 + phase B 12-39), mv 5-12.
+- w2     (same, --workers 2):         53-57 ms mean - the existing
+  rayon scan fan-out already paid; vis_scan_us collapsed to 3-4 ms.
+- ab1    (fxhash only, workers=1):    17-50 ms - the id hasher is the
+  single biggest win (visibility membership + cell lookups).
+- after4 (all three commits):         44-48 ms mean, 0 panics, spawns
+  back to the 150-210/window steady state, retract ~0.
+
+WHAT (three behavior-preserving commits + one self-caught fix):
+
+- 51d9dd6 fxhash.rs: multiply-rotate hasher (no deps) for
+  SERVER-INTERNAL id containers only (session visible/unacked/sessions,
+  VisIndex cells/cell_of_gob/dirty/touched, World gob-id tables,
+  player_abroad). Attacker-controlled keys (usernames, client strings)
+  keep SipHash - HashDoS surface unchanged. Documented in the module.
+- d587ae7 allocation-free vis scan pass: per-session result lists append
+  into ONE flat GobId buffer with (start,len) ranges; each rayon task
+  reuses one (seg, scratch) pair per partition; scan_visible compacts
+  cell buckets in place; Phase B recycles the previous vis_cache Vec
+  (take -> clear -> refill). Replaced ~2000-3000 heap allocations/tick
+  at the 1000-session scale with ~5. The allocating wrappers are gone;
+  tests drive the _into forms (visidx keeps gobs_in_view for the
+  cluster subscription path).
+- 497c389 --workers defaults to available_parallelism (vertical scaling
+  out of the box); 0/malformed = auto; explicit N overrides.
+- da5cb21 CRITICAL FIX (self-caught by the load run, never pushed
+  broken to users): my first flat-buffer merge sorted task segments by
+  first index and appended ranges in concat order, while Phase B reads
+  ranges[i] as to_scan[i]'s entry. partition_by_owner does not
+  guarantee segment concat == to_scan order, so sessions got OTHER
+  sessions' candidate lists -> 11k-37k spawns/window churn, 220-296 ms
+  retract ticks, mean tick 140 ms (worse than baseline). Checkout A/B
+  (ab1 worktree run) isolated the flat-buffer commit; fix writes ranges
+  BY to_scan index (each range self-contained). Checkout-A/B is now the
+  documented way to bisect perf regressions in this repo.
+
+ALSO OBSERVED: the movement wire test (movement_click_walks_with_
+linstep_progress) is FLAKY under parallel cargo test load (UDP timing;
+passed twice isolated + full-suite rerun). Not a master regression;
+same class as session 51's world_entry de-flake. A type-4 session
+should give the wire suite the same pump_until treatment.
+
+EVIDENCE: 282 cargo tests green (258 unit incl. 3 fxhash + 11 proto +
+4 wire + 9 world), fmt clean, clippy -D warnings clean, release binary
+rebuilt; python probes on the release binary: WORLD ENTRY OK, CATTR
+ORDER OK. Load runs summarized above; scripts/perf_run.sh (session
+sandbox) + git worktree A/B recipe recorded here. All commits pushed
+to origin/master.
+
+NEXT (handoff):
+- The 197-210 ms max_tick spikes are ramp-up-phase (cumulative max
+  counter never resets); a per-window max would localize them - cheap
+  perf-field addition for the next session.
+- Guests still scan O(guests) per full rescan (scan_visible_into's
+  guest loop): fine single-node, a landmine at multi-node 10k - add a
+  per-cell guest bucket (type 1 or 5).
+- move_batch mv phase is now #2 (3-32 ms windows): profile
+  batch_move_broadcast next.
+- Sandbox-only artifact: scripts/perf_run.sh (outside the repo).
+- Carried: five legacy probes onto hnhlib.py; game/interact.rs +
+  game/combat.rs split; recipe breadth, feeding transfer; Windows
+  smoke + GL client e2e when a display host exists.
+
+---
+
+## 2026-10-08 - Session 53 (type 0: docs hygiene / context de-pollution)
+
+SESSION TYPE ROTATION LOG: 48=3, 49=2, 50=4, 51=3, 52=5, 53=0. Type 1
+(architecture review) is the only never-served type - next sessions
+pick 1 before another 3/4/5. The consolidated, authoritative rotation
+table now lives in the "Session type rotation log" section of
+HANDOFF.md; per-entry rotation logs stop accumulating.
+
+GOAL: stop the handoff file's unbounded growth - the top context
+polluter (204 KB / 3596 lines that every session is mandated to read
+top to bottom).
+
+WHAT:
+
+- HANDOFF SPLIT: HANDOFF.md is now the living context only (392 lines
+  / 22.5 KB): protocol + new ARCHIVE POLICY section, refreshed
+  how-to-continue (workers auto default, --cluster/--node pointer,
+  windows/ one-command scripts), architecture rewritten to current
+  master (the old section still described session-2 reality: no game/
+  split, no cluster mesh, no combat/archery/armor/taming modules), a
+  verified-evidence section, a consolidated known-gaps list (the old
+  one was session-2's - crafting/farming/party listed as missing while
+  shipped), the authoritative rotation table, a one-line session index
+  (S1..S53), and full entries for the last two sessions only.
+- HANDOFF_ARCHIVE.md (new): sessions 1-50 moved byte-verbatim (cut
+  points verified: zero 51/52 mentions in the archive, single copies
+  in the living file). 200 KB of history stays greppable without
+  taxing future sessions' context budgets.
+- AGENTS.md: the verification section claimed GitHub Actions runs on
+  every push - false since session 50 (PAT lacks the `workflow`
+  scope; the file never landed). Reworded to the honest state with a
+  retry-once-per-session instruction.
+- server/scripts: 25 frozen one-off session gate scripts
+  (verify_sessionNN.sh etc.) moved verbatim to server/scripts/attic/;
+  README gained the missing probe rows (probe_drop, probe_plow) and a
+  Utilities section. Root GATES.md (a session-47 artifact) moved to
+  .unlazy/session47/GATES.md per the tree's own convention. Untracked
+  an accidentally committed server/scripts/__pycache__ .pyc.
+- CI RETRY (carried from session 50): recreated
+  .github/workflows/rust.yml from the preserved snippet, committed
+  and attempted the push - REJECTED again with the same error
+  (`refusing to allow a Personal Access Token to create or update
+  workflow ... without workflow scope`). The commit was rolled back
+  to keep master pushable; the file content remains preserved in
+  HANDOFF_ARCHIVE.md (session-50 addendum). Next sessions: retry only
+  if the token gains the scope.
+- docs/mechanics/README.md link integrity check: all 16 links resolve.
+  No doc content edits - the living-document rule has kept them
+  current; a deep 16-doc audit is out of a 2 h budget.
+
+VERIFICATION: no Rust code touched (the rust-skills load is required
+before Rust work only). Repo health confirmed before the work: cargo
+test --workspace green on a fresh stable toolchain (282 tests: 258
+unit + 11 proto + 9 world + 4 wire). Commits 8c0e7e8 (HANDOFF split),
+ef027a8 (AGENTS CI), df473d7 (attic + GATES + scripts README) pushed
+to origin/master (cf9e0e7..df473d7); this entry is the fourth.
+
+NEXT (handoff):
+- HANDOFF.md "Known gaps / next steps" is now the single consolidated
+  source (10 items). Top picks for coming sessions: type 1
+  (architecture review - never served), then the carried items (guest
+  bucket, wire-test de-flake, probe migration, game.rs split
+  leftovers, recipe breadth).
+- MAINTAIN THE ARCHIVE POLICY: at the end of EVERY session move all
+  but the last two entries to HANDOFF_ARCHIVE.md and extend the
+  session index by one line. That one minute of work keeps the
+  context cut permanent.

@@ -74,18 +74,21 @@ how something came to be.
   - `state.rs`: SoA gob storage (pos/res/frame/alive/kind/hp/speed/mv
     columns, generational ids packed into i32), Species table with
     per-species hp/speed/loot, tile speed rules, 10 Hz tick.
-  - `game.rs` + `game/` (session-49 split; game.rs keeps the core:
-    construction, world entry, session lifecycle, tick dispatcher,
-    movement, player interaction, party/skills, PvP vitals):
+  - `game.rs` + `game/` (session-49 split, extended by session 55;
+    game.rs keeps the core: construction, world entry, session
+    lifecycle, tick dispatcher, party/skills, interaction relays):
     `game/animals.rs` (wildlife AI, quell/taming, production+feeding
     sweep, starvation), `game/building.rs` (plans, stations, trough),
     `game/craft.rs` (make widget, recipes, roast chain),
     `game/farming.rs` (plow/mutate/plant/crop menus/harvest),
     `game/items.rs` (drops, inventory/equipment windows, drag cursor,
     food menu, eating), `game/stream.rs` (mapreq, gob block encoder,
-    spawn/retract, visibility pass), `game/cluster.rs` (node messages,
-    guest mirroring/republishing, subscriptions, authority transfer),
-    `game/tests.rs` (the unit battery).
+    spawn/retract, visibility pass), `game/interact.rs` (map clicks,
+    walk/interact routing, the movement tick + packed fan-out,
+    start_move), `game/combat.rs` (openings fights, archery, frv
+    protocol, PvP consequences + vitals), `game/cluster.rs` (node
+    messages, guest mirroring/republishing, subscriptions, authority
+    transfer), `game/tests.rs` (the unit battery).
   - `fight.rs`: fightview openings combat (relations, balance, IP,
     offence/defence, damage through openings). `archery.rs`: bow
     combat (Shoot action, aim meter, arrow economy). `armor.rs`:
@@ -144,7 +147,7 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
   sessions 21/25/45). Windows: windows/ one-command scripts (fix log
   in the archive).
 
-## Known gaps / next steps (consolidated, session 53)
+## Known gaps / next steps (consolidated)
 
 1. **CI**: `.github/workflows/rust.yml` (fmt, clippy -D warnings, cargo
    test --workspace on push/PR) could not be pushed - the PAT lacks the
@@ -161,19 +164,16 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    3-32 ms windows).
 5. **Probe migration**: move the five legacy self-contained probes onto
    hnhlib.py (mechanical; recipe in server/scripts/README.md).
-6. **game.rs split leftovers** (type 2): game/interact.rs (map click/
-   walk/interact/movement/batch) and game/combat.rs (fights, arrows,
-   vitals, criminal); game.rs is ~5.3k lines after those.
-7. **Recipe breadth**: ~150 shipped paginae; oven-gated tools/
+6. **Recipe breadth**: ~150 shipped paginae; oven-gated tools/
    furniture/containers; flour/bread blocked (the 2009 pack has no
    grain item - sprout/grist only, see farm.rs).
-8. **Feeding depth**: trough-to-trough fodder transfer needs the lift
+7. **Feeding depth**: trough-to-trough fodder transfer needs the lift
    mechanic; per-animal breed stat rows (Milk Quantity / Wool Quality
    are flat constants).
-9. **Real-client e2e**: GL production walkthrough (tame, wait out the
+8. **Real-client e2e**: GL production walkthrough (tame, wait out the
    milk meter, milk on screen) and Windows smoke when a display host
    exists (carried).
-10. **Guest GC at scale**: the 50-tick guest GC walks the whole guest
+9. **Guest GC at scale**: the 50-tick guest GC walks the whole guest
     table per node (session-35 design); bounded by the subscribed
     population, so fine at 1k - revisit only if multi-node profiling
     says otherwise (session 54 review note).
@@ -183,9 +183,8 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0, 54=1 (architecture review). All six types have now been served
-at least once - pick freely, but avoid serving the same type twice in
-a row.
+53=0, 54=1, 55=2. All six types have been served - pick freely, but
+avoid serving the same type as the previous session.
 
 ## Session index (one line each; full entries in the archive)
 
@@ -238,155 +237,7 @@ a row.
 - S52 (type 5): perf re-baseline - fxhash id hasher, allocation-free vis scan, --workers auto.
 - S53 (type 0): docs hygiene - HANDOFF split (living file + verbatim archive), stale sections rebuilt, scripts attic.
 - S54 (type 1): architecture review - guest scan O(node guests) per rescan removed (view-cell-bounded), idempotent VisIndex insert (promote double-insert bug), probe_guest_walk; live 2-node cluster evidence.
-
----
-
-## 2026-10-07 - Session 52 (type 5: performance)
-
-SESSION TYPE ROTATION LOG: 47=3, 48=3, 49=2, 50=4, 51=3, 52=5 (5 was
-the last never-served type besides 0/1; next session should pick 0
-(docs hygiene) or 1 (architecture review) before another 2/3/4/5).
-
-GOAL: re-baseline the 1000-bot saturated-world budget on current
-master (~30k lines since session 2's 37 ms measurement) and spend it
-down. All runs: 2-core/4 GB sandbox, seed 42, --saturated, all bots
-walking/fighting (the documented worst case), --perf 5 s reports.
-
-MEASURED (mean tick EWMA, steady state, 1000 sessions):
-
-- base2  (master 29fb4c6, workers=1): 65-67 ms mean, 197 ms max,
-  phase_vis 24-52 ms dominant (scan 8-35 + phase B 12-39), mv 5-12.
-- w2     (same, --workers 2):         53-57 ms mean - the existing
-  rayon scan fan-out already paid; vis_scan_us collapsed to 3-4 ms.
-- ab1    (fxhash only, workers=1):    17-50 ms - the id hasher is the
-  single biggest win (visibility membership + cell lookups).
-- after4 (all three commits):         44-48 ms mean, 0 panics, spawns
-  back to the 150-210/window steady state, retract ~0.
-
-WHAT (three behavior-preserving commits + one self-caught fix):
-
-- 51d9dd6 fxhash.rs: multiply-rotate hasher (no deps) for
-  SERVER-INTERNAL id containers only (session visible/unacked/sessions,
-  VisIndex cells/cell_of_gob/dirty/touched, World gob-id tables,
-  player_abroad). Attacker-controlled keys (usernames, client strings)
-  keep SipHash - HashDoS surface unchanged. Documented in the module.
-- d587ae7 allocation-free vis scan pass: per-session result lists append
-  into ONE flat GobId buffer with (start,len) ranges; each rayon task
-  reuses one (seg, scratch) pair per partition; scan_visible compacts
-  cell buckets in place; Phase B recycles the previous vis_cache Vec
-  (take -> clear -> refill). Replaced ~2000-3000 heap allocations/tick
-  at the 1000-session scale with ~5. The allocating wrappers are gone;
-  tests drive the _into forms (visidx keeps gobs_in_view for the
-  cluster subscription path).
-- 497c389 --workers defaults to available_parallelism (vertical scaling
-  out of the box); 0/malformed = auto; explicit N overrides.
-- da5cb21 CRITICAL FIX (self-caught by the load run, never pushed
-  broken to users): my first flat-buffer merge sorted task segments by
-  first index and appended ranges in concat order, while Phase B reads
-  ranges[i] as to_scan[i]'s entry. partition_by_owner does not
-  guarantee segment concat == to_scan order, so sessions got OTHER
-  sessions' candidate lists -> 11k-37k spawns/window churn, 220-296 ms
-  retract ticks, mean tick 140 ms (worse than baseline). Checkout A/B
-  (ab1 worktree run) isolated the flat-buffer commit; fix writes ranges
-  BY to_scan index (each range self-contained). Checkout-A/B is now the
-  documented way to bisect perf regressions in this repo.
-
-ALSO OBSERVED: the movement wire test (movement_click_walks_with_
-linstep_progress) is FLAKY under parallel cargo test load (UDP timing;
-passed twice isolated + full-suite rerun). Not a master regression;
-same class as session 51's world_entry de-flake. A type-4 session
-should give the wire suite the same pump_until treatment.
-
-EVIDENCE: 282 cargo tests green (258 unit incl. 3 fxhash + 11 proto +
-4 wire + 9 world), fmt clean, clippy -D warnings clean, release binary
-rebuilt; python probes on the release binary: WORLD ENTRY OK, CATTR
-ORDER OK. Load runs summarized above; scripts/perf_run.sh (session
-sandbox) + git worktree A/B recipe recorded here. All commits pushed
-to origin/master.
-
-NEXT (handoff):
-- The 197-210 ms max_tick spikes are ramp-up-phase (cumulative max
-  counter never resets); a per-window max would localize them - cheap
-  perf-field addition for the next session.
-- Guests still scan O(guests) per full rescan (scan_visible_into's
-  guest loop): fine single-node, a landmine at multi-node 10k - add a
-  per-cell guest bucket (type 1 or 5).
-- move_batch mv phase is now #2 (3-32 ms windows): profile
-  batch_move_broadcast next.
-- Sandbox-only artifact: scripts/perf_run.sh (outside the repo).
-- Carried: five legacy probes onto hnhlib.py; game/interact.rs +
-  game/combat.rs split; recipe breadth, feeding transfer; Windows
-  smoke + GL client e2e when a display host exists.
-
----
-
-## 2026-10-08 - Session 53 (type 0: docs hygiene / context de-pollution)
-
-SESSION TYPE ROTATION LOG: 48=3, 49=2, 50=4, 51=3, 52=5, 53=0. Type 1
-(architecture review) is the only never-served type - next sessions
-pick 1 before another 3/4/5. The consolidated, authoritative rotation
-table now lives in the "Session type rotation log" section of
-HANDOFF.md; per-entry rotation logs stop accumulating.
-
-GOAL: stop the handoff file's unbounded growth - the top context
-polluter (204 KB / 3596 lines that every session is mandated to read
-top to bottom).
-
-WHAT:
-
-- HANDOFF SPLIT: HANDOFF.md is now the living context only (392 lines
-  / 22.5 KB): protocol + new ARCHIVE POLICY section, refreshed
-  how-to-continue (workers auto default, --cluster/--node pointer,
-  windows/ one-command scripts), architecture rewritten to current
-  master (the old section still described session-2 reality: no game/
-  split, no cluster mesh, no combat/archery/armor/taming modules), a
-  verified-evidence section, a consolidated known-gaps list (the old
-  one was session-2's - crafting/farming/party listed as missing while
-  shipped), the authoritative rotation table, a one-line session index
-  (S1..S53), and full entries for the last two sessions only.
-- HANDOFF_ARCHIVE.md (new): sessions 1-50 moved byte-verbatim (cut
-  points verified: zero 51/52 mentions in the archive, single copies
-  in the living file). 200 KB of history stays greppable without
-  taxing future sessions' context budgets.
-- AGENTS.md: the verification section claimed GitHub Actions runs on
-  every push - false since session 50 (PAT lacks the `workflow`
-  scope; the file never landed). Reworded to the honest state with a
-  retry-once-per-session instruction.
-- server/scripts: 25 frozen one-off session gate scripts
-  (verify_sessionNN.sh etc.) moved verbatim to server/scripts/attic/;
-  README gained the missing probe rows (probe_drop, probe_plow) and a
-  Utilities section. Root GATES.md (a session-47 artifact) moved to
-  .unlazy/session47/GATES.md per the tree's own convention. Untracked
-  an accidentally committed server/scripts/__pycache__ .pyc.
-- CI RETRY (carried from session 50): recreated
-  .github/workflows/rust.yml from the preserved snippet, committed
-  and attempted the push - REJECTED again with the same error
-  (`refusing to allow a Personal Access Token to create or update
-  workflow ... without workflow scope`). The commit was rolled back
-  to keep master pushable; the file content remains preserved in
-  HANDOFF_ARCHIVE.md (session-50 addendum). Next sessions: retry only
-  if the token gains the scope.
-- docs/mechanics/README.md link integrity check: all 16 links resolve.
-  No doc content edits - the living-document rule has kept them
-  current; a deep 16-doc audit is out of a 2 h budget.
-
-VERIFICATION: no Rust code touched (the rust-skills load is required
-before Rust work only). Repo health confirmed before the work: cargo
-test --workspace green on a fresh stable toolchain (282 tests: 258
-unit + 11 proto + 9 world + 4 wire). Commits 8c0e7e8 (HANDOFF split),
-ef027a8 (AGENTS CI), df473d7 (attic + GATES + scripts README) pushed
-to origin/master (cf9e0e7..df473d7); this entry is the fourth.
-
-NEXT (handoff):
-- HANDOFF.md "Known gaps / next steps" is now the single consolidated
-  source (10 items). Top picks for coming sessions: type 1
-  (architecture review - never served), then the carried items (guest
-  bucket, wire-test de-flake, probe migration, game.rs split
-  leftovers, recipe breadth).
-- MAINTAIN THE ARCHIVE POLICY: at the end of EVERY session move all
-  but the last two entries to HANDOFF_ARCHIVE.md and extend the
-  session index by one line. That one minute of work keeps the
-  context cut permanent.
+- S55 (type 2): game/interact.rs + game/combat.rs extracted from game.rs (pure move, 5.3k -> 3.5k lines); split-verification process note.
 
 ---
 
@@ -455,3 +306,61 @@ NEXT (handoff):
   breadth (type 3). Windows smoke + GL e2e still carried.
 - CI workflow push: token unchanged, still no `workflow` scope - not
   retried this session per the session-53 note.
+
+---
+
+## 2026-10-08 - Session 55 (type 2: refactoring / tech debt)
+
+SESSION TYPE ROTATION LOG: 51=3, 52=5, 53=0, 54=1, 55=2. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: finish the session-49 split leftovers flagged in the gaps list -
+extract game/interact.rs and game/combat.rs from game.rs.
+
+WHAT:
+
+- game/interact.rs (new): the Map section (on_map_click, player_walk,
+  player_interact) and the movement/fan-out block (tick_movement,
+  broadcast_batch, record_unacked, fx_overlay_broadcast, stream_pose,
+  stream_avatar, interpolated_pos, start_move). tile_at stayed in
+  game.rs (the farming/station sweeps use it too).
+- game/combat.rs (new): the openings duel + archery + frv protocol
+  (start_fight, start_pvp_melee, start_aim, tick_aim, shoot_arrow,
+  fight_uimsg, fight_open, fight_del, on_maneuver, on_frv_msg) and the
+  PvP consequences (armor_totals, melee_dmg, hurt_player,
+  knockout_lp_loss, flag_criminal, stream_criminal_buff,
+  tick_criminal_expiry, tick_vitals; CRIMINAL_MS/CRIMINAL_BUFF_ID).
+- Pure move, no behavior changes. Cross-module methods widened to
+  pub(super) exactly like the existing game/ pattern; every caller was
+  grep-verified before the move.
+- game.rs: 5325 -> 3465 lines; the game/ tree is now 10 feature
+  modules + the test battery.
+
+PROCESS NOTE (self-inflicted, recorded so it is not repeated): the
+per-session CI push retry ran BEFORE the refactor was committed, and
+the `git reset --hard` rollback of the (expectedly rejected) workflow
+commit silently reverted the uncommitted game.rs. The first
+verification round then ran against the OLD tree with the new files
+ignored as dead code - clippy and tests still passed. Re-applied the
+split, re-verified, amended the commit. Lesson: commit first, THEN do
+the CI retry.
+
+VERIFICATION (on the split tree):
+
+- fmt + clippy -D warnings clean; 285 cargo tests green (261 unit incl.
+  the moved combat/movement batteries, 11 proto, 4 wire, 9 world).
+- Release binary: python probes WORLD ENTRY: OK + CATTR ORDER: OK.
+- 300-bot load smoke: mean tick ~7-11 ms (budget 100 ms), live animal
+  fights flowing through game/combat.rs.
+- CI workflow push retried once per the session-53 rule: REJECTED
+  again (PAT lacks the `workflow` scope), commit rolled back, token
+  unchanged - do not retry until the scope exists.
+
+COMMITS: 96e8824 (the split) + this handoff entry.
+
+NEXT (handoff):
+- Wire-test de-flake (type 4) and batch_move_broadcast profiling
+  (type 5) are the top carried items; recipe breadth (type 3) and the
+  five-probe hnhlib.py migration are mechanical.
+- Windows smoke + GL client e2e still carried (no display host here).
+
