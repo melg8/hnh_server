@@ -411,17 +411,84 @@ required; Legacy:Hunting). Rules:
   runtime world state with the same scope - recorded in Open
   questions.
 
+## Server implementation notes (this repo, session 45)
+
+- Taming MVP is live (single-node authority): the Quell pagina
+  (paginae/atk/quell) gates and resolves through the real combat
+  model. Selection-time gates: 2 IP available (req_ip 2), advantage
+  >= 3 (req_adv 30 tenths), target is a LOCAL animal, a rope
+  (gfx/invobjs/rope) equipped in ANY slot (weapon-slot-only is a
+  documented NEXT check), the tamer's rope not already bound, and the
+  beast not already quelled. Guest (cross-node) animals refuse quell
+  in the MVP.
+- Resolution: the queued quell intercepts the animal swing cadence
+  (same offence-bar economics as a normal swing; no defence chip, no
+  damage) and applies +20 tameness (TAMENESS_PER_QUELL). The battle
+  ends on the first quell (out of animal_fights, fight window torn
+  down), the beast follows the tamer client-side via a batched
+  OD_FOLLOW broadcast (gob ids are global - no per-session patching;
+  Following.java renders it), and the rope binds (one partially-tamed
+  beast per tamer; binding ends at full tameness or on a break).
+- Leash lifecycle: the break deadline is game-tick based (10 minutes
+  = 6000 ticks, the docs' 5-15 min floor as policy) rearmed on every
+  quell below 100; at 100 (TAMENESS_FULL) the beast never breaks.
+  Damaging the beast kills ALL tameness (server policy) and frees the
+  rope. The tick sweep (before the batch fan-out) breaks due leashes,
+  sends the OD_FOLLOW removal (oid -1), and chats the tamer.
+- Tamed animals skip animal AI entirely (no wander, no aggro) while
+  the tame row lives; tame rows never outlive local authority (a
+  transferred animal drops the row + follow render). Animals are
+  spawned wildlife in this server (not persisted), so taming state is
+  runtime world state with the same scope - recorded in Open
+  questions.
+
+## Server implementation notes (this repo, session 46)
+
+- Animal Husbandry gate (docs step 1): `ahusb` joins the skill
+  catalog with the documented legacy cost (400 LP) and prerequisite
+  (requires Hunting); the prerequisite is enforced inside `buy()`, so
+  the wallet can never be charged out of order, and the nsk list
+  renders it from the shipped `gfx/hud/skills/ahusb.res`.
+  `quell_gate` refuses the quell selection without the skill.
+- Battle intensity (docs step 2, Jorb's list): every animal fight row
+  (AnimalFight) carries an intensity bar. A landed blow in EITHER
+  direction raises it by INTENSITY_PER_BLOW (2500/10000, policy);
+  every combat tick without a blow de-escalates it by
+  INTENSITY_DECAY (250 - a hot fight cools in ~7 s). `quell_gate`
+  refuses the selection while intensity > 0, so the working pattern
+  is: build advantage, stop swinging, wait out the de-escalation,
+  quell.
+- Species morph (docs step 6): at full tameness the animal
+  metamorphoses in place. Species::morph() maps mouflon -> sheep and
+  aurochs -> cow; the boar maps to None because the 2009 pack ships
+  no pig kritter (policy recorded below). The morph rewrites the
+  Kind, the drawable resource (sheep/cow cdv), max_hp and speed,
+  clamps the current hp (no healing), and broadcasts a headerless
+  OD_RES block through the packed start batch with a per-session wire
+  id patch - the native client re-render path (Session.java OD_RES =
+  2 -> OCache.cres -> ResDrawable reset).
+- Roster: Species gains Mouflon (index 7) and Sheep (index 8). The
+  node-link discriminant stays append-only (0-6 frozen); the mouflon
+  joins the wild spawn roll, the sheep NEVER spawns wild (it is only
+  reached through the morph, matching the wiki's "Must domesticate a
+  Mouflon to obtain a Sheep"). Sheep-family loot carries the wool
+  that feeds the session-46 cloth craft chain.
+
 ## Open questions (animals)
 
-- Taming MVP gaps (session 45): the "battle intensity == 0" prerequisite
-  is not yet modeled (the MVP gates on IP/advantage/rope; FightRel
-  intensity stays 0 in animal fights - the de-escalation meter is a
-  NEXT feature); the Animal Husbandry skill purchase is not gated
-  (the skill catalog carries "hunting" only - "ahusb" is an advisory
-  pagina string, consistent with every other recipe/action gate in
-  this server); the species morph at 100 tameness (boar->pig,
-  mouflon->sheep, aurochs->cow/bull) is not implemented; tamed-state
-  persistence is absent (see the session-45 implementation notes).
+- Taming state (post session-46): the "battle intensity == 0",
+  Animal Husbandry skill and species-morph prerequisites are now
+  implemented; still open are tamed-state persistence (animals are
+  spawned wildlife, so tameness evaporates with the world process)
+  and the intensity meter's client rendering (the bar exists only
+  server-side; the legacy Fightview rendered intensity from the uimsg
+  relation, which this server keeps at 0).
+- The boar morph is unreachable: the 2009 pack ships no pig kritter
+  directory, so a fully tamed boar stays a boar. When a pig drawable
+  surfaces (a later resource pack or the legacy client's own pack),
+  add (Boar, Pig) to Species::morph(). The aurochs morph lands on the
+  cow cdv; a standalone bull rendering (cow/bull.res) is a possible
+  future sex-based variant, unverified against the cdv layering.
 
 - Session 36 bone drops: every species now drops `gfx/invobjs/bone` on
   death (Deer/Aurochs/Cow/Boar/Wolf x2, Fox/Hare x1) so the Bone Arrow

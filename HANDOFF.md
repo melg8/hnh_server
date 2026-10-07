@@ -3045,3 +3045,87 @@ NEXT (handoff):
   model (the earlier NEXT item, unchanged).
 - Quiet-host perf table; GL client e2e re-run after any resource
   regeneration.
+
+## 2026-10-07 - Session 46: taming depth - AH skill, battle intensity, species morph; cloth chain + tool plumbing
+
+The session-45 NEXT "taming depth" items that are verifiable in this
+environment are CLOSED: the Animal Husbandry skill gate, the
+battle-intensity de-escalation meter, and the species morph at full
+tameness. The carried recipe tool plumbing also landed with five new
+recipes.
+
+WHAT:
+
+- AH SKILL GATE (docs taming step 1): `ahusb` (Animal Husbandry,
+  400 LP, requires Hunting - the doc's quoted legacy values) joins the
+  skill catalog; `SkillDef` gains a `prereq` field enforced inside
+  `buy()` BEFORE any charge (new `BuyError::Prerequisite`; the wire
+  handler chats "You need to know Hunting first."), and
+  `skills::can_quell` gates the quell selection
+  (`gfx/hud/skills/ahusb.res` ships in the pack so the nsk list
+  renders it).
+- BATTLE INTENSITY (docs step 2, Jorb's list "battle intensity
+  reduced to 0"): every AnimalFight row carries an intensity bar.
+  A landed blow in EITHER direction (player swing landing, animal
+  bite, cross-node relay swing) raises it INTENSITY_PER_BLOW=2500;
+  every combat tick without a blow de-escalates INTENSITY_DECAY=250
+  (a hot fight cools in ~7 s - one O(fights) pass at the top of
+  tick_combat). quell_gate refuses while intensity > 0: the working
+  pattern is build advantage -> stop swinging -> wait -> quell.
+- SPECIES MORPH (docs step 6): Species::morph() maps
+  mouflon -> sheep, aurochs -> cow; the boar maps to None (the 2009
+  pack ships NO pig kritter - policy recorded in the doc's Open
+  questions). At full tameness apply_species_morph rewrites the Kind,
+  the drawable resource (cdv), max_hp and speed, clamps hp (no
+  healing), and broadcasts a headerless OD_RES block through the
+  packed start batch with a per-session wire-id patch (Patch::One) -
+  the NATIVE client re-render path (Session.java OD_RES=2 ->
+  OCache.cres -> ResDrawable reset; verified against the client
+  source, not a new wire contract).
+- ROSTER: Species gains Mouflon (index 7, joins the wild spawn roll)
+  and Sheep (index 8, NEVER spawns wild - only via the morph, per the
+  wiki's "Must domesticate a Mouflon to obtain a Sheep"). The
+  node-link discriminant stays append-only (0-6 frozen, unit-tested).
+  PoseTable/SPECIES_FOLDERS extend to 9 species (mufflon/sheep body
+  pose directories verified in gameres); sheep-family loot carries
+  wool + hide-raw-sheep + Raw Mutton (fep.conf-verified label).
+- TOOL PLUMBING + CLOTH CHAIN (crafting doc): Recipe gains a `tool`
+  field enforced in craft_once BEFORE the consume pass (inventory or
+  any equip slot; refusal destroys nothing). Five new recipes with
+  pagina ids verified against the shipped action-layer bytes
+  (ad=["craft", id]): yarn (wool x1), linencloth (yarn x2),
+  linenshirt + linenpants (linencloth x3 each - both render through
+  the equip.rs PIECES borka layers), bucket (branch x3, tool=saw,
+  output buckete). Wool enters the economy through the sheep loot.
+
+EVIDENCE: 261 unit tests green (10 new: ahusb prereq + can_quell,
+quell-refuses-without-the-skill, quell-needs-a-calm-battle,
+full-tame-morphs-the-species, bucket-craft-needs-the-saw,
+cloth-chain wiring, species-morph table, plus the roundtrip
+extension), clippy -D warnings clean, fmt clean. Wire probes on the
+release binary: WORLD ENTRY OK, CATTR ORDER OK, MOVE PROBE OK, MELEE
+WIRE OK, CRAFT FLOW OK (items 8 -> 17), EAT FLOW OK. Commits pushed
+to origin/master.
+
+NOT DONE THIS SESSION (rolled to NEXT):
+- Weapon-slot-only rope check: the server accepts a rope in ANY equip
+  slot (consistent with melee_dmg's any-slot weapon scan); narrowing
+  to the weapon slot needs client slot-semantics verification -
+  documented as policy in animals-and-husbandry.md.
+- Tamed-state persistence (animals are spawned wildlife; tameness is
+  runtime state) - unchanged from session 45.
+- Intensity meter client rendering (the bar is server-side only;
+  Fightview relations stream intensity=0).
+- Quiet-host perf table (carried); GL client e2e re-run after any
+  resource regeneration (the OD_RES morph block renders through the
+  same client path the e2e already covers).
+
+NEXT (handoff):
+- Recipe breadth: ~150 shipped craft paginae remain unimplemented;
+  the tool/station fields are now in place for oven-gated recipes
+  (flour/bread need a grain item the 2009 pack lacks - sprout/grist
+  only, see farm.rs).
+- Tamed-animal production (milk/wool timers, feeding troughs) once
+  animals persist.
+- GL client e2e re-run with a morph walkthrough (tame a mouflon to
+  100 and read the sheep sprite off the screen).

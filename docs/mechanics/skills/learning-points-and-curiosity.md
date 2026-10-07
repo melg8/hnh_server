@@ -178,10 +178,18 @@ The implementing server must model, persist, and expose:
   client-hardcoded skill-value names, the legacy sattr cost curve
   (`sattr_cost`: point from 0 costs 100; the bulk closed form
   `50*(k+n)*n`, `k=2*from+1`, matches `SAttr` exactly; no-op pairs cost 0
-  so the client's send-every-SAttr batch stays valid), and an 8-entry
+  so the client's send-every-SAttr batch stays valid), and a 9-entry
   non-incrementable catalog (names restricted to `gfx/hud/skills/*.res`
   verified present in `lib/haven-res.jar`; costs are server-defined data,
   see the open questions).
+- **Prerequisites are enforced data (session 46)**: each catalog entry
+  carries an optional `prereq` catalog name checked inside `buy()`
+  before any charge. The first gated entry is `ahusb` (Animal
+  Husbandry, 400 LP, requires Hunting - the documented legacy values,
+  animals-and-husbandry.md taming step 1); the refusal path returns
+  `BuyError::Prerequisite` and the wire handler chats "You need to
+  know Hunting first." Ahusb additionally gates Quell the Beast
+  (`skills::can_quell`).
 - **Wire flow**: opening the character sheet pushes `exp`, `nsk`, `psk`;
   `sattr` is priced first and applied all-or-nothing (rejects unknown
   names, targets below the current value, anything past 100, and

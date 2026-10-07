@@ -294,6 +294,28 @@ All of them share the same server shape: an inventory (per-gob item store), a fu
   quality, fuel bookkeeping, loaded input, progress). Half-built plans
   and station fuel/input survive restarts; v2 saves stay readable.
 
+## Server implementation notes (this repo, session 46)
+
+- **Tool requirement plumbing**: `Recipe` carries an optional `tool`
+  resource name enforced in `craft_once` BEFORE the consume pass - the
+  tool must sit in the crafter's inventory or any equipment slot, and
+  a refusal destroys nothing (chat: "You need the {tool} to make that.
+  "). Server policy: legacy per-recipe tool lists are not recoverable
+  from this pack, so tool fields are chosen per recipe; the first
+  tool-gated recipe is the bucket (the pagina's own "crp" carpentry
+  prereq code pairs with the saw).
+- **Cloth chain + bucket recipes**: wool -> yarn (x1) -> linen cloth
+  (yarn x2) -> linen shirt / linen pants (linencloth x3 each), plus
+  the bucket (branch x3, saw tool, output gfx/invobjs/buckete). Every
+  pagina id was verified against the shipped action layer bytes (ad =
+  ["craft", id]: yarn/cloth/pants/shirt/bucket) and every input,
+  output and tool resource ships in `gameres/`. The two wearables
+  render on the avatar through the existing equip.rs PIECES table
+  (shirt-linen / pants-linen borka layers). Wool enters the economy
+  through the session-46 sheep/mouflon loot rows
+  (animals-and-husbandry.md). Unit counts remain chosen server policy
+  (open question below).
+
 ## Open questions
 
 - **Build-menu action verb.** RESOLVED (session 15): the ad string is the
@@ -330,6 +352,14 @@ All of them share the same server shape: an inventory (per-gob item store), a fu
   currently a plain item: container contents (water volume) are a
   separate mechanic (items-and-quality.md small containers) not yet
   implemented.
+- **Cloth-chain + bucket unit counts and the tool list (session 46).**
+  The wool/yarn/linencloth/linen counts (1; 2; 3; 3) and the bucket's
+  3 branches + saw tool requirement are chosen server policy (the
+  paginas carry no recipe numbers); reconcile against Legacy:Yarn /
+  Legacy:Linen Cloth / Legacy:Linen Shirt / Legacy:Linen Pants /
+  Legacy:Bucket when a source is reachable. The tool field itself is
+  now first-class server data - the remaining legacy per-recipe tool
+  list (which crafts needed which tool in hand) is still unknown.
 - **Legacy smelter/kiln/finery numbers.** Fuel amounts, load sizes, and durations quoted above for the smelter are current-world values; the legacy pages exist (Category:Legacy Structures) but were empty or not yet fetched. Fetch Legacy:Ore Smelter, Legacy:Kiln, Legacy:Finery Forge and reconcile.
 - **Craft All stop reporting.** Whether legacy servers sent an error widget/message when batch crafting stopped early, or stopped silently. Determine from a live capture (watch for `RMSG_NEWWDG` text/error widgets after `make 1`).
 - **Pop refresh semantics.** The makewindow `pop` appears to be sent once per window open; whether ingredient counts ever update dynamically (a second `pop` rebuilding the lists) needs a capture of a long-lived window.
