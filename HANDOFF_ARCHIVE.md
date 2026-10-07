@@ -3312,3 +3312,80 @@ session's clone OR recreate it from this snippet:
           - name: tests (unit + wire integration)
             run: cargo test --workspace
 
+## 2026-10-07 - Session 51 (type 3: mechanics - the session-50 TOP fix)
+
+SESSION TYPE ROTATION LOG: 46=3, 47=3, 48=3, 49=2, 50=4, 51=3 (the
+type-3 slot was explicitly sanctioned by session 50: "the build-flow
+regression needs a type-3 session to root-cause and fix"; next session
+should pick 5 (performance), 0 (docs hygiene) or 1 (architecture
+review) before another 2/3).
+
+TOP ITEM CLOSED: the build-flow branch-sink regression is root-caused,
+reproduced, fixed, and pinned on both requested tiers.
+
+ROOT CAUSE (not the session-48 itemact churn; it moved earlier): the
+session-36 starter-kit bump (stone 2 -> 4, branch 2 -> 6 for the bow
+chain) silently broke every build choreography. The plan sink caps at
+the demand line (oven: stone x2, branch x1), the undelivered remainder
+STAYS on the drag cursor (legacy behavior), and the next inv take is
+refused ("one cursor item at a time"), so the branch itemact carried
+stones (remaining(stone)=0 -> silent "does not need that") and the plan
+stalled at sdt=1 forever. test_build.py buildbot simply was not run
+between session 36 and session 50, so the "regression" waited there the
+whole time. Server behavior was never wrong: the inventory `drop`
+wdgmsg path (the legacy drag release) returns the held stack, exactly
+like the legacy client.
+
+FIXES:
+- hnhlib.py: WireClient.return_cursor() - the inventory `drop` wdgmsg
+  that stows the held stack; widget_by_name helper.
+- test_build.py buildbot: return the stone and branch remainders before
+  the next take. stationbot: return the stone remainder after the
+  stage-1 sink; keep the legacy leftover-as-fuel itemact after
+  completion, then stow the rest before taking the meat.
+- game.rs: the starter-kit comment now matches the actual kit sizes
+  (6 branch + 4 stone + 2 string) and states the build headroom.
+- NEW WIRE TEST (session-50 request: "the python probe AND a new cargo
+  wire test"): `build_flow_sinks_partial_stack_then_completes_after_
+  cursor_return` boots the real binary and drives pagina arm -> place
+  uimsg (res + on-tile flag) -> plan spawn (OD_RES sdt 0) -> stone sink
+  (sdt 1, partial) -> cursor-remainder visible -> inventory drop ->
+  branch take -> completion (sdt 0, in-place station conversion).
+- Harness growth (tests/common/mod.rs): ArgVal/parse_args typed-list
+  mirror, OD_RES res+sdt decoding, RMSG_RESID/WDGMSG/DSTWDG handling,
+  building-flow Session helpers (menu_act, send_place, item_by_res,
+  inv_take, map_itemact, inv_drop, last_wdgmsg, gob_pos), and the
+  legacy-cadence 1 s MAPREQ re-request in pump_until; world_entry now
+  WAITS for the nine MAPDATA datagrams (de-flaked under parallel test
+  load: raw MAPDATA is lossy UDP, the old immediate assert was latent).
+
+EVIDENCE: 279 cargo tests green (255 unit + 11 proto + 4 wire + 9
+world), fmt clean, clippy -D warnings clean, release binary rebuilt;
+probes on the release binary: BUILD FLOW OK, STATION FLOW OK, WORLD
+ENTRY OK, CATTR ORDER OK, MOVE PROBE OK.
+
+PUSH BLOCKED (GitHub side, not local): both commits (7e8fc40 probe
+fix, 6f32474 wire test) are LOCAL on master; every push attempt
+returns `remote rejected: Internal Server Error` (5 retries over ~5
+minutes, also --no-thin and a throwaway branch: all rejected; ls-remote
+and the API work fine, rate limit full). NEXT SESSION MUST: `git push
+origin master` first thing; if the local clone is gone, apply
+/home/z/my-project/scripts/session51-patches/*.patch (format-patch of
+e8360f4..HEAD).
+
+NEXT (handoff):
+- The five legacy probes onto hnhlib.py (mechanical; README recipe).
+- Session 49 leftovers: game/interact.rs + game/combat.rs split.
+- Session 48 leftovers: recipe breadth, feeding transfer (lift), GL
+  e2e production walkthrough.
+- Windows smoke + GL client e2e when a display host exists (carried).
+
+### Session 51 addendum: push succeeded on retry
+
+The GitHub receive-pack 500 was transient: minutes after the seven
+rejections, `git push origin master` succeeded and the remote tip is
+now 61a3403 (probe fix 7e8fc40 + wire test 6f32474 + this handoff).
+Nothing to re-push; the saved patches in
+/home/z/my-project/scripts/session51-patches/ are now redundant.
+
+

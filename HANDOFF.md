@@ -157,33 +157,35 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    session-51 world_entry de-flake).
 3. **Perf fields**: cumulative max-tick counter never resets - add a
    per-window max to attribute the 197-210 ms ramp-up spikes.
-4. **Guest scan**: scan_visible's guest loop is O(guests) per full
-   rescan - fine single-node, a landmine at multi-node 10k. Add a
-   per-cell guest bucket (type 1 or 5).
-5. **move_batch**: profile batch_move_broadcast (mv phase is now #2:
+4. **move_batch**: profile batch_move_broadcast (mv phase is now #2:
    3-32 ms windows).
-6. **Probe migration**: move the five legacy self-contained probes onto
+5. **Probe migration**: move the five legacy self-contained probes onto
    hnhlib.py (mechanical; recipe in server/scripts/README.md).
-7. **game.rs split leftovers** (type 2): game/interact.rs (map click/
+6. **game.rs split leftovers** (type 2): game/interact.rs (map click/
    walk/interact/movement/batch) and game/combat.rs (fights, arrows,
    vitals, criminal); game.rs is ~5.3k lines after those.
-8. **Recipe breadth**: ~150 shipped paginae; oven-gated tools/
+7. **Recipe breadth**: ~150 shipped paginae; oven-gated tools/
    furniture/containers; flour/bread blocked (the 2009 pack has no
    grain item - sprout/grist only, see farm.rs).
-9. **Feeding depth**: trough-to-trough fodder transfer needs the lift
+8. **Feeding depth**: trough-to-trough fodder transfer needs the lift
    mechanic; per-animal breed stat rows (Milk Quantity / Wool Quality
    are flat constants).
-10. **Real-client e2e**: GL production walkthrough (tame, wait out the
-    milk meter, milk on screen) and Windows smoke when a display host
-    exists (carried).
+9. **Real-client e2e**: GL production walkthrough (tame, wait out the
+   milk meter, milk on screen) and Windows smoke when a display host
+   exists (carried).
+10. **Guest GC at scale**: the 50-tick guest GC walks the whole guest
+    table per node (session-35 design); bounded by the subscribed
+    population, so fine at 1k - revisit only if multi-node profiling
+    says otherwise (session 54 review note).
 
 ## Session type rotation log (consolidated)
 
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0 (docs hygiene). Type 1 (architecture review) is the only
-never-served type - next sessions should pick 1 before another 3/4/5.
+53=0, 54=1 (architecture review). All six types have now been served
+at least once - pick freely, but avoid serving the same type twice in
+a row.
 
 ## Session index (one line each; full entries in the archive)
 
@@ -235,84 +237,9 @@ never-served type - next sessions should pick 1 before another 3/4/5.
 - S51 (type 3): build-flow branch-sink regression root-caused and fixed (cursor return contract).
 - S52 (type 5): perf re-baseline - fxhash id hasher, allocation-free vis scan, --workers auto.
 - S53 (type 0): docs hygiene - HANDOFF split (living file + verbatim archive), stale sections rebuilt, scripts attic.
+- S54 (type 1): architecture review - guest scan O(node guests) per rescan removed (view-cell-bounded), idempotent VisIndex insert (promote double-insert bug), probe_guest_walk; live 2-node cluster evidence.
 
 ---
-
-## 2026-10-07 - Session 51 (type 3: mechanics - the session-50 TOP fix)
-
-SESSION TYPE ROTATION LOG: 46=3, 47=3, 48=3, 49=2, 50=4, 51=3 (the
-type-3 slot was explicitly sanctioned by session 50: "the build-flow
-regression needs a type-3 session to root-cause and fix"; next session
-should pick 5 (performance), 0 (docs hygiene) or 1 (architecture
-review) before another 2/3).
-
-TOP ITEM CLOSED: the build-flow branch-sink regression is root-caused,
-reproduced, fixed, and pinned on both requested tiers.
-
-ROOT CAUSE (not the session-48 itemact churn; it moved earlier): the
-session-36 starter-kit bump (stone 2 -> 4, branch 2 -> 6 for the bow
-chain) silently broke every build choreography. The plan sink caps at
-the demand line (oven: stone x2, branch x1), the undelivered remainder
-STAYS on the drag cursor (legacy behavior), and the next inv take is
-refused ("one cursor item at a time"), so the branch itemact carried
-stones (remaining(stone)=0 -> silent "does not need that") and the plan
-stalled at sdt=1 forever. test_build.py buildbot simply was not run
-between session 36 and session 50, so the "regression" waited there the
-whole time. Server behavior was never wrong: the inventory `drop`
-wdgmsg path (the legacy drag release) returns the held stack, exactly
-like the legacy client.
-
-FIXES:
-- hnhlib.py: WireClient.return_cursor() - the inventory `drop` wdgmsg
-  that stows the held stack; widget_by_name helper.
-- test_build.py buildbot: return the stone and branch remainders before
-  the next take. stationbot: return the stone remainder after the
-  stage-1 sink; keep the legacy leftover-as-fuel itemact after
-  completion, then stow the rest before taking the meat.
-- game.rs: the starter-kit comment now matches the actual kit sizes
-  (6 branch + 4 stone + 2 string) and states the build headroom.
-- NEW WIRE TEST (session-50 request: "the python probe AND a new cargo
-  wire test"): `build_flow_sinks_partial_stack_then_completes_after_
-  cursor_return` boots the real binary and drives pagina arm -> place
-  uimsg (res + on-tile flag) -> plan spawn (OD_RES sdt 0) -> stone sink
-  (sdt 1, partial) -> cursor-remainder visible -> inventory drop ->
-  branch take -> completion (sdt 0, in-place station conversion).
-- Harness growth (tests/common/mod.rs): ArgVal/parse_args typed-list
-  mirror, OD_RES res+sdt decoding, RMSG_RESID/WDGMSG/DSTWDG handling,
-  building-flow Session helpers (menu_act, send_place, item_by_res,
-  inv_take, map_itemact, inv_drop, last_wdgmsg, gob_pos), and the
-  legacy-cadence 1 s MAPREQ re-request in pump_until; world_entry now
-  WAITS for the nine MAPDATA datagrams (de-flaked under parallel test
-  load: raw MAPDATA is lossy UDP, the old immediate assert was latent).
-
-EVIDENCE: 279 cargo tests green (255 unit + 11 proto + 4 wire + 9
-world), fmt clean, clippy -D warnings clean, release binary rebuilt;
-probes on the release binary: BUILD FLOW OK, STATION FLOW OK, WORLD
-ENTRY OK, CATTR ORDER OK, MOVE PROBE OK.
-
-PUSH BLOCKED (GitHub side, not local): both commits (7e8fc40 probe
-fix, 6f32474 wire test) are LOCAL on master; every push attempt
-returns `remote rejected: Internal Server Error` (5 retries over ~5
-minutes, also --no-thin and a throwaway branch: all rejected; ls-remote
-and the API work fine, rate limit full). NEXT SESSION MUST: `git push
-origin master` first thing; if the local clone is gone, apply
-/home/z/my-project/scripts/session51-patches/*.patch (format-patch of
-e8360f4..HEAD).
-
-NEXT (handoff):
-- The five legacy probes onto hnhlib.py (mechanical; README recipe).
-- Session 49 leftovers: game/interact.rs + game/combat.rs split.
-- Session 48 leftovers: recipe breadth, feeding transfer (lift), GL
-  e2e production walkthrough.
-- Windows smoke + GL client e2e when a display host exists (carried).
-
-### Session 51 addendum: push succeeded on retry
-
-The GitHub receive-pack 500 was transient: minutes after the seven
-rejections, `git push origin master` succeeded and the remote tip is
-now 61a3403 (probe fix 7e8fc40 + wire test 6f32474 + this handoff).
-Nothing to re-push; the saved patches in
-/home/z/my-project/scripts/session51-patches/ are now redundant.
 
 ## 2026-10-07 - Session 52 (type 5: performance)
 
@@ -460,3 +387,71 @@ NEXT (handoff):
   but the last two entries to HANDOFF_ARCHIVE.md and extend the
   session index by one line. That one minute of work keeps the
   context cut permanent.
+
+---
+
+## 2026-10-08 - Session 54 (type 1: architecture review)
+
+SESSION TYPE ROTATION LOG: 49=2, 50=4, 51=3, 52=5, 53=0, 54=1. All six
+types served at least once now - pick freely, avoid repeats in a row.
+
+GOAL: review the architecture for scalability/correctness landmines on
+the road to multi-node 10k, and spend the session closing the one the
+gaps list flagged (the O(guests) scan term).
+
+REVIEW FINDINGS (verified by reading the code, not assumed):
+
+- INVARIANT (sound): every guest lifecycle site keeps the guest row and
+  its VisIndex membership in sync - ingest_guest (insert/reposition),
+  both authority-demote paths (insert after kill), remove_guest
+  (remove). The session-30 patch path already resolves ids through
+  gobs.get().or_else(guests.get()), so guests flow through the touched
+  lists correctly. Because of this, the per-cell guest bucket the gaps
+  list asked for was unnecessary: the buckets ALREADY hold guests.
+- BUG 1 (real, fixed): scan_visible_into dropped guests in its
+  compaction (gobs.get miss) and then re-walked the WHOLE guest table
+  per rescan - O(node guest population) per session per scan. Empty
+  table single-node (invisible in every single-node load run), a
+  landmine at multi-node 10k. Fix: the compaction resolves local-first/
+  guest-second and the walk is gone; scan cost is bounded by the guest
+  population of the VIEW cells.
+- BUG 2 (real, fixed): spawn_with_id inserts into the VisIndex
+  unconditionally, so promote_transfer re-spawning a previously
+  ingested guest pushed the id into the SAME cell bucket twice (the
+  dead `let _ = was_guest;` binding hinted at it). Dupes made the scan
+  list the id twice and cell_count() lie. Fix: VisIndex::insert is now
+  idempotent per (id, cell) - same-cell re-insert marks dirty/touched;
+  a drifted mapping heals through reposition.
+- INVARIANT (sound): gob ids are globally unique in a cluster by
+  per-node slot partitioning (Gobs::with_layout hands each node a
+  disjoint slot range; wire blocks stay valid without id remapping).
+- Review notes carried to the gaps list: the 50-tick guest GC walks the
+  whole guest table per node (bounded by the subscribed population;
+  fine at 1k, revisit only with multi-node profiling).
+
+VERIFICATION:
+
+- cargo fmt + clippy -D warnings clean; 285 tests green (261 unit incl.
+  3 new pins: two visidx-level idempotence pins + the game-level
+  guest_promotion_does_not_duplicate_the_vis_bucket_entry, 11 proto,
+  4 wire, 9 world). No Rust rule violations: rust-skills loaded before
+  coding (mem-reuse-collections, coll-seq-choice re-read; the compaction
+  stays allocation-free write-index).
+- LIVE 2-NODE CLUSTER (release binary, seed 42, fresh saves): wire
+  client WORLD ENTRY: OK through node 0; MOVE PROBE: OK (probe_walk);
+  new scripts/probe_guest_walk.py walked 880 subtiles east across 4
+  VisIndex cells (cell (4,2) is node-1-owned by rendezvous) - node 0
+  ingested 17 guests and transferred 13 local animals out, zero errors
+  or panics on both nodes (RUST_LOG=hnh_server=debug to see the
+  ingest/transfer lines).
+
+COMMITS: 3fd2681 (scan + visidx fixes + test pins), dcb23da
+(probe_guest_walk + README row) + this handoff entry.
+
+NEXT (handoff):
+- The gaps list in the living file is renumbered (guest scan done);
+  top picks: wire-test de-flake (type 4), batch_move_broadcast
+  profiling (type 5), game.rs interact/combat split (type 2), recipe
+  breadth (type 3). Windows smoke + GL e2e still carried.
+- CI workflow push: token unchanged, still no `workflow` scope - not
+  retried this session per the session-53 note.
