@@ -347,6 +347,28 @@ class WireClient:
     def wdgmsg(self, wid, name, args=b""):
         self.send_rel([bytes([RMSG_WDGMSG]) + le16(wid) + havstr(name) + args])
 
+    def widget_by_name(self, name):
+        for wid, n in self.widgets.items():
+            if n == name:
+                return wid
+        return None
+
+    def return_cursor(self):
+        """Release the held (cursor) stack back into the inventory.
+
+        Mirrors the legacy client's drag release inside the inventory
+        grid: the inv window `drop` wdgmsg. The plan sink leaves the
+        undelivered remainder of a stack on the drag cursor (stone x4
+        starter stack against the oven's stone x2 demand, session 36);
+        the remainder must be stowed before another stack can be taken
+        (one cursor item at a time, game/items.rs inv_take).
+        """
+        inv = self.widget_by_name("inv")
+        if inv is None:
+            return False
+        self.wdgmsg(inv, "drop", bytes([LIST_END]))
+        return True
+
     def mapreq(self, gx, gy):
         self.sock.sendto(bytes([MSG_MAPREQ]) + le32(gx) + le32(gy), self.server)
 

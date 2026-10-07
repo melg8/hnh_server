@@ -137,8 +137,10 @@ def run_buildbot():
     print("plan gob placed:", plan, "stage sdt", list(c.gobs[plan]["sdt"]))
 
     # --- 3. sink the stone stack: stage advances ----------------------------
-    # Oven demand: stone x2 + branch x1 (3 units, 2 stages). Two stones
-    # cross the 2/3 boundary: stage 0 -> 1 (sdt re-render).
+    # Oven demand: stone x2 + branch x1 (3 units, 2 stages). The starter
+    # stone stack carries 4 (session 36 bow-chain kit): the plan takes 2
+    # and the remainder stays on the drag cursor, so it must be returned
+    # to the inventory before the branch can be picked up.
     stone = c.find_item_by_res("gfx/invobjs/stone")
     assert stone is not None, "starter stone missing"
     c.take_item(stone)
@@ -148,6 +150,8 @@ def run_buildbot():
     assert ok, "stage never advanced after stone sink (sdt=%r)" % (
         c.gobs[plan]["sdt"],)
     print("stones sunk: stage sdt ->", list(c.gobs[plan]["sdt"]))
+    assert c.return_cursor(), "inventory window missing for cursor return"
+    c.pump(0.3)
 
     # --- 4. sink the branch stack: completion --------------------------------
     branch = c.find_item_by_res("gfx/invobjs/branch")
@@ -161,6 +165,10 @@ def run_buildbot():
     ok = c.wait_for(lambda: c.gobs[plan]["sdt"] == b"\x00", 4)
     assert ok, "plan never completed (sdt=%r)" % (c.gobs[plan]["sdt"],)
     print("branch sunk: plan completed, gob", plan)
+    # The branch stack (6 in the kit) also exceeds its demand line (1):
+    # stow the remainder so the click below is an empty-handed interact.
+    assert c.return_cursor(), "inventory window missing for cursor return"
+    c.pump(0.3)
 
     # --- 5. the finished gob offers the Light flower menu -------------------
     c.click_gob(plan, mc)
@@ -211,6 +219,10 @@ def run_stationbot():
     ok = c.wait_for(lambda: c.gobs[plan]["sdt"] == b"\x01", 4)
     assert ok, "stage never advanced after stone sink (sdt=%r)" % (
         c.gobs[plan]["sdt"],)
+    # The starter stone stack (4) exceeds the stone demand line (2):
+    # stow the cursor remainder before the branch can be taken.
+    assert c.return_cursor(), "inventory window missing for cursor return"
+    c.pump(0.3)
     branch = c.find_item_by_res("gfx/invobjs/branch")
     c.take_item(branch)
     c.pump(0.3)
@@ -220,12 +232,16 @@ def run_stationbot():
     print("oven built:", plan)
 
     # --- station: fuel delivery --------------------------------------------
-    # Oven demand consumed stone x2 + branch x1; the branch stack carried
-    # two units, so the leftover branch is still on the cursor (take moves
-    # the whole stack). The next itemact delivers it as fuel.
+    # Oven demand consumed stone x2 + branch x1; the branch stack (6 in
+    # the session-36 kit) leaves its remainder on the cursor, and the
+    # next itemact delivers one unit of it as fuel.
     c.map_itemact(mc, plan)
     c.pump(0.5)
     print("fuel delivered")
+    # Fuel deliveries take one unit per itemact: the cursor still holds
+    # the rest of the branch stack. Stow it so the meat can be taken.
+    assert c.return_cursor(), "inventory window missing for cursor return"
+    c.pump(0.3)
 
     # --- station: input delivery -------------------------------------------
     meat = c.find_item_by_res("gfx/invobjs/meat")

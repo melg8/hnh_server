@@ -1559,10 +1559,12 @@ impl Game {
         // Labels on food keep the fep.conf identity for the eat flow.
         if self.world.players[player_idx].inv.is_empty() {
             let kit: &[(&str, u32, u8, &'static str)] = &[
-                // Session 36: 6 branches + 2 stones + 2 string let a fresh
+                // Session 36: 6 branches + 4 stones + 2 string let a fresh
                 // character craft one Wooden Bow (4 branch + 1 string) and
                 // one batch of Stone Arrows (1 stone + 2 branch) out of the
-                // box - the whole bow chain is playable immediately.
+                // box, with oven-building headroom (stone x2 + branch x1 of
+                // the demand) on top - the whole bow chain is playable
+                // immediately.
                 ("gfx/invobjs/branch", 6, 10, ""),
                 ("gfx/invobjs/stone", 4, 10, ""),
                 ("gfx/invobjs/string", 2, 10, ""),
