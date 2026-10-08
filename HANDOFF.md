@@ -642,14 +642,59 @@ NOT DONE (deliberate, measured out of scope for the remaining budget):
   carries Arcs too (a Vec channel forces the deep clone on resend
   regardless); with the ack-lag RTO the resend count fell ~2x already -
   revisit only if retx_resent climbs again.
-- Budget-capped incremental sweep (round-robin cursor): the residual
-  wmax_retx spikes (up to 85 ms during the worst entry window) are the
-  next type-5 candidate if they persist after the RTO settles in.
+
+WAVE 3 (same session, follow-up commit): the budget-capped incremental
+retx sweep - DONE and verified.
+
+- RETRANS_SWEEP_BUDGET = 8192 resends per sweep pass; each live
+  session is guaranteed RETRANS_SESSION_SHARE_MIN = 64 sends (the
+  global budget still caps the sum: with the share floor, sends stop
+  at the budget boundary - share*sessions saturates it after ~128
+  busy sessions at the 1000-peer scale).
+- Round-robin ring: the sweep walks a SessionId-sorted scratch ring
+  (retx_scratch, taken/restored - no per-sweep allocation) starting at
+  retx_cursor; the cursor advances by the slots SEEN, so budget-starved
+  sessions go first on the next pass. The ring MUST be sorted: the
+  sessions map iterates in randomized order and an unsorted ring makes
+  the cursor point at a different session every sweep (no fairness).
+- Queue-full pre-check BEFORE the clone: tokio's mpsc capacity()
+  counts FREE slots (drops on send, rises on recv) - a full queue
+  reads capacity == 0. The first cut had this inverted
+  (capacity >= max_capacity is TRUE for an EMPTY queue) and silently
+  refused every resend - caught by the wire suite
+  (trough_lift... "lift never confirmed": the retract echo is a
+  retransmitted block, syslines are not). Fixed to capacity() == 0;
+  the pre-check also kills the wasted deep clones on full queues.
+- Share spent mid-gob breaks to the next sweep; breaking never
+  reorders the wire - later frames are just NOT sent yet (the
+  blocked-latch ordering guarantee is unchanged).
+
+POST-FIX (1000-bot entry burst, /tmp/load_budget2.log):
+
+- retx_resent pinned at 8.19-8.25K per sweep for the WHOLE run (the
+  budget is the binding constraint, as designed; was 18-44K free-running).
+- wmax_retx_sweep_us 5.5-14.3 ms (was 22-85 post-RTO, 85-107 pre-S68).
+- retx_queue_full = 0 on every report (was 14-61K spikes).
+- retx_pending drains 57K -> 10-17K steady (was 54-165K).
+- mean_tick_us declines 66 -> 16 ms as the entry burst settles;
+  end-of-run wmax_tick_us 33-47 ms (entry-window peaks 144-226 ms are
+  mvbat fan-out bursts of 650-690K pairs, NOT the sweep - re-rank).
+- VERIFIED: 308 green (11 proto + 281 unit + 6 wire + 10 world);
+  fmt --check + clippy -D warnings clean.
 
 NEXT (handoff):
-- Type-5 candidates: budget-capped incremental retx sweep (cursor +
-  per-sweep budget) for the residual entry-burst spikes;
-  mvbat_fanout_us is now 3.5-43 ms - re-rank before cutting again.
+- Type-5 candidate #1: mvbat_fanout_us - the last big wmax_tick
+  contributor (31-63 ms peaks at 650K+ pair bursts during entry and
+  bot-retirement churn). Ideas: split the fan-out pair loop per grid
+  cell (the encode+bitset probe is already cheap per pair - profile
+  where the 63 ms goes: pair iteration itself vs the HashSet-style
+  finalize bookkeeping), or snapshot the mover list before the pass.
+- Type-5 candidate #2: retx_resent stays budget-pinned in STEADY
+  state (every report shows ~8.2K with pending 10-17K) - the sweep
+  keeps resending ~8 blocks/session; check whether the ack-lag RTO
+  floor (2x EMA, capped 4 s) is too low for load bots whose ack
+  stream competes with the fan-out, or whether load bots retire
+  before acking (retx_pending retiring through RETRANS_MAX_AGE_MS).
 - Type-3 candidates (from S66/S67): kiln + brick chain, anvil +
   tool-gated recipes, flower pick verbs, per-animal breed stat rows.
 - Finish test_smelt.py tin leg (S67 finding; smelter/crucible phases
@@ -658,4 +703,5 @@ NEXT (handoff):
   push when the token gets the workflow scope.
 
 COMMITS: efbddb1 (fan-out pair attribution + wmax snapshot),
-20a96d4 (bitset fast path + ack-lag RTO + conditional retire).
+20a96d4 (bitset fast path + ack-lag RTO + conditional retire),
+this session's wave 3 (budgeted round-robin retx sweep).
