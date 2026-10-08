@@ -4289,3 +4289,114 @@ VERIFIED (fresh runs):
   server-side (no statics re-stream), not test-side.
 
 COMMITS: wire tests + harness + handoff.
+
+## 2026-10-08 - Session 64 (type 1: architecture review)
+
+SESSION TYPE ROTATION LOG: 60=3, 61=2, 62=3, 63=4, 64=1. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the retransmission architecture promised by the wire contract
+but never built. Reading stream.rs / net.rs against Session.java
+exposed the largest architectural defect of the raw UDP path: the
+`unacked` table was WRITE-ONLY. Spawns, movement finalizers, hp ticks
+and fx blocks were all recorded for "OBJACK retransmission", on_objack
+only cleaned it - and NOT ONE LINE anywhere ever resent a recorded
+block. Raw OBJDATA was fire-and-forget UDP wearing a reliability
+costume. That is the root cause of gap #8 ("a lost spawn is
+unrecoverable - the client never re-requests statics"), of the
+session-56 flake family, and of the wire-test #[ignore] the last
+sessions carried.
+
+DESIGN (per-session, OBJACK-driven, in-order):
+
+- `SessionOut.unacked` became a per-gob `BTreeMap<frame,
+  UnackedBlock>` with `UnackedBlock { bytes, last_sent, tries,
+  critical }`. The ordered map IS the in-order guarantee: the sweep
+  walks frames ascending, so resent datagrams keep the wire order a
+  spawn -> move -> retract sequence had on the socket; a resent stale
+  frame must never overtake a newer one (an out-of-order OD_REM would
+  phantom-delete a fresh spawn client-side).
+- `SessionOut.gob_acked: GobId -> Option<u32>` - the client's acked
+  high-water mark (it echoes its max decoded frame). The Option is
+  load-bearing: frame 0 is a REAL wire frame (an untouched static's
+  spawn) and the first implementation gated `frame <= acked(=0)`
+  against it - the wire probe caught statics never retransmitting.
+- `stream::retransmit_unacked()` runs every 3rd tick (~300 ms) as a
+  rare-event pass: block delay = 250 ms fast window (5 attempts for
+  critical, 3 for self-healing), then 1 s slow (4 / 2), then retire.
+  Critical = spawn, retract, full re-render (build transitions, crop
+  stages, guest kind changes) - blocks the client cannot recover any
+  other way. Self-healing = movement finalizers, hp ticks - the next
+  tick's frame supersedes a lost one. Retirement keeps sessions that
+  never ack (load bots, dead peers) from accumulating retransmit
+  state - the measured OOM shape from the 1000-session scale.
+- A failed `try_send` (raw queue full under burst fan-out) does NOT
+  burn an attempt: the next sweep retries while the queue drains.
+- `on_objack` merges the ack high-water mark (max) and retains frames
+  > acked - the old code was correct here, just incomplete.
+
+RETRACT-FRAME FIX (caught by the full-suite trough-lift contract the
+same session): an OD_REM must ride max(server frame, acked mark,
+highest pending frame) + 1. The first implementation retracted at the
+gob's current frame - for a killed gob that is a frame the client's
+ack already covered, so the gate silently skipped the removal forever
+and the client rendered a phantom. Second fix, same session: a
+retract SUPERSEDES all pending blocks of the gob (a spawn resent
+after OD_REM would resurrect a phantom).
+
+CLIENT CONTRACT (verified against src/haven/Session.java): the
+SWorker repeats its batched MSG_OBJACK every 200 ms while an entry is
+under ~120 ms idle; a repeat OBJDATA frame merely updates objacks and
+OC state (getgob is idempotent), so duplicate blocks are safe; a
+block that stays unacked is unrecoverable client-side - hence the
+whole mechanism.
+
+WIRE PROBE (`lost_static_spawn_wave_is_retransmitted`, IN the gate,
+~1.7 s): boots the real binary, arms a 1.2 s inbound-OBJDATA drop
+window right after world entry (the whole statics burst plus the
+first fast retransmits land inside it), then demands (a) a live
+in-view static arriving - only the sweep can deliver it - and (b) the
+deterministic proof: OBJACKs held, a duplicate (id, frame) MUST
+appear on the wire. The harness gained drop_objdata_until /
+dropped_objdata / hold_objacks / saw_retransmitted_spawn and a
+seen-frames ledger; ServerGuard honors HNH_KEEP_WORKDIR=1 to preserve
+a failed run's server log.
+
+TEST TIER NOTE: the gathering walking scenario stays #[ignore]d, now
+for a DOCUMENTED non-loss reason (40-90 s of wall-clock-bound walk
+hops starve under two concurrent boots on the 2-core sandbox;
+observed once in the full parallel suite). Gap #8 is
+server-resolved and re-scoped; network-protocol.md "Server
+implementation notes" gained the retransmission regime (frames,
+schedule, the removal-frame rule).
+
+VERIFIED (fresh runs):
+- cargo fmt --all -- --check clean; clippy --all-targets
+  -D warnings clean.
+- cargo test --workspace: 301 green (11 proto + 274 unit + 6 wire in
+  the gate + 1 ignored + 9 world).
+- lost_static_spawn_wave: 3/3 consecutive green runs (~1.7 s each);
+  trough-lift and the movement contract re-verified against the
+  retract-frame change.
+- Perf sanity (release, 300 bots, saturated world): steady-state tick
+  7-12 ms, mean 28 ms, per-window max 69 ms only during the bot-entry
+  burst - the 100 ms budget holds with the sweep live.
+
+PROCESS NOTE: a `git reset --hard` while reverting the CI-push retry
+wiped this session's uncommitted tree mid-session; everything was
+re-applied from the session's own edit scripts and re-verified (the
+full-suite green above is POST-restore). Commit early - uncommitted
+work is unrecoverable work.
+
+COMMITS: retransmission core + wire probe + harness loss simulation
+(one change set), docs + handoff (second).
+
+NEXT (handoff):
+- Type-3 candidates: metal chain groundwork (ore + smelter), flower
+  pick verbs, per-animal breed stat rows.
+- Type-5 candidate: profile the retransmit sweep at the 1000-bot
+  scale (it is O(pending) per ~300 ms; expect near-zero in the
+  steady state - verify, do not assume).
+- Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
+  (no display host), multi-machine cluster profile, CI push when the
+  token gets the workflow scope.

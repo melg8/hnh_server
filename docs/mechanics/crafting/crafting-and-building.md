@@ -398,6 +398,40 @@ Server implementation notes (this repo, session 60):
     the saw and the crafted-saw bucket; the cargo unit battery covers
     the tanhide/leather/lboots quality math end to end.
 
+## Server implementation notes (this repo, session 66: metal chain groundwork)
+
+- **Ore source: ore deposits on the rocky belt.** MOUNTAIN/CAVE tiles
+  with a walkable 4-neighbor spawn `gfx/terobjs/mining/heap` ore
+  deposits (3% roll); each deposit carries Copper/Tin/Iron
+  (`state::OreKind::from_roll`, 5:3:2 per-tile mix) and yields ORE_PICKS
+  (= 4) picks of the ore item with its display label ("Copper Nugget" /
+  "Tin Nugget" / "Iron Ore"), ORE_PICK_LP per pick. Deposits are pure
+  seed-derived statics (hnh-world pins the dev-seed belt within ~26
+  tiles of the spawn area). Picks ride the same Mine act as boulders,
+  local and relay paths.
+- **The smelter is a working station.** `StationSpec.kind: StationKind`
+  (Oven/Smelter) dispatches the itemact input match, the refusal lines
+  and the job output; tick_stations drops whatever the kind rolls (the
+  old hardcoded meat drop is gone). The smelter takes the ore labels
+  through `craft::SMELT_MAP`: copper nugget -> bar-copper, tin nugget
+  -> bar-tin, iron ore -> bar-castiron (the finery-forge leg is
+  stand-in'd by a hand craft, below). Branch fuel, one ore per 30-tick
+  job (server policy; legacy ~55 min per 25-ore load), output under the
+  station quality formula. Pack-missing world shapes for tin/cast-iron
+  bars render through `DROP_WORLD_ALIASES` sibling metals.
+- **Refinement tier (hand crafts from shipped paginae).** The shipped
+  `paginae/craft/bloom2wrought` (ad "wroughtiron") refines bar-castiron
+  x1 -> bar-wroughtiron x1 - legacy ran this on a finery forge; the
+  hand-craft entry is the tanhide-pattern stand-in until that station
+  exists. The shipped `paginae/craft/shammer` (ad "shammer") makes the
+  smithy's hammer (bar-wroughtiron x1 + branch x1 ->
+  gfx/invobjs/hammer-smithys), the first metal tool; the anvil-era
+  recipes will tool-gate on it through the session-46 plumbing. Unit
+  counts are server policy (Open questions). Wire probe
+  `scripts/test_smelt.py` drives ore pick -> smelter build/fuel/load/
+  light -> bar -> (iron leg) wrought iron; unit pins cover the smelt
+  map, the recipe wiring and the end-to-end softcap math.
+
 ## Open questions
 
 - **Build-menu action verb.** RESOLVED (session 15): the ad string is the
@@ -442,7 +476,14 @@ Server implementation notes (this repo, session 60):
   Legacy:Bucket when a source is reachable. The tool field itself is
   now first-class server data - the remaining legacy per-recipe tool
   list (which crafts needed which tool in hand) is still unknown.
-- **Legacy smelter/kiln/finery numbers.** Fuel amounts, load sizes, and durations quoted above for the smelter are current-world values; the legacy pages exist (Category:Legacy Structures) but were empty or not yet fetched. Fetch Legacy:Ore Smelter, Legacy:Kiln, Legacy:Finery Forge and reconcile.
+- **Metal-chain numbers (session 66).** The smelter's interim demand
+  (stone x6 + branch x4 - legacy: Brick x35 + Stone x10 + Bar of Hard
+  Metal x3, unreachable until the kiln lands), the 1-ore-per-job load
+  and the 30-tick job, the ore mix 5:3:2, and the refinement unit
+  counts (castiron->wroughtiron 1:1; hammer bar+branch) are chosen
+  server policy. Reconcile against Legacy:Ore Smelter / Legacy:Wrought
+  Iron / Legacy:Smithy's Hammer when reachable. Bronze alloying is not
+  invented data (open question above).
 - **Craft All stop reporting.** Whether legacy servers sent an error widget/message when batch crafting stopped early, or stopped silently. Determine from a live capture (watch for `RMSG_NEWWDG` text/error widgets after `make 1`).
 - **Pop refresh semantics.** The makewindow `pop` appears to be sent once per window open; whether ingredient counts ever update dynamically (a second `pop` rebuilding the lists) needs a capture of a long-lived window.
 - **Tool wear per craft.** Legacy per-craft wear values for tools are unknown; decide whether to adopt modern values or reconstruct from patch notes.

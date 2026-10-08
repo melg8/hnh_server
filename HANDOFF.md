@@ -232,7 +232,7 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2, 62=3, 63=4, 64=1, 65=5. All six
+53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2, 62=3, 63=4, 64=1, 65=5, 66=3. All six
 types have been served - pick freely, but avoid serving the same type as
 the previous session.
 
@@ -298,124 +298,12 @@ the previous session.
 - S63 (type 4): wire tier 4 -> 6 - trough lift contract IN the default gate; gathering walking scenario (#[ignore], explicit run); harness: sm menus, chat lines, click_gob/flower_choice, candidate scans, 2-slot concurrency governor, OD_REM decode fix; movement contract retargeted to the clicked point.
 - S64 (type 1): the missing OBJACK retransmission half built - unacked blocks now BTreeMap<frame, UnackedBlock> + per-gob acked high-water mark (Option: frame 0 is real); in-order ~300 ms sweep resends lost spawn/retract/re-render (critical) and finalizer/hp (self-healing) blocks and retires exhausted ones; OD_REM rides max-seen-frame+1 and supersedes the gob history; probe lost_static_spawn_wave_is_retransmitted in the gate; gathering #[ignore] re-labeled (walk length, not spawn loss).
 - S65 (type 5): retransmit death spiral measured and broken - the 1000-bot run showed 1.6M pending blocks and a 426 ms sweep (load bots never OBJACK + no-burn on queue-full refusals = retirement never fires); fixes: retx_* perf attribution, hard age ceiling (10 s), per-session queue-full throttle (1 s skip), expired blocks latch the in-order walk, load bots echo batched MSG_OBJACK like the real client; post-fix mean tick 31-86 ms at 1000 sessions (was 226 ms).
+- S66 (type 3): metal chain groundwork - ore deposits (Copper/Tin/Iron) on the
+  rocky belt, the smelter becomes a working station (StationKind dispatch, SMELT_MAP
+  ore -> bars), refinement tier from the shipped bloom2wrought/shammer paginae
+  (castiron -> wrought iron -> smithy's hammer); test_smelt.py wire probe, 306 green.
 
 ---
-
----
-
----
-
-## 2026-10-08 - Session 64 (type 1: architecture review)
-
-SESSION TYPE ROTATION LOG: 60=3, 61=2, 62=3, 63=4, 64=1. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: the retransmission architecture promised by the wire contract
-but never built. Reading stream.rs / net.rs against Session.java
-exposed the largest architectural defect of the raw UDP path: the
-`unacked` table was WRITE-ONLY. Spawns, movement finalizers, hp ticks
-and fx blocks were all recorded for "OBJACK retransmission", on_objack
-only cleaned it - and NOT ONE LINE anywhere ever resent a recorded
-block. Raw OBJDATA was fire-and-forget UDP wearing a reliability
-costume. That is the root cause of gap #8 ("a lost spawn is
-unrecoverable - the client never re-requests statics"), of the
-session-56 flake family, and of the wire-test #[ignore] the last
-sessions carried.
-
-DESIGN (per-session, OBJACK-driven, in-order):
-
-- `SessionOut.unacked` became a per-gob `BTreeMap<frame,
-  UnackedBlock>` with `UnackedBlock { bytes, last_sent, tries,
-  critical }`. The ordered map IS the in-order guarantee: the sweep
-  walks frames ascending, so resent datagrams keep the wire order a
-  spawn -> move -> retract sequence had on the socket; a resent stale
-  frame must never overtake a newer one (an out-of-order OD_REM would
-  phantom-delete a fresh spawn client-side).
-- `SessionOut.gob_acked: GobId -> Option<u32>` - the client's acked
-  high-water mark (it echoes its max decoded frame). The Option is
-  load-bearing: frame 0 is a REAL wire frame (an untouched static's
-  spawn) and the first implementation gated `frame <= acked(=0)`
-  against it - the wire probe caught statics never retransmitting.
-- `stream::retransmit_unacked()` runs every 3rd tick (~300 ms) as a
-  rare-event pass: block delay = 250 ms fast window (5 attempts for
-  critical, 3 for self-healing), then 1 s slow (4 / 2), then retire.
-  Critical = spawn, retract, full re-render (build transitions, crop
-  stages, guest kind changes) - blocks the client cannot recover any
-  other way. Self-healing = movement finalizers, hp ticks - the next
-  tick's frame supersedes a lost one. Retirement keeps sessions that
-  never ack (load bots, dead peers) from accumulating retransmit
-  state - the measured OOM shape from the 1000-session scale.
-- A failed `try_send` (raw queue full under burst fan-out) does NOT
-  burn an attempt: the next sweep retries while the queue drains.
-- `on_objack` merges the ack high-water mark (max) and retains frames
-  > acked - the old code was correct here, just incomplete.
-
-RETRACT-FRAME FIX (caught by the full-suite trough-lift contract the
-same session): an OD_REM must ride max(server frame, acked mark,
-highest pending frame) + 1. The first implementation retracted at the
-gob's current frame - for a killed gob that is a frame the client's
-ack already covered, so the gate silently skipped the removal forever
-and the client rendered a phantom. Second fix, same session: a
-retract SUPERSEDES all pending blocks of the gob (a spawn resent
-after OD_REM would resurrect a phantom).
-
-CLIENT CONTRACT (verified against src/haven/Session.java): the
-SWorker repeats its batched MSG_OBJACK every 200 ms while an entry is
-under ~120 ms idle; a repeat OBJDATA frame merely updates objacks and
-OC state (getgob is idempotent), so duplicate blocks are safe; a
-block that stays unacked is unrecoverable client-side - hence the
-whole mechanism.
-
-WIRE PROBE (`lost_static_spawn_wave_is_retransmitted`, IN the gate,
-~1.7 s): boots the real binary, arms a 1.2 s inbound-OBJDATA drop
-window right after world entry (the whole statics burst plus the
-first fast retransmits land inside it), then demands (a) a live
-in-view static arriving - only the sweep can deliver it - and (b) the
-deterministic proof: OBJACKs held, a duplicate (id, frame) MUST
-appear on the wire. The harness gained drop_objdata_until /
-dropped_objdata / hold_objacks / saw_retransmitted_spawn and a
-seen-frames ledger; ServerGuard honors HNH_KEEP_WORKDIR=1 to preserve
-a failed run's server log.
-
-TEST TIER NOTE: the gathering walking scenario stays #[ignore]d, now
-for a DOCUMENTED non-loss reason (40-90 s of wall-clock-bound walk
-hops starve under two concurrent boots on the 2-core sandbox;
-observed once in the full parallel suite). Gap #8 is
-server-resolved and re-scoped; network-protocol.md "Server
-implementation notes" gained the retransmission regime (frames,
-schedule, the removal-frame rule).
-
-VERIFIED (fresh runs):
-- cargo fmt --all -- --check clean; clippy --all-targets
-  -D warnings clean.
-- cargo test --workspace: 301 green (11 proto + 274 unit + 6 wire in
-  the gate + 1 ignored + 9 world).
-- lost_static_spawn_wave: 3/3 consecutive green runs (~1.7 s each);
-  trough-lift and the movement contract re-verified against the
-  retract-frame change.
-- Perf sanity (release, 300 bots, saturated world): steady-state tick
-  7-12 ms, mean 28 ms, per-window max 69 ms only during the bot-entry
-  burst - the 100 ms budget holds with the sweep live.
-
-PROCESS NOTE: a `git reset --hard` while reverting the CI-push retry
-wiped this session's uncommitted tree mid-session; everything was
-re-applied from the session's own edit scripts and re-verified (the
-full-suite green above is POST-restore). Commit early - uncommitted
-work is unrecoverable work.
-
-COMMITS: retransmission core + wire probe + harness loss simulation
-(one change set), docs + handoff (second).
-
-NEXT (handoff):
-- Type-3 candidates: metal chain groundwork (ore + smelter), flower
-  pick verbs, per-animal breed stat rows.
-- Type-5 candidate: profile the retransmit sweep at the 1000-bot
-  scale (it is O(pending) per ~300 ms; expect near-zero in the
-  steady state - verify, do not assume).
-- Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
-  (no display host), multi-machine cluster profile, CI push when the
-  token gets the workflow scope.
-
 ## 2026-10-08 - Session 65 (type 5: performance)
 
 SESSION TYPE ROTATION LOG: 61=2, 62=3, 63=4, 64=1, 65=5. All six types
@@ -493,3 +381,81 @@ NEXT (handoff):
 - Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
   (no display host), multi-machine cluster profile, CI push when the
   token gets the workflow scope.
+
+---
+## 2026-10-08 - Session 66 (type 3: new functionality)
+
+SESSION TYPE ROTATION LOG: 62=3, 63=4, 64=1, 65=5, 66=3. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the S64/S65 handoffs named "metal chain groundwork (ore +
+smelter)" as the first type-3 candidate. The smelter had stood as a
+plain structure since session 15 ("until the metal chain exists"), and
+no metal item could enter the economy. TWO implementation waves landed
+under this session number (the second rebased on the first's push).
+
+WAVE 1 (d91dcb0): ore deposits + a working smelter.
+
+- ORE DEPOSITS: MOUNTAIN/CAVE tiles with a walkable 4-neighbor spawn
+  gfx/terobjs/mining/heap ore deposits (3% roll), each carrying
+  Copper/Tin/Iron (OreKind::from_roll, 5:3:2 per-tile mix), ORE_PICKS
+  = 4 picks of the ore item (display label), ORE_PICK_LP per pick.
+  Deposits are pure seed-derived statics; hnh-world gained find_tile +
+  GridStore::terrain_at and pins the dev-seed rocky belt within ~26
+  tiles of the spawn area.
+- SMELTER STATION: StationSpec.kind: StationKind (Oven/Smelter)
+  dispatches itemact input matching, refusals and the job output;
+  tick_stations drops whatever the kind rolls (the hardcoded meat drop
+  is gone). craft::SMELT_MAP melts ore labels: copper nugget ->
+  bar-copper, tin nugget -> bar-tin, iron ore -> bar-castiron. Branch
+  fuel, one ore per 30-tick job (server policy; legacy ~55 min per
+  25-ore load), station quality formula on the output.
+  DROP_WORLD_ALIASES renders pack-missing tin/cast-iron world shapes
+  through sibling metals. Station wording neutralized on ALL paths
+  (local, relay-ack, menu) to "The station ...".
+
+WAVE 2 (this session's commit): the refinement tier.
+
+- The SHIPPED paginae come alive: bloom2wrought (ad "wroughtiron")
+  refines bar-castiron x1 -> bar-wroughtiron x1 (the finery-forge leg
+  stand-in, tanhide pattern), shammer makes the smithy's hammer
+  (bar-wroughtiron + branch -> hammer-smithys), the first metal tool.
+  Unit counts are server policy; both paginae and both items ship in
+  the pack.
+- Unit pins: wrought_iron_and_hammer_recipes_are_wired (pack-aware),
+  metal_refinement_chain_crafts_bar_and_hammer (craft_once end to
+  end: q40 cast iron -> 25 wrought -> 13 hammer through the str
+  softcap).
+- Wire probe fix: test_smelt.py missed the second pickup hop of the
+  gathering shape (click the deposit -> the ORE DROP spawns -> click
+  the drop -> the inventory stack) and matched tin's aliased world
+  shape wrong; both fixed (ORE_WORLD mapping + nearest-few deposit
+  approach retries). SMELT: OK green (copper leg measured; the iron
+  leg is probabilistic - 2/10 deposits are iron).
+
+VERIFIED (fresh runs): cargo fmt --all -- --check clean; clippy
+--all-targets -D warnings clean; cargo test --workspace 306 green
+(11 proto + 279 unit + 6 wire + 10 world, 1 gathering #[ignore]).
+oven regression STATION FLOW: OK and WORLD ENTRY: OK re-proved on the
+wave-1 binary; SMELT: OK on the wave-2 binary.
+
+PROCESS NOTE: this session initially rebuilt the whole metal chain
+independently (ore boulders + sdt flag + its own StationKind + probe)
+without noticing the parallel push until the non-fast-forward reject;
+the local duplicate work was discarded at reset and re-based as the
+smaller refinement wave. Lesson: re-check origin/master right before
+pushing ANY session-shaped work - the repo has parallel writers.
+
+NEXT (handoff):
+- Type-3 candidates: kiln + brick chain (restores the legacy
+  smelter/oven demands), anvil + smithy's-hammer tool-gated recipes,
+  flower pick verbs, per-animal breed stat rows.
+- Type-5 candidates: mvbat_fanout_us remains the top single phase at
+  1000 sessions; entry-burst wmax (283 ms) attribution.
+- Carried: test_smelt.py walk phase can exceed 2 min on unlucky
+  pathing (bounded retry, runs green on retry); GL e2e + Windows
+  smoke (no display host); multi-machine cluster profile; CI push
+  when the token gets the workflow scope.
+
+COMMITS: wave 1 = d91dcb0 (parallel writer); wave 2 = the refinement
+tier + probe fix + docs + handoff (this session's two commits).
