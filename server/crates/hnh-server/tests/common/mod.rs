@@ -64,7 +64,11 @@ impl Drop for ServerGuard {
             let _ = child.kill();
             let _ = child.wait();
         }
-        let _ = std::fs::remove_dir_all(&self.workdir);
+        // HNH_KEEP_WORKDIR=1 preserves the server log for a failed-run
+        // autopsy (a plain `cargo test` run never sets it).
+        if std::env::var("HNH_KEEP_WORKDIR").is_err() {
+            let _ = std::fs::remove_dir_all(&self.workdir);
+        }
     }
 }
 
@@ -624,6 +628,24 @@ pub struct Session {
     /// arrival order: system feedback (lifts, fodder transfers) and
     /// party/area chatter ride the same path.
     pub chat_lines: Vec<String>,
+    /// Inbound MSG_OBJDATA drop window (loss simulation): datagrams
+    /// arriving while the window is open are silently discarded exactly
+    /// like a lost UDP datagram (no decode, no OBJACK echo). Lets a
+    /// test drop the statics spawn wave and demand the server's
+    /// retransmission. The window CLOSES ITSELF past the deadline.
+    pub drop_objdata_until: Option<Instant>,
+    /// Count of OBJDATA datagrams dropped via `drop_objdata_until`.
+    pub dropped_objdata: u32,
+    /// When true the harness STOPS echoing OBJACKs (a client stuck on a
+    /// lossy uplink): the server must keep retransmitting unconfirmed
+    /// blocks - the deterministic proof of the retransmit sweep.
+    pub hold_objacks: bool,
+    /// True once a datagram decoded a RESENT block: an (id, frame)
+    /// pair decoded before. Only the server's OBJACK-driven
+    /// retransmission can produce a duplicate.
+    pub saw_retransmitted_spawn: bool,
+    /// First-seen (gid, frame) pairs to detect a re-send.
+    seen_frames: HashMap<i32, i32>,
 }
 
 impl Session {
@@ -662,6 +684,11 @@ impl Session {
             items: HashMap::new(),
             sm_menus: HashMap::new(),
             chat_lines: Vec::new(),
+            drop_objdata_until: None,
+            dropped_objdata: 0,
+            hold_objacks: false,
+            saw_retransmitted_spawn: false,
+            seen_frames: HashMap::new(),
         };
 
         // MSG_SESS: flavour "Haven", PVER, username, cookie. The legacy
@@ -1029,13 +1056,17 @@ impl Session {
                 return cond(self);
             }
             if self.last_ack.elapsed() > Duration::from_millis(200) && !self.objacks.is_empty() {
-                // Client SWorker mirror: one batched MSG_OBJACK datagram.
-                let mut msg = vec![MSG_OBJACK];
-                for (gid, frame) in &self.objacks {
-                    msg.extend_from_slice(&le32(*gid));
-                    msg.extend_from_slice(&le32(*frame));
+                // Client SWorker mirror: one batched MSG_OBJACK datagram
+                // (suppressed while hold_objacks is set - the retransmit
+                // contract test holds it to prove the server resends).
+                if !self.hold_objacks {
+                    let mut msg = vec![MSG_OBJACK];
+                    for (gid, frame) in &self.objacks {
+                        msg.extend_from_slice(&le32(*gid));
+                        msg.extend_from_slice(&le32(*frame));
+                    }
+                    self.sock.send_to(&msg, self.server).expect("send objack");
                 }
-                self.sock.send_to(&msg, self.server).expect("send objack");
                 self.last_ack = Instant::now();
             }
             if self.last_mapreq.elapsed() > Duration::from_millis(1000) {
@@ -1065,8 +1096,28 @@ impl Session {
         match data[0] {
             MSG_MAPDATA => self.mapdata_datagrams += 1,
             MSG_OBJDATA => {
+                // Loss simulation: discard before decoding while the
+                // drop window is open (no OBJACK is registered for
+                // dropped datagrams - the server must see them as
+                // unconfirmed).
+                if let Some(until) = self.drop_objdata_until {
+                    if Instant::now() < until {
+                        self.dropped_objdata += 1;
+                        return;
+                    }
+                    self.drop_objdata_until = None;
+                }
                 self.objdata_datagrams += 1;
                 for block in decode_objdata(&data[1..]) {
+                    // Retransmission detection: a block whose (gid,
+                    // frame) pair was decoded before arrives again only
+                    // via the server's OBJACK-driven retransmit sweep.
+                    if let Some(prev) = self.seen_frames.get(&block.gid) {
+                        if *prev == block.frame && !block.removed {
+                            self.saw_retransmitted_spawn = true;
+                        }
+                    }
+                    self.seen_frames.insert(block.gid, block.frame);
                     let entry = self.gobs.entry(block.gid).or_default();
                     entry.moves.extend(block.ops.moves);
                     if block.ops.linbeg.is_some() {

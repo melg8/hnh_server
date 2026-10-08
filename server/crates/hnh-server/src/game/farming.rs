@@ -453,7 +453,9 @@ impl Game {
                 let block = self.encode_gob_block(v, gob, true);
                 if let (Some(out), Some(block)) = (self.sessions.get_mut(&v), block) {
                     out.send_raw(block.clone());
-                    Self::record_unacked(out, gob, frame, block);
+                    // Crop stage re-render: lost = permanently stale
+                    // growth stage client-side - critical schedule.
+                    Self::record_unacked(out, gob, frame, block, true);
                 }
             }
             // Cluster: subscribers re-render the new stage from the

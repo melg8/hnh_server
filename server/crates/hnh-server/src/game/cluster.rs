@@ -1370,7 +1370,7 @@ impl Game {
             for sid in &viewers {
                 if let Some(out) = self.sessions.get_mut(sid) {
                     out.send_raw(block.clone());
-                    Self::record_unacked(out, id, frame, block.clone());
+                    Self::record_unacked(out, id, frame, block.clone(), false);
                 }
             }
             // Pose flip streams the new layer set (same server-side pose
@@ -1397,7 +1397,7 @@ impl Game {
             for sid in &viewers {
                 if let Some(out) = self.sessions.get_mut(sid) {
                     out.send_raw(block.clone());
-                    Self::record_unacked(out, id, frame, block.clone());
+                    Self::record_unacked(out, id, frame, block.clone(), false);
                 }
             }
         }
@@ -1416,7 +1416,9 @@ impl Game {
                 if let Some(block) = self.encode_guest_block(*sid, id, true) {
                     if let Some(out) = self.sessions.get_mut(sid) {
                         out.send_raw(block.clone());
-                        Self::record_unacked(out, id, frame, block);
+                        // Full kind-change re-render: lost = permanently
+                        // stale sprite client-side - critical.
+                        Self::record_unacked(out, id, frame, block, true);
                     }
                 }
             }
@@ -1932,7 +1934,8 @@ impl Game {
             let frame = self.world.guests.get(&id).map(|g| g.frame).unwrap_or(0);
             if let Some(out) = self.sessions.get_mut(&sid) {
                 out.send_raw(block.clone());
-                Self::record_unacked(out, id, frame, block);
+                // Guest spawn: critical-loss (no client-side recovery).
+                Self::record_unacked(out, id, frame, block, true);
             }
         }
     }

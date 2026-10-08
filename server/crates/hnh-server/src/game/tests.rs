@@ -1335,7 +1335,11 @@ async fn batch_fx_patches_session_wire_id() {
     assert!(found, "FX overlay block reached the viewer");
     // The patched block is retransmittable (the FX block carries the
     // CURRENT frame - it does not open a new one).
-    let rec = out.unacked.get(&pgob).and_then(|m| m.get(&frame));
+    let rec = out
+        .unacked
+        .get(&pgob)
+        .and_then(|m| m.get(&frame))
+        .map(|b| &b.bytes);
     assert!(rec.is_some(), "FX block recorded for OBJACK");
     assert_eq!(
         rec.unwrap()[14..16],

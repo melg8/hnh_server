@@ -1129,6 +1129,7 @@ impl Game {
             player_gob: None,
             visible: crate::fxhash::FxHashSet::default(),
             unacked: crate::fxhash::FxHashMap::default(),
+            gob_acked: crate::fxhash::FxHashMap::default(),
             next_wid: 100,
             widgets: HashMap::new(),
             mapreqs: HashSet::new(),
@@ -2540,6 +2541,13 @@ impl Game {
         let t8 = Instant::now();
         self.tick_guests();
         phase_us[8] = t8.elapsed().as_micros();
+        // OBJDATA retransmission sweep (session 64): every 3rd tick the
+        // unacked table is walked in frame order and unconfirmed blocks
+        // past their schedule delay are resent (stream::retransmit_unacked).
+        // Rare-event shape: near-empty in the steady state, O(pending).
+        if self.world.tick.is_multiple_of(3) {
+            self.retransmit_unacked();
+        }
         // Criminal-flag expiry: a rare-event O(players) scan kept out of
         // the phase histogram (it is empty in the steady state).
         self.tick_criminal_expiry();

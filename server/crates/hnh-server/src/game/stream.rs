@@ -278,7 +278,10 @@ impl Game {
             let frame = self.world.gobs.frame[slot];
             if let Some(out) = self.sessions.get_mut(&sid) {
                 out.send_raw(block.clone());
-                Self::record_unacked(out, id, frame, block);
+                // Spawn is a critical-loss block: the client never
+                // re-requests gob state, so a lost datagram would leave
+                // an invisible object forever (the session-63 finding).
+                Self::record_unacked(out, id, frame, block, true);
             }
         }
     }
@@ -295,16 +298,41 @@ impl Game {
                 .get(split_gob_id(id).0)
                 .copied()
                 .unwrap_or(0);
+            // The removal must ride a frame HIGHER than every frame
+            // this session ever saw for the gob (spawn, updates, hp
+            // ticks): the retransmit sweep skips frames at/below the
+            // client's acked high-water mark, and the on-objack retain
+            // likewise drops frames an ack covers. max(known frames) +
+            // 1 keeps the OD_REM wire-fresh; the client ignores the
+            // frame of a removal op.
+            let acked_frame = out.gob_acked.get(&id).copied().flatten().unwrap_or(0);
+            let pending_max = out
+                .unacked
+                .get(&id)
+                .and_then(|per| per.keys().next_back().copied())
+                .unwrap_or(0);
+            let rem_frame = frame.max(acked_frame).max(pending_max).saturating_add(1);
             let mut m = MessageBuf::new();
             m.uint8(MSG_OBJDATA)
                 .uint8(0)
                 .int32(id)
-                .int32(frame as i32)
+                .int32(rem_frame as i32)
                 .uint8(OD_REM)
                 .uint8(OD_END);
-            out.send_raw(m.finish());
+            // Stale pending blocks of this gob must not survive the
+            // retract: a resent spawn frame arriving after OD_REM would
+            // resurrect a phantom client-side (the retransmit sweep is
+            // in-order, so retire the whole history here).
+            out.unacked.remove(&id);
+            out.gob_acked.remove(&id);
+            // The retract itself is a critical-loss block: a client
+            // that misses OD_REM renders a phantom gob forever
+            // (nothing re-retracts).
+            Self::record_unacked(out, id, rem_frame, m.finish(), true);
+        } else {
+            out.unacked.remove(&id);
+            out.gob_acked.remove(&id);
         }
-        out.unacked.remove(&id);
     }
 
     /// Per-tick visibility update: spawns, retractions, movement deltas.
@@ -719,12 +747,98 @@ impl Game {
             return;
         };
         for (id, frame) in acks {
+            // Track the confirmed high-water mark for the retransmit
+            // sweep's in-order gate (the client echoes its max decoded
+            // frame, so a stale smaller ack never rolls this back).
+            let acked = out.gob_acked.entry(id).or_insert(None);
+            if frame > acked.unwrap_or(0) {
+                *acked = Some(frame);
+            }
             if let Some(per_gob) = out.unacked.get_mut(&id) {
                 per_gob.retain(|f, _| *f > frame);
                 if per_gob.is_empty() {
                     out.unacked.remove(&id);
+                    // The mark only gates pending blocks; a gob with
+                    // nothing pending drops it (new frames are always
+                    // higher - frames grow monotonically).
+                    out.gob_acked.remove(&id);
                 }
             }
+        }
+    }
+
+    /// OBJACK-driven retransmission sweep (session 64): every recorded
+    /// block still unconfirmed past its schedule delay is presumed
+    /// lost and resent. Runs every 3rd tick (~300 ms) as a rare-event
+    /// pass: in the steady state the table is near-empty (the client
+    /// acks within <= 320 ms), so the sweep costs one map walk.
+    ///
+    /// In-order guarantee: frames ascend (BTreeMap) and the raw socket
+    /// is FIFO, so a sweep sends lost datagrams in their original wire
+    /// order. The walk latches `blocked` while the LOWEST unconfirmed
+    /// frame of a gob is still inside its delay window - a resent
+    /// stale frame must never overtake a newer one (an out-of-order
+    /// OD_REM would phantom-delete a fresh spawn client-side).
+    pub(super) fn retransmit_unacked(&mut self) {
+        let now = Instant::now();
+        let mut pending_n = 0usize;
+        let mut resent_n = 0usize;
+        let mut full_n = 0usize;
+        for out in self.sessions.values_mut() {
+            let raw = out.raw.clone();
+            let acked = &out.gob_acked;
+            for (id, per) in out.unacked.iter_mut() {
+                let acked = acked.get(id).copied().flatten();
+                // Ordered walk: `blocked` latches while the lowest
+                // unconfirmed frame is still inside its delay window.
+                let mut blocked = false;
+                for (frame, block) in per.iter_mut() {
+                    pending_n += 1;
+                    if blocked || acked.is_some_and(|a| *frame <= a) {
+                        continue;
+                    }
+                    if block.retired() {
+                        // Past the whole schedule: the session never
+                        // acks this one (dead peer / load bot) - drop
+                        // it when the walk ends.
+                        blocked = true;
+                        continue;
+                    }
+                    if now.duration_since(block.last_sent) < block.delay() {
+                        blocked = true;
+                        continue;
+                    }
+                    // A full raw queue (a burst fan-out to a slow
+                    // session) must NOT burn the block's attempts: the
+                    // next sweep retries while the queue drains.
+                    if raw.try_send(block.bytes.clone()).is_ok() {
+                        block.last_sent = now;
+                        block.tries += 1;
+                        resent_n += 1;
+                    } else {
+                        full_n += 1;
+                    }
+                }
+            }
+        }
+        // Structured observability (obs-structured-fields): fires only
+        // when there was retransmit work - silent in the healthy
+        // steady state where the table drains within ~320 ms.
+        if resent_n > 0 || full_n > 0 {
+            debug!(
+                pending = pending_n,
+                resent = resent_n,
+                queue_full = full_n,
+                "objdata retransmit"
+            );
+        }
+        // Retire expired blocks (the ordered walk cannot mutate the
+        // map structure mid-iteration).
+        for out in self.sessions.values_mut() {
+            out.unacked.retain(|_, per| {
+                per.retain(|_, block| !block.retired());
+                !per.is_empty()
+            });
         }
     }
 

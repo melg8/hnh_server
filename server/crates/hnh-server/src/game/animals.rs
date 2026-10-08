@@ -1388,7 +1388,7 @@ impl Game {
                     .uint8(OD_END);
                 let b = m.finish();
                 out.send_raw(b.clone());
-                out.unacked.entry(target).or_default().insert(frame, b);
+                Self::record_unacked(out, target, frame, b, false);
             }
         }
         if self.world.gobs.hp[tslot] <= 0 {
@@ -1443,7 +1443,7 @@ impl Game {
                     .uint8(OD_END);
                 let b = m.finish();
                 out.send_raw(b.clone());
-                out.unacked.entry(target).or_default().insert(frame, b);
+                Self::record_unacked(out, target, frame, b, false);
             }
         }
         // Publish the hp delta to subscribed peers (the attacker's home

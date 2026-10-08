@@ -8,7 +8,7 @@
 mod common;
 
 use std::net::ToSocketAddrs;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{ArgVal, ServerGuard, Session, REQUIRED_CATTR};
 use hnh_proto::{MSG_SESS, PVER, SESSERR_AUTH};
@@ -233,6 +233,84 @@ fn session_rejects_bogus_cookie() {
         reply,
         Some((MSG_SESS, SESSERR_AUTH)),
         "bogus cookie must answer MSG_SESS/SESSERR_AUTH"
+    );
+}
+
+/// Session 64: a lost statics spawn wave is RECOVERED by the server's
+/// OBJACK-driven retransmission sweep. The harness drops every inbound
+/// OBJDATA datagram for 1.2 s (the whole statics burst plus the first
+/// fast-schedule retransmits land inside the window) - exactly like a
+/// UDP loss window on a loaded link. Gob state has no client-side
+/// re-request (the session-63 finding that made lost spawns
+/// unrecoverable), so the only path a LIVE in-view static can arrive
+/// through is the server-side sweep. Far statics (the seed-42 forest
+/// stands outside the spawn meadow) ride spawn+retract pairs: the
+/// retract supersedes the spawn in the unacked table, so only their
+/// OD_REM retransmits and the client never sees the spawn - by design.
+/// The deterministic tail holds OBJACKs and demands a duplicate
+/// (id, frame) on the wire - the sweep's in-order walk resending an
+/// unconfirmed block.
+#[test]
+fn lost_static_spawn_wave_is_retransmitted() {
+    let _slot = common::acquire_test_slot();
+    let server = ServerGuard::boot("retrans");
+    let mut sess = Session::connect(&server, "retransuser");
+    assert!(
+        sess.pump_until(|s| s.widgets_by_name.contains_key("charlist"), 10),
+        "no charlist\n{}",
+        server.log_tail(2000)
+    );
+    sess.send_play("retransuser");
+    assert!(
+        sess.pump_until(|s| s.widgets_by_name.contains_key("mapview"), 15),
+        "no mapview\n{}",
+        server.log_tail(2000)
+    );
+    assert!(
+        sess.pump_until(|s| s.objdata_datagrams > 0, 15),
+        "no objdata\n{}",
+        server.log_tail(2000)
+    );
+    // Arm the loss window BEFORE the statics burst leaves (world entry
+    // streams it right after the player's own spawn block).
+    sess.drop_objdata_until = Some(Instant::now() + Duration::from_millis(1200));
+    let drained = sess.pump_until(
+        |s| s.dropped_objdata > 0 && s.drop_objdata_until.is_none(),
+        15,
+    );
+    assert!(
+        drained && sess.dropped_objdata > 10,
+        "drop window never consumed the spawn wave (dropped={})\n{}",
+        sess.dropped_objdata,
+        server.log_tail(2000)
+    );
+    // Recovery: a LIVE in-view static (a boulder) must arrive through
+    // the retransmission sweep - no other mechanism can deliver it.
+    // The !removed filter is the same one the gathering contract uses.
+    let got_static = sess.pump_until(
+        |s| {
+            s.gobs
+                .iter()
+                .any(|(gid, g)| !g.removed && s_res_prefix(s, *gid, BOULDER_PREFIX))
+        },
+        20,
+    );
+    assert!(
+        got_static,
+        "no in-view static arrived after the drop window (dropped={}, gobs={})\n{}",
+        sess.dropped_objdata,
+        sess.gobs.len(),
+        server.log_tail(2000)
+    );
+    // Deterministic sweep proof: stop echoing OBJACKs; the sweep must
+    // resend an already-decoded (id, frame) block within its schedule.
+    sess.hold_objacks = true;
+    let reseen = sess.pump_until(|s| s.saw_retransmitted_spawn, 12);
+    sess.hold_objacks = false;
+    assert!(
+        reseen,
+        "no duplicate (id, frame) block while OBJACKs were held\n{}",
+        server.log_tail(2000)
     );
 }
 
@@ -633,14 +711,17 @@ fn approach_opt(sess: &mut Session, player: i32, target: (i32, i32), stop: i32) 
 /// so both phases walk to the first REACHABLE candidate (the approach
 /// the real client performs) and act from inside VIEW_RADIUS.
 ///
-/// IGNORED in the default suite on purpose: this is a 40-90s walking
-/// scenario, and under the full parallel suite the two-core sandbox
-/// loses raw OBJDATA spawn frames and retract sweeps the streamed
-/// statics non-deterministically (the session-56 UDP finding, on the
-/// spawn path there is no retransmit to recover with). Run it explicitly
-/// on a quiet machine: `cargo test --test wire -- --ignored`.
+/// Session 64: the session-56 loss half of this #[ignore] is FIXED
+/// server-side (lost OBJDATA spawn frames ride the OBJACK-driven
+/// retransmission sweep - see lost_static_spawn_wave_is_retransmitted).
+/// The scenario stays out of the default gate for a DIFFERENT,
+/// documented reason: it is a 40-90s multi-hop walking scenario whose
+/// approach timeouts are wall-clock-bound, so two concurrent boots on
+/// the 2-core sandbox slow the 5 Hz LINSTEP cadence enough to starve
+/// the walk legs (observed once in the full parallel suite). Run it
+/// explicitly on a quiet machine: `cargo test --test wire -- --ignored`.
 #[test]
-#[ignore = "walking scenario: run explicitly (cargo test -- --ignored), see doc"]
+#[ignore = "long walking scenario: run explicitly (cargo test -- --ignored), see doc"]
 fn world_gathering_picks_yield_drops_exhaust_and_land_in_inventory() {
     let _slot = common::acquire_test_slot();
     // Arrange

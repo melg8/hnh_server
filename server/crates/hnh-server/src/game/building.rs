@@ -523,7 +523,9 @@ impl Game {
             let block = self.encode_gob_block(v, gob, true);
             if let (Some(out), Some(block)) = (self.sessions.get_mut(&v), block) {
                 out.send_raw(block.clone());
-                Self::record_unacked(out, gob, frame, block);
+                // Build-transition re-render: a lost one leaves a
+                // permanently stale sprite client-side - critical.
+                Self::record_unacked(out, gob, frame, block, true);
             }
         }
     }

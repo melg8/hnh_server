@@ -604,13 +604,13 @@ impl Game {
                             }
                             m.bytes(&patched);
                             if fin {
-                                Self::record_unacked(out, id, frame, patched);
+                                Self::record_unacked(out, id, frame, patched, false);
                             }
                         }
                         None => {
                             m.bytes(bytes);
                             if fin {
-                                Self::record_unacked(out, id, frame, bytes.to_vec());
+                                Self::record_unacked(out, id, frame, bytes.to_vec(), false);
                             }
                         }
                     }
@@ -631,14 +631,29 @@ impl Game {
     /// (load bots, slow clients mid-lag) would otherwise grow it without
     /// bound - measured OOM driver at the 1000-session scale (~40 MB/s of
     /// finalizer blocks before the cap).
-    pub(super) fn record_unacked(out: &mut SessionOut, id: GobId, frame: u32, block: Vec<u8>) {
+    pub(super) fn record_unacked(
+        out: &mut SessionOut,
+        id: GobId,
+        frame: u32,
+        block: Vec<u8>,
+        critical: bool,
+    ) {
         const UNACKED_CAP: usize = 4;
         let per = out.unacked.entry(id).or_default();
-        per.insert(frame, block);
+        per.insert(
+            frame,
+            crate::state::UnackedBlock {
+                bytes: block,
+                last_sent: Instant::now(),
+                tries: 0,
+                critical,
+            },
+        );
         while per.len() > UNACKED_CAP {
-            let min = match per.keys().copied().min() {
-                Some(f) => f,
-                None => break,
+            // BTreeMap: the first key IS the min frame - no O(n) scan
+            // the HashMap version paid.
+            let Some(min) = per.keys().copied().next() else {
+                break;
             };
             per.remove(&min);
         }

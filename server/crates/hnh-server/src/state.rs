@@ -6,9 +6,9 @@
 //! from AGENTS.md: mem-/perf-/coll-). Networking tasks never touch these
 //! tables; they exchange encoded `RMSG` payloads through per-session queues.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use hnh_world::tile;
 
@@ -17,6 +17,64 @@ use crate::resources::ResTable;
 
 pub const TICK_HZ: u64 = 10;
 pub const TICK_MS: u64 = 1000 / TICK_HZ;
+
+// OBJDATA retransmission regime (session 64). The legacy client
+// repeats its batched MSG_OBJACK every 200 ms (Session.java SWorker),
+// so a recorded block still unconfirmed past RETRANS_FAST_MS is
+// presumed lost and resent. Critical blocks (spawn / retract / full
+// re-render) have NO client-side recovery path (a lost spawn is never
+// re-requested), so they retire later than self-healing ones
+// (movement finalizers, hp ticks - the next tick's frame supersedes
+// them).
+pub const RETRANS_FAST_MS: u64 = 250;
+/// Slow-schedule delay: the last resort window before a block retires.
+pub const RETRANS_SLOW_MS: u64 = 1000;
+const RETRANS_CRIT_FAST_TRIES: u8 = 5;
+const RETRANS_PLAIN_FAST_TRIES: u8 = 3;
+/// Critical blocks give up after 9 sends (~250*5 + 1000*4 ms of
+/// protection), plain ones after 5 - sessions that never OBJACK (load
+/// bots, dead peers) self-clean instead of accumulating retransmit
+/// state.
+const RETRANS_CRIT_MAX_TRIES: u8 = 9;
+const RETRANS_PLAIN_MAX_TRIES: u8 = 5;
+
+/// One recorded OBJDATA block awaiting its OBJACK.
+#[derive(Debug)]
+pub struct UnackedBlock {
+    pub bytes: Vec<u8>,
+    /// Last transmit instant (initial send or a retransmission); the
+    /// sweep compares its age against the schedule delay.
+    pub last_sent: Instant,
+    /// Total sends so far (initial + retransmissions).
+    pub tries: u8,
+    /// Critical-loss block: the client cannot recover it any other way
+    /// (spawn, retract, full re-render).
+    pub critical: bool,
+}
+
+impl UnackedBlock {
+    pub(super) fn delay(&self) -> Duration {
+        let fast = if self.critical {
+            RETRANS_CRIT_FAST_TRIES
+        } else {
+            RETRANS_PLAIN_FAST_TRIES
+        };
+        Duration::from_millis(if self.tries < fast {
+            RETRANS_FAST_MS
+        } else {
+            RETRANS_SLOW_MS
+        })
+    }
+
+    pub(super) fn retired(&self) -> bool {
+        self.tries
+            >= if self.critical {
+                RETRANS_CRIT_MAX_TRIES
+            } else {
+                RETRANS_PLAIN_MAX_TRIES
+            }
+    }
+}
 
 /// View radius in map subtiles around a player (~45 tiles, legacy ~500px).
 pub const VIEW_RADIUS: i32 = 300;
@@ -932,8 +990,18 @@ pub struct SessionOut {
     /// Gobs currently streamed to this client. Keys are server-allocated
     /// gob ids -> fxhash id hasher (hot per-candidate membership checks).
     pub visible: crate::fxhash::FxHashSet<GobId>,
-    /// Unacked OBJDATA blocks per gob (frame -> encoded block) for retransmit.
-    pub unacked: crate::fxhash::FxHashMap<GobId, HashMap<u32, Vec<u8>>>,
+    /// Unacked OBJDATA blocks per gob, ordered by frame (BTreeMap: the
+    /// retransmit sweep walks frames ASCENDING so resent datagrams keep
+    /// the wire order a spawn -> move -> retract sequence had on the
+    /// socket; a resent stale frame must never overtake a newer one).
+    /// Capped per gob (see `record_unacked`).
+    pub unacked: crate::fxhash::FxHashMap<GobId, BTreeMap<u32, UnackedBlock>>,
+    /// Highest OBJACK-confirmed frame per gob (the client echoes the
+    /// max frame it decoded). `None` = nothing confirmed yet. The
+    /// Option matters: frame 0 is a VALID wire frame (an untouched
+    /// static's first block) and must not be confused with "nothing
+    /// acked".
+    pub gob_acked: crate::fxhash::FxHashMap<GobId, Option<u32>>,
     /// Widget id counter (session-local uint16 space).
     pub next_wid: u16,
     pub widgets: HashMap<u16, String>,
