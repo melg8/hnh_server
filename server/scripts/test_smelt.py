@@ -26,7 +26,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from hnhlib import enter_world  # noqa: E402
+from hnhlib import ensure_server, enter_world  # noqa: E402
 
 DEPOSIT_RES = "gfx/terobjs/mining/heap"
 SMELTER_RES = "gfx/terobjs/smelter"
@@ -76,12 +76,35 @@ def find_deposits(c):
     ]
 
 
+ORE_ITEM_PREFIXES = (
+    "gfx/terobjs/items/nugget",
+    "gfx/terobjs/items/ore",
+)
+
+
 def mine_one_ore(c):
     """Walk to the belt, find a deposit, pick it once, return the ore
-    resource that landed in the inventory."""
+    resource that landed in the inventory.
+
+    Contract shape mirrors the gathering probe: the pick spawns a
+    drop gob (the world shape, possibly through DROP_WORLD_ALIASES),
+    and a SECOND click on that drop lands the ore in the inventory.
+    """
     target = (BELT_TILE[0] * 11, BELT_TILE[1] * 11)
     deposits = find_deposits(c)
-    for _ in range(30):
+
+    def nearest(deps):
+        """The deposit closest to the belt target (gob id order is
+        grid-generation order, NOT distance - the first run proved a
+        far-corner deposit can carry the smallest id)."""
+
+        def dist(entry):
+            pos = entry[1]["pos"]
+            return abs(pos[0] - target[0]) + abs(pos[1] - target[1])
+
+        return min(deps, key=dist)
+
+    for i in range(30):
         if deposits:
             break
         pos = c.gobs[c.player_gob]["pos"]
@@ -90,14 +113,32 @@ def mine_one_ore(c):
             hop(c, max(-HOP, min(HOP, dx)), max(-HOP, min(HOP, dy)))
         else:
             # On the belt: scan sideways until a deposit streams in.
-            hop(c, HOP if _ % 2 == 0 else -HOP, 0)
+            hop(c, HOP if i % 2 == 0 else -HOP, 0)
         deposits = find_deposits(c)
     assert deposits, "no ore deposit streamed into view near the belt"
-    dep_id, dep_info = sorted(deposits)[0]
+    dep_id, dep_info = nearest(deposits)
     print("deposit found: %s at %s" % (dep_info["res"], dep_info["pos"]))
     assert approach(c, dep_info["pos"]), "could not reach the deposit"
 
+    # Pick: click the deposit, catch the fresh ore drop, click it.
+    seen = set(c.gobs.keys())
     c.click_gob(dep_id, c.gobs[dep_id]["pos"])
+
+    def fresh_ore_drops():
+        return [
+            (g, info)
+            for g, info in c.gobs.items()
+            if info["res"].startswith(ORE_ITEM_PREFIXES)
+            and not info.get("removed")
+            and g not in seen
+        ]
+
+    ok = c.wait_for(lambda: bool(fresh_ore_drops()), 8)
+    assert ok, "no ore drop spawned after the deposit pick"
+    drop_id, drop_info = sorted(fresh_ore_drops())[0]
+    print("ore drop spawned: %s at %s" % (drop_info["res"], drop_info["pos"]))
+    c.click_gob(drop_id, c.gobs[drop_id]["pos"])
+
     ok = c.wait_for(
         lambda: any(c.find_item_by_res(res) is not None for res in ORE_ITEMS), 8
     )
@@ -225,13 +266,19 @@ def smelt(c, plan, mc, ore_res):
 
 def main():
     username = sys.argv[1] if len(sys.argv) > 1 else "smelt"
-    c = enter_world(username)
-    print("in world; driving the metal-chain contract")
-    ore_res = mine_one_ore(c)
-    plan, mc = build_smelter(c)
-    label = smelt(c, plan, mc, ore_res)
-    c.sock.close()
-    print("SMELT: OK (ore pick, smelter build, %s smelted)" % label)
+    server_proc = ensure_server()
+    try:
+        c = enter_world(username)
+        print("in world; driving the metal-chain contract")
+        ore_res = mine_one_ore(c)
+        plan, mc = build_smelter(c)
+        label = smelt(c, plan, mc, ore_res)
+        c.sock.close()
+        print("SMELT: OK (ore pick, smelter build, %s smelted)" % label)
+    finally:
+        if server_proc is not None:
+            server_proc.terminate()
+            server_proc.wait(timeout=10)
 
 
 if __name__ == "__main__":

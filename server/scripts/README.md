@@ -45,6 +45,7 @@ taming) that are easier to drive from python.
 | test_newcraft.py | session-58 recipes end to end: saw, bucket-with-crafted-saw, fork paginae served | `NEWCRAFT: OK` |
 | test_gather.py | world gathering: branch pick + boulder stone picks into inventory | `GATHER: OK` |
 | test_feeding.py | trough build/load/lift/place/transfer (session 62) | `FEEDING FLOW: OK` |
+| test_smelt.py | metal chain: ore deposit mine -> smelter build/fuel/light -> bar pickup (session 66) | `SMELT: OK` |
 | load43.sh | 1000-bot duel cohort perf window | p95 histograms |
 
 ## Utilities
