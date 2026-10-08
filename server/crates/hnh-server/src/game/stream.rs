@@ -780,13 +780,32 @@ impl Game {
     /// stale frame must never overtake a newer one (an out-of-order
     /// OD_REM would phantom-delete a fresh spawn client-side).
     pub(super) fn retransmit_unacked(&mut self) {
-        let now = Instant::now();
+        // Session 65: the sweep is now attributed in the perf report
+        // (retx_* fields) - "verify, do not assume" applies to the
+        // rare-event claim too: the load-bot cohort never echoes
+        // OBJACK, so its blocks live here until retirement.
+        let sweep_started = Instant::now();
+        let now = sweep_started;
         let mut pending_n = 0usize;
         let mut resent_n = 0usize;
         let mut full_n = 0usize;
+        let mut busy_sessions = 0usize;
         for out in self.sessions.values_mut() {
+            if out.unacked.is_empty() {
+                continue;
+            }
+            // Backpressure gate (session 65): a session that refused
+            // sends in the last RETRANS_THROTTLE_MS gets no retried
+            // blocks - try_send against a full bounded channel measured
+            // 85% refusals at the 1000-bot scale, so the honest move is
+            // to let the queue drain and come back on a later sweep.
+            if out.retx_throttle_until > now {
+                continue;
+            }
+            busy_sessions += 1;
             let raw = out.raw.clone();
             let acked = &out.gob_acked;
+            let mut queue_full = false;
             for (id, per) in out.unacked.iter_mut() {
                 let acked = acked.get(id).copied().flatten();
                 // Ordered walk: `blocked` latches while the lowest
@@ -797,10 +816,12 @@ impl Game {
                     if blocked || acked.is_some_and(|a| *frame <= a) {
                         continue;
                     }
-                    if block.retired() {
-                        // Past the whole schedule: the session never
-                        // acks this one (dead peer / load bot) - drop
-                        // it when the walk ends.
+                    if block.expired(now) {
+                        // Past the try-count schedule or the hard age
+                        // ceiling (session 65): the peer never acks this
+                        // one (dead peer / load bot) - the retire pass
+                        // drops it; block the rest of the gob so no
+                        // later frame escapes through the hole.
                         blocked = true;
                         continue;
                     }
@@ -810,15 +831,24 @@ impl Game {
                     }
                     // A full raw queue (a burst fan-out to a slow
                     // session) must NOT burn the block's attempts: the
-                    // next sweep retries while the queue drains.
+                    // next sweep retries while the queue drains. It also
+                    // throttles the session for RETRANS_THROTTLE_MS -
+                    // firing retries into a saturated channel measured
+                    // 85% refusals and a 426 ms sweep at the 1000-bot
+                    // scale.
                     if raw.try_send(block.bytes.clone()).is_ok() {
                         block.last_sent = now;
                         block.tries += 1;
                         resent_n += 1;
                     } else {
+                        queue_full = true;
+                        blocked = true;
                         full_n += 1;
                     }
                 }
+            }
+            if queue_full {
+                out.retx_throttle_until = now + Duration::from_millis(RETRANS_THROTTLE_MS);
             }
         }
         // Structured observability (obs-structured-fields): fires only
@@ -833,12 +863,25 @@ impl Game {
             );
         }
         // Retire expired blocks (the ordered walk cannot mutate the
-        // map structure mid-iteration).
-        for out in self.sessions.values_mut() {
-            out.unacked.retain(|_, per| {
-                per.retain(|_, block| !block.retired());
-                !per.is_empty()
-            });
+        // map structure mid-iteration). Skipped entirely when nothing
+        // is pending: the per-sweep attribution showed the walk itself
+        // is the only measurable cost of this pass at 1000 sessions.
+        let p = &mut self.world.perf;
+        p.retx_sweep_us = sweep_started.elapsed().as_micros() as u64;
+        p.retx_pending = pending_n as u64;
+        p.retx_resent = resent_n as u64;
+        p.retx_queue_full = full_n as u64;
+        p.retx_busy_sessions = busy_sessions as u64;
+        if pending_n > 0 {
+            for out in self.sessions.values_mut() {
+                if out.unacked.is_empty() {
+                    continue;
+                }
+                out.unacked.retain(|_, per| {
+                    per.retain(|_, block| !block.expired(now));
+                    !per.is_empty()
+                });
+            }
         }
     }
 

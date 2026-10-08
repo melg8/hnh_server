@@ -131,14 +131,26 @@ pub enum ObjOp {
 /// remaining block the way the client's reader would fail: the datagram is
 /// dropped whole rather than misparsed (the server only emits ops bots know,
 /// so this never happens against this server).
-pub fn parse_objdata(payload: &[u8]) -> Vec<ObjOp> {
+///
+/// `acks` accumulates the per-gob max decoded frame (the client SWorker's
+/// OBJACK high-water mark) so the bot can echo the batched MSG_OBJACK the
+/// real client sends every 200 ms. Sessions that never ack pin their
+/// retransmit tables until the age ceiling - measured 1.6M pending blocks
+/// and a 426 ms sweep at the 1000-bot scale (session 65) - so the cohort
+/// MUST behave like the real client here.
+pub fn parse_objdata(payload: &[u8], acks: &mut HashMap<i32, i32>) -> Vec<ObjOp> {
     let mut out = Vec::new();
     let mut m = hnh_proto::MessageBuf::from_slice(payload);
     'blocks: while !m.eom() {
         // One block: uint8 flags, int32 id, int32 frame, then ops.
-        let (Ok(fl), Ok(id), Ok(_frame)) = (m.u8(), m.i32(), m.i32()) else {
+        let (Ok(fl), Ok(id), Ok(frame)) = (m.u8(), m.i32(), m.i32()) else {
             break;
         };
+        // Client SWorker mirror: track the max decoded frame per gob.
+        let acked = acks.entry(id).or_insert(0);
+        if frame > *acked {
+            *acked = frame;
+        }
         if fl & 1 != 0 {
             out.push(ObjOp::Remove(id));
             continue;
@@ -550,6 +562,10 @@ async fn bot_session(idx: usize, secs: u64, port: u16) -> bool {
     let mut next_action = Instant::now() + Duration::from_millis(500);
     let mut next_beat = Instant::now() + Duration::from_secs(5);
     let mut next_flush = Instant::now() + Duration::from_millis(20);
+    // Client SWorker mirror state: max decoded frame per gob + the 200 ms
+    // batched MSG_OBJACK echo (see the MSG_OBJDATA arm and the flush below).
+    let mut objacks: HashMap<i32, i32> = HashMap::new();
+    let mut next_objack = Instant::now() + Duration::from_millis(200);
     // Armed when this bot clicked another PLAYER: the next "sm" widget
     // the server opens is the attacker's own flower menu, and the bot
     // confirms the Fight petal (index 1 on the [Invite, Fight, Cancel]
@@ -581,7 +597,10 @@ async fn bot_session(idx: usize, secs: u64, port: u16) -> bool {
                     // Track bites only on the bot's own neighborhood overlays
                     // (all critter bites carry the same fx resource; counting
                     // every one across the cohort measures combat activity).
-                    for op in parse_objdata(&buf[1..n]) {
+                    // The acks map mirrors the real client's SWorker: max
+                    // decoded frame per gob, echoed as one batched
+                    // MSG_OBJACK every 200 ms (below).
+                    for op in parse_objdata(&buf[1..n], &mut objacks) {
                         view.apply(op, true);
                     }
                 }
@@ -605,6 +624,23 @@ async fn bot_session(idx: usize, secs: u64, port: u16) -> bool {
             }
         }
         let now = Instant::now();
+        // Client SWorker mirror: one batched MSG_OBJACK datagram every
+        // 200 ms covering every gob whose blocks decoded since the last
+        // echo (the wire shape the server's retransmit sweep is keyed
+        // on; see Session.java SWorker and tests/common Session.objack).
+        if now >= next_objack {
+            next_objack = now + Duration::from_millis(200);
+            if !objacks.is_empty() {
+                let mut msg = Vec::with_capacity(1 + objacks.len() * 8);
+                msg.push(MSG_OBJACK);
+                for (gid, frame) in &objacks {
+                    msg.extend_from_slice(&gid.to_le_bytes());
+                    msg.extend_from_slice(&frame.to_le_bytes());
+                }
+                let _ = sock.send_to(&msg, server).await;
+                objacks.clear();
+            }
+        }
         if now >= next_action {
             next_action = now + Duration::from_millis(400 + rng.next_bounded(800) as u64);
             // Act from the own gob's streamed position; fall back to the
@@ -788,9 +824,11 @@ mod tests {
 
     #[test]
     fn objdata_parses_res_move_and_end() {
-        let ops = parse_objdata(&stone_datagram()[1..]);
+        let mut acks = HashMap::new();
+        let ops = parse_objdata(&stone_datagram()[1..], &mut acks);
         assert!(ops.contains(&ObjOp::Res(777, 3)));
         assert!(ops.contains(&ObjOp::Move(777, 1010, 2020)));
+        assert_eq!(acks.get(&777), Some(&0));
     }
 
     #[test]
@@ -811,9 +849,12 @@ mod tests {
             .int32(9)
             .int32(1)
             .uint8(OD_END);
-        let ops = parse_objdata(m.finish().as_slice());
+        let mut acks = HashMap::new();
+        let ops = parse_objdata(m.finish().as_slice(), &mut acks);
         assert!(ops.contains(&ObjOp::Layers(9, 11)));
         assert!(ops.contains(&ObjOp::Remove(9)));
+        // Frames 0 and 1 of gob 9 both decoded: the high-water mark is 1.
+        assert_eq!(acks.get(&9), Some(&1));
     }
 
     #[test]
@@ -829,7 +870,8 @@ mod tests {
             .int32(-3)
             .uint16(42) // bite fx add
             .uint8(OD_END);
-        let ops = parse_objdata(m.finish().as_slice());
+        let mut acks = HashMap::new();
+        let ops = parse_objdata(m.finish().as_slice(), &mut acks);
         assert!(ops.contains(&ObjOp::Overlay(5, 42)));
         assert!(!ops.iter().any(|o| matches!(o, ObjOp::Overlay(_, 65535))));
     }

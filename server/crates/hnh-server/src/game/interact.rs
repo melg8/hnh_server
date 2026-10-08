@@ -639,12 +639,14 @@ impl Game {
         critical: bool,
     ) {
         const UNACKED_CAP: usize = 4;
+        let now = Instant::now();
         let per = out.unacked.entry(id).or_default();
         per.insert(
             frame,
             crate::state::UnackedBlock {
                 bytes: block,
-                last_sent: Instant::now(),
+                last_sent: now,
+                born: now,
                 tries: 0,
                 critical,
             },

@@ -31,6 +31,21 @@ pub const RETRANS_FAST_MS: u64 = 250;
 pub const RETRANS_SLOW_MS: u64 = 1000;
 const RETRANS_CRIT_FAST_TRIES: u8 = 5;
 const RETRANS_PLAIN_FAST_TRIES: u8 = 3;
+/// Hard age ceiling for any pending block (session 65). The try-count
+/// retirement above assumes attempts actually BURN - but a raw-queue-full
+/// refusal deliberately does not burn one, so a peer that stopped draining
+/// its raw queue (a dead bot cohort, a suspended client) would otherwise
+/// pin its pending table forever: the 1000-bot run measured 1.6M pending
+/// blocks, a 426 ms sweep and 85% queue-full refusals exactly because the
+/// cohort never OBJACKs. Age caps every block's residence regardless of
+/// send attempts and bounds the sweep walk to the recent past.
+pub const RETRANS_MAX_AGE_MS: u64 = 10_000;
+/// After a raw-queue-full refusal the session's retransmit pass is skipped
+/// for this long: the queue needs time to drain, and hammering try_send
+/// against a full bounded channel (85% refusals measured) only burns tick
+/// budget. Retries never fire into a saturated queue.
+pub(crate) const RETRANS_THROTTLE_MS: u64 = 1_000;
+
 /// Critical blocks give up after 9 sends (~250*5 + 1000*4 ms of
 /// protection), plain ones after 5 - sessions that never OBJACK (load
 /// bots, dead peers) self-clean instead of accumulating retransmit
@@ -45,6 +60,10 @@ pub struct UnackedBlock {
     /// Last transmit instant (initial send or a retransmission); the
     /// sweep compares its age against the schedule delay.
     pub last_sent: Instant,
+    /// First transmit instant; RETRANS_MAX_AGE_MS counts from here so a
+    /// throttled session (queue-full refusals never burn attempts) still
+    /// drains its pending table deterministically.
+    pub(super) born: Instant,
     /// Total sends so far (initial + retransmissions).
     pub tries: u8,
     /// Critical-loss block: the client cannot recover it any other way
@@ -73,6 +92,13 @@ impl UnackedBlock {
             } else {
                 RETRANS_PLAIN_MAX_TRIES
             }
+    }
+
+    /// Past the try-count schedule OR the hard age ceiling. The sweep
+    /// retires both alike; age is the guarantee that a never-acking or
+    /// throttled session drains its table.
+    pub(super) fn expired(&self, now: Instant) -> bool {
+        self.retired() || now.duration_since(self.born).as_millis() as u64 >= RETRANS_MAX_AGE_MS
     }
 }
 
@@ -996,6 +1022,10 @@ pub struct SessionOut {
     /// socket; a resent stale frame must never overtake a newer one).
     /// Capped per gob (see `record_unacked`).
     pub unacked: crate::fxhash::FxHashMap<GobId, BTreeMap<u32, UnackedBlock>>,
+    /// Retransmit backpressure (session 65): while a raw-queue refusal is
+    /// recent, the sweep skips this session entirely - retries never fire
+    /// into a saturated channel and the walk spends its budget elsewhere.
+    pub retx_throttle_until: Instant,
     /// Highest OBJACK-confirmed frame per gob (the client echoes the
     /// max frame it decoded). `None` = nothing confirmed yet. The
     /// Option matters: frame 0 is a VALID wire frame (an untouched
@@ -1347,6 +1377,20 @@ pub struct Perf {
     /// + fx attribution: `fx_batch_n` counts the FX subset).
     pub start_blocks: u64,
     pub fx_batch_n: u64,
+    /// Last-sweep OBJDATA retransmission attribution (session 65; the
+    /// sweep runs every 3rd tick, so these are per-sweep, not per-tick):
+    /// wall time of the sweep, pending blocks walked, blocks actually
+    /// resent and raw-queue-full refusals. The load-bot cohort never
+    /// echoes OBJACK, so at bot scale the pending table is NOT empty -
+    /// these numbers decide whether the sweep is free or needs a fast
+    /// path.
+    pub retx_sweep_us: u64,
+    pub retx_pending: u64,
+    pub retx_resent: u64,
+    pub retx_queue_full: u64,
+    /// Sessions whose unacked table was non-empty during the last sweep
+    /// (the real walk depth; total sessions is a misleading denominator).
+    pub retx_busy_sessions: u64,
 }
 
 impl World {
