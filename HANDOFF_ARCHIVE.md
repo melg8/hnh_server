@@ -3966,3 +3966,84 @@ NEXT (handoff):
   lift, five-probe hnhlib.py migration, GL e2e + Windows smoke (no
   display host), CI push when the token gets the scope.
 
+## 2026-10-08 - Session 60 (type 3: new functionality)
+
+SESSION TYPE ROTATION LOG: 56=4, 57=5, 58=3, 59=5, 60=3. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the carried type-3 item - world GATHERING (HANDOFF gap #4's
+"bough/stone picking", the starter-kit stand-in). INVENTORY FIRST:
+the repo already had statics (populate_grid spawns trees/bumlings
+deterministically from JavaRandom per tile) and a click-harvest
+(interact.rs + relay game.rs), but the session-59 state had four
+fidelity defects, verified before cutting:
+1. The tree pick dropped 10x gfx/invobjs/wood - and `wood` is used by
+   ZERO recipes; the whole craft chain consumes gfx/invobjs/branch.
+   Gathering could not feed crafting.
+2. A boulder died on the FIRST click and dropped 10 stones.
+3. The exhausted-tree stump spawned as Kind::Stone - clicking a stump
+   yielded 10 stones.
+4. The local path (game/interact.rs) and the relay path (game.rs
+   relay_chop/relay_mine) duplicated the harvest logic by hand.
+
+THE CUT (commit a63af90):
+- Kind::Stone -> Kind::Boulder { left } with BOULDER_STONES = 5: one
+  stone per pick, the boulder is removed when drained. New Kind::Stump:
+  the exhausted-tree remnant is decorative and yields nothing. Both
+  counts are state.rs constants (server policy; the wiki gives no
+  numbers - recorded in the docs' Open questions).
+- Trees drop ONE branch per pick; TREE_HARVESTS = 5 picks then leave
+  the stump. Flat GATHER_QL = 10 matches the starter kit, so gathered
+  materials craft identically. LP grants carried (5 branch / 3 stone).
+- Shared pick legs harvest_tree/harvest_boulder (game/interact.rs)
+  serve BOTH the local click and the cross-node relay; the duplicates
+  in game.rs are deleted. Every pick re-publishes the harvest state to
+  subscriber nodes (guest copies re-render; the old local path never
+  published a frame bump).
+- Guest views: boulders stay StaticClass::Stone (relay Mine); stumps
+  map to StaticClass::Structure (no relay act), so a guest stump click
+  is a validated no-op instead of a mine.
+- docs/mechanics/crafting/crafting-and-building.md: new "World
+  gathering" section (legacy baseline + every policy constant + the
+  verification story) and an Open questions entry for the unknown
+  legacy numbers.
+
+VERIFICATION:
+- 294 cargo tests green (11 proto + 270 unit incl. the three new pins:
+  relay_mine_boulder_yields_one_stone_per_pick, stump_pick_yields_
+  nothing, relay_chop_exhaustion_leaves_a_structure_class_stump; the
+  chop test now asserts the BRANCH drop resource; + 4 wire + 9 world).
+  fmt + clippy -D warnings clean.
+- Release binary probes: WORLD ENTRY: OK, CATTR ORDER: OK, NEWCRAFT:
+  OK (saw/bucket/fork paginae), EAT FLOW: OK, STATION FLOW: OK, and
+  the new GATHER: OK - server/scripts/test_gather.py (hnhlib harness)
+  walks to the seed-42 forest (the fresh spawn on the open grass has
+  25+ boulders in view but ZERO trees; the nearest forest is grid
+  (0,-1), ~90 tiles north - the probe documents this layout), picks a
+  branch, then drains a boulder: 5 stone drops, every one picked up
+  into the inventory, boulder retracted at the end.
+- Probe craft notes for future sessions: fresh chars spawn around tile
+  (50,50) but SAVED chars resume wherever they stopped, and drops only
+  stream inside VIEW_RADIUS = 300 subtiles - so the probe walks within
+  ~220 subtiles of the object before clicking (approach()), exactly
+  what the real client's walk-to-target does. The res_http index is
+  built at startup: regenerate gameres/ BEFORE booting the server or
+  fork paginae 404.
+
+Real-client e2e: NOT run this session (no display host in this
+sandbox; deploy-agent-env.sh provisioning started but not waited out -
+same carried state as sessions 58/59). The wire probe exercises the
+same spawn/drop/pickup contracts the GL client consumes, and the drop
+resources (gfx/terobjs/items/branch, .../stone) are the pack's own
+neg-layer shapes validated in session 26.
+
+COMMITS: a63af90 (world gathering) + this handoff entry.
+
+NEXT (handoff):
+- Type-3 candidates: feeding lift (trough-to-trough transfer), metal
+  chain groundwork (ore gathering), flower-menu for the pick verbs.
+- Carried: five-probe hnhlib.py migration (test_gather.py and
+  test_newcraft.py are the templates), GL e2e + Windows smoke (no
+  display host), multi-machine cluster profile, CI push when the
+  token gets the scope.
+

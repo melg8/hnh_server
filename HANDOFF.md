@@ -192,9 +192,13 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    station), wurst/sausage and baking doughs (station cooking depth),
    flour/bread (the 2009 pack has no grain item - sprout/grist only,
    see farm.rs).
-5. **Feeding depth**: trough-to-trough fodder transfer needs the lift
-   mechanic; per-animal breed stat rows (Milk Quantity / Wool Quality
-   are flat constants).
+5. **Feeding depth**: LIFT CLOSED (session 62): the trough lift /
+   place / transfer mechanic is implemented and probed; the carried
+   store survives restarts and cross-node migration. Still open:
+   per-animal breed stat rows (Milk Quantity / Wool Quality are flat
+   constants), the cross-node lift/transfer relays (a peer node's
+   trough offers no Lift petal to a guest), and the carried-trough
+   avatar render.
 6. **Real-client e2e**: GL production walkthrough (tame, wait out the
    milk meter, milk on screen) and Windows smoke when a display host
    exists (carried).
@@ -209,7 +213,7 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2. All six types
+53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2, 62=3. All six types
 have been served - pick freely, but avoid serving the same type as the
 previous session.
 
@@ -271,91 +275,13 @@ previous session.
 - S59 (type 5): multi-node scaling profile (profile_multinode.sh) - pair-cap confirmed per node, guest GC cleared by measurement, guest pose finalizers moved to the packed patched batch (p95 10.9 ms -> 16 us).
 - S60 (type 3): world gathering - trees yield branch picks (TREE_HARVESTS = 5, then a decorative Stump), boulders yield stone picks (BOULDER_STONES = 5, then gone); the dead 'wood x10' drop and the clickable-stump bug are gone; shared pick legs for local + relay paths; test_gather.py wire probe + crafting-and-building.md "World gathering" section.
 - S61 (type 2): probe corpus consolidated on hnhlib - the five legacy self-contained scripts migrated/deleted, test_build re-exports removed; three stale probe contracts surfaced and fixed (chatbot walk-away distance, direction art-ring offset, equipbot item-wid staleness, station/drop cursor return); dead dump_paginae removed.
+- S62 (type 3): Food Trough lift mechanic - lift menu / carry / place-back / fodder transfer "like a liquid"; carried store persists (save v7 field) and rides cross-node migration (CharData boxed); test_feeding.py wire probe + 5 new unit pins; livestock doc session-62 section.
 
 ---
 
 ---
 
-## 2026-10-08 - Session 60 (type 3: new functionality)
-
-SESSION TYPE ROTATION LOG: 56=4, 57=5, 58=3, 59=5, 60=3. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: the carried type-3 item - world GATHERING (HANDOFF gap #4's
-"bough/stone picking", the starter-kit stand-in). INVENTORY FIRST:
-the repo already had statics (populate_grid spawns trees/bumlings
-deterministically from JavaRandom per tile) and a click-harvest
-(interact.rs + relay game.rs), but the session-59 state had four
-fidelity defects, verified before cutting:
-1. The tree pick dropped 10x gfx/invobjs/wood - and `wood` is used by
-   ZERO recipes; the whole craft chain consumes gfx/invobjs/branch.
-   Gathering could not feed crafting.
-2. A boulder died on the FIRST click and dropped 10 stones.
-3. The exhausted-tree stump spawned as Kind::Stone - clicking a stump
-   yielded 10 stones.
-4. The local path (game/interact.rs) and the relay path (game.rs
-   relay_chop/relay_mine) duplicated the harvest logic by hand.
-
-THE CUT (commit a63af90):
-- Kind::Stone -> Kind::Boulder { left } with BOULDER_STONES = 5: one
-  stone per pick, the boulder is removed when drained. New Kind::Stump:
-  the exhausted-tree remnant is decorative and yields nothing. Both
-  counts are state.rs constants (server policy; the wiki gives no
-  numbers - recorded in the docs' Open questions).
-- Trees drop ONE branch per pick; TREE_HARVESTS = 5 picks then leave
-  the stump. Flat GATHER_QL = 10 matches the starter kit, so gathered
-  materials craft identically. LP grants carried (5 branch / 3 stone).
-- Shared pick legs harvest_tree/harvest_boulder (game/interact.rs)
-  serve BOTH the local click and the cross-node relay; the duplicates
-  in game.rs are deleted. Every pick re-publishes the harvest state to
-  subscriber nodes (guest copies re-render; the old local path never
-  published a frame bump).
-- Guest views: boulders stay StaticClass::Stone (relay Mine); stumps
-  map to StaticClass::Structure (no relay act), so a guest stump click
-  is a validated no-op instead of a mine.
-- docs/mechanics/crafting/crafting-and-building.md: new "World
-  gathering" section (legacy baseline + every policy constant + the
-  verification story) and an Open questions entry for the unknown
-  legacy numbers.
-
-VERIFICATION:
-- 294 cargo tests green (11 proto + 270 unit incl. the three new pins:
-  relay_mine_boulder_yields_one_stone_per_pick, stump_pick_yields_
-  nothing, relay_chop_exhaustion_leaves_a_structure_class_stump; the
-  chop test now asserts the BRANCH drop resource; + 4 wire + 9 world).
-  fmt + clippy -D warnings clean.
-- Release binary probes: WORLD ENTRY: OK, CATTR ORDER: OK, NEWCRAFT:
-  OK (saw/bucket/fork paginae), EAT FLOW: OK, STATION FLOW: OK, and
-  the new GATHER: OK - server/scripts/test_gather.py (hnhlib harness)
-  walks to the seed-42 forest (the fresh spawn on the open grass has
-  25+ boulders in view but ZERO trees; the nearest forest is grid
-  (0,-1), ~90 tiles north - the probe documents this layout), picks a
-  branch, then drains a boulder: 5 stone drops, every one picked up
-  into the inventory, boulder retracted at the end.
-- Probe craft notes for future sessions: fresh chars spawn around tile
-  (50,50) but SAVED chars resume wherever they stopped, and drops only
-  stream inside VIEW_RADIUS = 300 subtiles - so the probe walks within
-  ~220 subtiles of the object before clicking (approach()), exactly
-  what the real client's walk-to-target does. The res_http index is
-  built at startup: regenerate gameres/ BEFORE booting the server or
-  fork paginae 404.
-
-Real-client e2e: NOT run this session (no display host in this
-sandbox; deploy-agent-env.sh provisioning started but not waited out -
-same carried state as sessions 58/59). The wire probe exercises the
-same spawn/drop/pickup contracts the GL client consumes, and the drop
-resources (gfx/terobjs/items/branch, .../stone) are the pack's own
-neg-layer shapes validated in session 26.
-
-COMMITS: a63af90 (world gathering) + this handoff entry.
-
-NEXT (handoff):
-- Type-3 candidates: feeding lift (trough-to-trough transfer), metal
-  chain groundwork (ore gathering), flower-menu for the pick verbs.
-- Carried: five-probe hnhlib.py migration (test_gather.py and
-  test_newcraft.py are the templates), GL e2e + Windows smoke (no
-  display host), multi-machine cluster profile, CI push when the
-  token gets the scope.
+---
 
 ## 2026-10-08 - Session 61 (type 2: refactoring / technical debt)
 
@@ -451,3 +377,77 @@ NEXT (handoff):
 - Carried: feeding lift, metal chain groundwork, five-probe follow-ups
   none, GL e2e + Windows smoke (no display host), multi-machine
   cluster profile, CI push when the token gets the scope.
+
+## 2026-10-08 - Session 62 (type 3: new functionality)
+
+SESSION TYPE ROTATION LOG: 58=3, 59=5, 60=3, 61=2, 62=3. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the carried gap #5 - the Food Trough lift mechanic
+(animals-and-husbandry.md "Feeding: troughs and grazing": a lift-able
+object, and "lift-and-right-click on another trough transfers fodder
+like a liquid"). Session 48 had explicitly scoped this out ("no lift
+handling anywhere in this server yet").
+
+THE CUT:
+- state.rs: Player.carried_trough (the lifted trough's fodder store
+  rides the player; one carried object at a time) + SessionOut
+  .trough_menu (the pending Lift flower menu, the station_menu
+  pattern).
+- building.rs: clicking a placed trough opens a one-petal "Lift"
+  flower menu (trough_click/open_trough_menu); choosing it retracts
+  the gob for every viewer (the Drop-pickup removal path), frees the
+  tile and moves the store onto the player ("You lift the trough (N
+  fodder units)."). A map click while carrying takes precedence over
+  the build ghost in on_map_place and places the trough back down at
+  a tile validated EXACTLY like a build commit (5-tile reach,
+  walkable terrain, no crop/plan/structure occupancy; "You place the
+  trough (N fodder units)."). Clicking a placed trough WHILE
+  carrying transfers the fodder "like a liquid": moved = min(carried,
+  cap - dest); the moved units carry the SOURCE's running average so
+  the destination mixes by the doc's arithmetic (q10*100 + q12*50 ->
+  q10); the source keeps its FULL quality history per the session-48
+  rule ("consumption drains units but NOT the quality history" - the
+  unit pin caught the first draft subtracting it), so an emptied
+  trough keeps its average ("Transferred N fodder units.").
+- persist.rs: SavedTrough + SavedPlayer.carried_trough (v7,
+  additive, bincode-safe serde default - older saves load with
+  nothing carried). game.rs restores the store before any
+  interaction with the fresh player row.
+- nodes.rs: NodeMsg::CharData now boxes its SavedPlayer snapshot -
+  the new field pushed the variant over the clippy
+  large-enum-variant threshold; Box<T> serializes as T, the mesh
+  wire format is unchanged.
+- The trough owned by a PEER node offers no Lift petal to a guest
+  (the click stays a validated no-op, like a stump pick): cross-node
+  lift/transfer relays are future work, recorded in the doc's Open
+  questions together with the carried-trough avatar render.
+
+VERIFICATION (every line a fresh run this session):
+- 298 cargo tests green (11 proto + 274 unit incl. 5 new pins:
+  trough_lift_retracts_the_gob_and_carries_the_fodder,
+  trough_place_back_restores_the_store,
+  trough_transfer_moves_fodder_like_a_liquid,
+  trough_transfer_respects_the_capacity_cap,
+  roundtrip_preserves_a_carried_trough; + 4 wire + 9 world);
+  fmt + clippy -D warnings clean.
+- server/scripts/test_feeding.py (new probe on the hnhlib harness):
+  builds two troughs through the REAL build pagina path, loads
+  fodder one unit per itemact (wheat, then carrot seeds), lifts
+  trough 1 (gob retracted + carry line), places it back down (new
+  gob + place line), lifts trough 2 and transfers its 2 units into
+  trough 1 by clicking it while carrying - FEEDING FLOW: OK end to
+  end. Probe notes: the kit carries 5 wheat + 5 carrot seeds (both
+  fodder); the trough demand is branch x4 (one sink), the cursor
+  return contract applies after every sink/load.
+- Smoke on the touched paths: WORLD ENTRY: OK, CATTR ORDER: OK,
+  BUILD FLOW: OK, STATION FLOW: OK.
+
+COMMITS: trough lift mechanic + probe + docs + this handoff.
+
+NEXT (handoff):
+- Type-3 candidates: metal chain groundwork (ore gathering + smelter
+  numbers), flower-menu pick verbs, per-animal breed stat rows.
+- Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
+  (no display host), multi-machine cluster profile, CI push when the
+  token gets the scope.
