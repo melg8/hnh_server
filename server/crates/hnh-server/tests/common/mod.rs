@@ -17,6 +17,7 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use hnh_proto::{
@@ -64,6 +65,41 @@ impl Drop for ServerGuard {
             let _ = child.wait();
         }
         let _ = std::fs::remove_dir_all(&self.workdir);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency governor
+// ---------------------------------------------------------------------------
+
+/// Every wire test boots a REAL server and drives live UDP traffic;
+/// several servers on a two-core dev box starve each other's tick loops
+/// and lose raw OBJDATA/MAPDATA datagrams (localhost UDP buffer
+/// overflow, the session-56 finding), which no retransmit can recover.
+/// The slot governor caps the concurrent server count so the suite stays
+/// deterministic under the default test-threads (RAII release, panic
+/// safe).
+static FREE_SLOTS: Mutex<usize> = Mutex::new(2);
+static SLOT_FREED: Condvar = Condvar::new();
+
+/// A held concurrency slot; releases on Drop.
+pub struct TestSlot;
+
+/// Block until one of the 3 slots frees up.
+pub fn acquire_test_slot() -> TestSlot {
+    let mut free = FREE_SLOTS.lock().expect("BUG: slot mutex poisoned");
+    while *free == 0 {
+        free = SLOT_FREED.wait(free).expect("BUG: slot condvar poisoned");
+    }
+    *free -= 1;
+    TestSlot
+}
+
+impl Drop for TestSlot {
+    fn drop(&mut self) {
+        let mut free = FREE_SLOTS.lock().expect("BUG: slot mutex poisoned");
+        *free += 1;
+        SLOT_FREED.notify_one();
     }
 }
 
@@ -393,10 +429,11 @@ pub fn decode_objdata(blob: &[u8]) -> Vec<GobBlock> {
         let gid = read_i32(blob, &mut off);
         let frame = read_i32(blob, &mut off);
         let mut ops = GobOps::default();
-        let removed = fl & 1 != 0;
-        // A flag-1 block carries no ops section (bots.rs parse_objdata:
-        // the removal is the whole block).
-        while !removed && off < blob.len() {
+        let mut saw_rem = false;
+        // Ops run to the block's OD_END; a flag-1 block carries no ops
+        // section at all (bots.rs parse_objdata: the removal is the
+        // whole block).
+        while off < blob.len() {
             let t = blob[off];
             off += 1;
             match t {
@@ -408,9 +445,9 @@ pub fn decode_objdata(blob: &[u8]) -> Vec<GobBlock> {
                 }
                 0 => {
                     // OD_REM: the server emits this op with no payload
-                    // followed by OD_END (stream_retract). Falling into
-                    // the unknown-op break here would leave the OD_END
-                    // byte unconsumed and desync the next block parse.
+                    // followed by OD_END (stream_retract) - this IS the
+                    // removal (bots.rs ObjOp::Remove).
+                    saw_rem = true;
                 }
                 OD_LINBEG => {
                     let sx = read_i32(blob, &mut off);
@@ -493,7 +530,7 @@ pub fn decode_objdata(blob: &[u8]) -> Vec<GobBlock> {
         out.push(GobBlock {
             gid,
             frame,
-            removed,
+            removed: fl & 1 != 0 || saw_rem,
             ops,
         });
     }
@@ -579,6 +616,14 @@ pub struct Session {
     /// Live "item" widgets: wid -> NEWWDG args (res, ql, drag, [coord,]
     /// label, count). Rebuilt on every inventory refresh.
     pub items: HashMap<u16, Vec<ArgVal>>,
+    /// Live "sm" flower menus: wid -> NEWWDG args (the petal strings).
+    /// Removed on DSTWDG (the server destroys the menu after a choice
+    /// and when a newer menu replaces it).
+    pub sm_menus: HashMap<u16, Vec<ArgVal>>,
+    /// Area Chat lines (RMSG_WDGMSG name "log" on the chat window), in
+    /// arrival order: system feedback (lifts, fodder transfers) and
+    /// party/area chatter ride the same path.
+    pub chat_lines: Vec<String>,
 }
 
 impl Session {
@@ -615,6 +660,8 @@ impl Session {
             res_names: HashMap::new(),
             wdgmsgs: Vec::new(),
             items: HashMap::new(),
+            sm_menus: HashMap::new(),
+            chat_lines: Vec::new(),
         };
 
         // MSG_SESS: flavour "Haven", PVER, username, cookie. The legacy
@@ -791,6 +838,137 @@ impl Session {
         args.extend_from_slice(&le32(0));
         args.push(0);
         self.send_wdgmsg(wid, "take", &args);
+    }
+
+    /// Mapview gob click (hnhlib click_gob): the pick/interact act on a
+    /// specific gob. The arg shape mirrors the real client: (c0, mc,
+    /// button, modflags, gobid, gobrc) - gobid at list position 4 is what
+    /// on_map_click routes to player_interact.
+    pub fn click_gob(&mut self, gobid: i32, pos: (i32, i32)) {
+        let wid = self.widgets_by_name["mapview"];
+        let mut args = Vec::new();
+        args.push(3);
+        args.extend_from_slice(&le32(0)); // c0: screen coord (unused)
+        args.extend_from_slice(&le32(0));
+        args.push(3);
+        args.extend_from_slice(&le32(pos.0));
+        args.extend_from_slice(&le32(pos.1));
+        args.push(1);
+        args.extend_from_slice(&le32(1)); // button 1
+        args.push(1);
+        args.extend_from_slice(&le32(0)); // modflags
+        args.push(1);
+        args.extend_from_slice(&le32(gobid));
+        args.push(3);
+        args.extend_from_slice(&le32(pos.0));
+        args.extend_from_slice(&le32(pos.1));
+        args.push(0);
+        self.send_wdgmsg(wid, "click", &args);
+    }
+
+    /// Flower menu choice (the real client's FlowerMenu.pick): `wdgmsg
+    /// (wid, "cl", [choice])` on the sm widget.
+    pub fn flower_choice(&mut self, wid: u16, choice: i32) {
+        let mut args = vec![1u8]; // arg tag: int
+        args.extend_from_slice(&le32(choice));
+        args.push(0);
+        self.send_wdgmsg(wid, "cl", &args);
+    }
+
+    /// The resolved resource name of a live gob (None when the gob is
+    /// unknown, retracted, or its RESID announcement has not landed).
+    pub fn gob_res_name(&self, gid: i32) -> Option<&str> {
+        let g = self.gobs.get(&gid)?;
+        if g.removed {
+            return None;
+        }
+        self.res_names.get(&g.res?).map(|n| n.as_str())
+    }
+
+    /// Lowest live gob id whose resource name starts with `prefix`
+    /// (deterministic pick; matches the python probes' sort order).
+    pub fn gob_by_res_prefix(&self, prefix: &str) -> Option<i32> {
+        self.gobs
+            .iter()
+            .filter(|(_, g)| !g.removed)
+            .filter(|(_, g)| {
+                g.res
+                    .and_then(|w| self.res_names.get(&w))
+                    .map(|n| n.starts_with(prefix))
+                    .unwrap_or(false)
+            })
+            .map(|(gid, _)| *gid)
+            .min()
+    }
+
+    /// Live gob whose resource name starts with `prefix`, CLOSEST to the
+    /// player in Chebyshev subtiles. The pick act has no reach check, but
+    /// the spawned drop sits next to the object (+-33 subtiles of jitter)
+    /// and only streams inside VIEW_RADIUS of the player - the real
+    /// client walks the character to the object before acting, so the
+    /// wire test must act on a NEARBY object for the drop to be visible.
+    pub fn nearest_gob_by_res_prefix(&self, prefix: &str, player: i32) -> Option<i32> {
+        let pp = self.gob_pos(player)?;
+        self.gobs
+            .iter()
+            .filter(|(_, g)| !g.removed)
+            .filter(|(gid, g)| {
+                **gid != player
+                    && g.res
+                        .and_then(|w| self.res_names.get(&w))
+                        .map(|n| n.starts_with(prefix))
+                        .unwrap_or(false)
+            })
+            .min_by_key(|(gid, _)| {
+                let (gx, gy) = self.gob_pos(**gid).unwrap_or(pp);
+                (gx - pp.0).abs().max((gy - pp.1).abs())
+            })
+            .map(|(gid, _)| *gid)
+    }
+
+    /// A live gob with EXACTLY this resource name and position (the
+    /// placement/plan spawn check; hnhlib scans the same shape). Static
+    /// spawn blocks carry their position as an OD_MOVE op, so the last
+    /// MOVE is the object's position.
+    pub fn gob_with_res_at(&self, name: &str, pos: (i32, i32)) -> Option<i32> {
+        self.gobs
+            .iter()
+            .find(|(gid, g)| {
+                !g.removed
+                    && g.res
+                        .and_then(|w| self.res_names.get(&w))
+                        .map(|n| n == name)
+                        .unwrap_or(false)
+                    && self.gob_pos(**gid) == Some(pos)
+            })
+            .map(|(gid, _)| *gid)
+    }
+
+    /// How many chat lines mention `needle` (the system feedback check:
+    /// "Fodder added to the trough." etc.).
+    pub fn chat_count(&self, needle: &str) -> usize {
+        self.chat_lines
+            .iter()
+            .filter(|l| l.contains(needle))
+            .count()
+    }
+
+    /// Whether the drag cursor holds a stack (optionally of the named
+    /// resource). The cursor widget carries drag=1 at arg index 2 (the
+    /// same layout flag the build-flow contract pins).
+    pub fn cursor_held(&self, res: Option<&str>) -> bool {
+        self.items.values().any(|a| {
+            a.get(2).and_then(ArgVal::as_int) == Some(1)
+                && res
+                    .map(|r| {
+                        a.first()
+                            .and_then(ArgVal::as_int)
+                            .and_then(|w| self.res_names.get(&(w as u16)))
+                            .map(|n| n == r)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(true)
+        })
     }
 
     /// MapView `itemact(cc, mc, modflags[, gobid, gobrc])`: click the map
@@ -1016,6 +1194,14 @@ impl Session {
                         let args = parse_args(body, &mut o);
                         self.items.insert(wid, args);
                     }
+                    if name == "sm" {
+                        // Flower menu (resources.rs wdg::new_wdg): the args
+                        // past the type-name coord + parent are the petals
+                        // (strings, one per menu entry).
+                        let mut o = off + 8 + 2;
+                        let args = parse_args(body, &mut o);
+                        self.sm_menus.insert(wid, args);
+                    }
                 }
             }
             RMSG_DSTWDG => {
@@ -1023,6 +1209,7 @@ impl Session {
                     let wid = u16::from_le_bytes([body[0], body[1]]);
                     self.widgets.remove(&wid);
                     self.items.remove(&wid);
+                    self.sm_menus.remove(&wid);
                     self.widgets_by_name.retain(|_, v| *v != wid);
                 }
             }
@@ -1036,6 +1223,13 @@ impl Session {
                 if off > 2 {
                     let name = String::from_utf8_lossy(&body[2..off - 1]).into_owned();
                     let args = parse_args(body, &mut off);
+                    if name == "log" {
+                        // Chat window push (game.rs chat_line): the arg list
+                        // is (text[, color[, urgent]]).
+                        if let Some(text) = args.first().and_then(ArgVal::as_str) {
+                            self.chat_lines.push(text.to_owned());
+                        }
+                    }
                     self.wdgmsgs.push((wid, name, args));
                 }
             }

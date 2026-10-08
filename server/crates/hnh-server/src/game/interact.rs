@@ -85,6 +85,7 @@ impl Game {
             return 0;
         };
         let pos = self.world.gobs.pos[tslot];
+        debug!(target, harvests, "tree pick");
         if harvests > 0 {
             self.world.gobs.kind[tslot] = Kind::Tree {
                 harvests: harvests - 1,
@@ -112,6 +113,7 @@ impl Game {
             return 0;
         };
         let pos = self.world.gobs.pos[tslot];
+        debug!(target, left, "boulder pick");
         self.spawn_drop_near(pos, "gfx/invobjs/stone", crate::state::GATHER_QL, "");
         if left > 1 {
             self.world.gobs.kind[tslot] = Kind::Boulder { left: left - 1 };

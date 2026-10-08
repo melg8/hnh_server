@@ -8,9 +8,106 @@
 mod common;
 
 use std::net::ToSocketAddrs;
+use std::time::Duration;
 
 use common::{ArgVal, ServerGuard, Session, REQUIRED_CATTR};
 use hnh_proto::{MSG_SESS, PVER, SESSERR_AUTH};
+
+const TREE_PREFIX: &str = "gfx/terobjs/trees/";
+const BOULDER_PREFIX: &str = "gfx/terobjs/bumlings/";
+const BRANCH_WORLD: &str = "gfx/terobjs/items/branch";
+const STONE_WORLD: &str = "gfx/terobjs/items/stone";
+const TROUGH_RES: &str = "gfx/terobjs/trough";
+const BOULDER_STONES: u8 = 5;
+// Per ground-click hop: 6 tiles, inside the path-check budget (the
+// probe_walk.py / test_gather.py cadence).
+const HOP: i32 = 66;
+const NORTH_HOPS: usize = 40;
+
+/// Full bootstrap into the world: charlist -> play -> mapview -> objdata,
+/// plus the inventory window open (shared by the two game-flow tests).
+fn enter_world(server: &ServerGuard, username: &str) -> (Session, i32) {
+    let mut sess = Session::connect(server, username);
+    assert!(
+        sess.pump_until(|s| s.widgets_by_name.contains_key("charlist"), 10),
+        "no charlist\n{}",
+        server.log_tail(2000)
+    );
+    sess.send_play(username);
+    assert!(
+        sess.pump_until(|s| s.widgets_by_name.contains_key("mapview"), 15),
+        "no mapview\n{}",
+        server.log_tail(2000)
+    );
+    assert!(
+        sess.pump_until(|s| s.player_gob.is_some() && s.objdata_datagrams > 0, 15),
+        "no player gob / objdata\n{}",
+        server.log_tail(2000)
+    );
+    // Open the inventory the way SlenHud does (the inv button) and wait
+    // for the starter stacks to be visible.
+    let slen = sess.widgets_by_name["slen"];
+    sess.send_wdgmsg(slen, "inv", &[0]);
+    let ready = |s: &Session| {
+        s.item_by_res("gfx/invobjs/branch").is_some()
+            && s.item_by_res("gfx/invobjs/stone").is_some()
+    };
+    assert!(
+        sess.pump_until(ready, 10),
+        "starter stacks never appeared\n{}",
+        server.log_tail(2000)
+    );
+    let player = sess.player_gob.expect("player gob");
+    (sess, player)
+}
+
+/// The count argument of an inventory item widget (the layout the
+/// build-flow contract already pins: index 4 carries the stack size).
+fn stack_count(sess: &Session, res: &str) -> Option<i32> {
+    let wid = sess.item_by_res(res)?;
+    sess.items.get(&wid)?.get(4).and_then(ArgVal::as_int)
+}
+
+/// `inv take` with an acknowledgment loop: the take is only accepted
+/// server-side when the target wid is the LIVE inventory widget. An
+/// inventory refresh (every take/sink/drop rebuilds the item widget set,
+/// session-61 note) may retire the wid a stale client snapshot still
+/// resolves to - the server refuses that take silently and the retry
+/// re-resolves the fresh wid. Returns when the named stack IS on the
+/// cursor (the cursor widget carries drag=1).
+fn take_to_cursor(sess: &mut Session, res: &str, tag: &str) {
+    for attempt in 0..5 {
+        if let Some(wid) = sess.item_by_res(res) {
+            sess.inv_take(wid);
+            if sess.pump_until(|s| s.cursor_held(Some(res)), 2) {
+                return;
+            }
+        }
+        // Settle the widget rebuild storm, then re-resolve.
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = attempt;
+    }
+    panic!(
+        "{tag}: {res} never landed on the cursor (items={:?})\nchat={:?}",
+        sess.items, sess.chat_lines
+    );
+}
+
+/// Release whatever the cursor holds back into the inventory (the
+/// session-51 cursor-return contract) and wait for the empty cursor.
+fn return_cursor(sess: &mut Session, tag: &str) {
+    if sess.cursor_held(None) {
+        sess.inv_drop();
+        let empty = sess.pump_until(|s| !s.cursor_held(None), 5);
+        assert!(
+            empty,
+            "{tag}: cursor never emptied after the inventory drop\nchat={:?}",
+            sess.chat_lines
+        );
+        // Settle the post-drop refresh so later wid resolutions are live.
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
 
 /// Contract: dev TLS auth -> cookie -> MSG_SESS -> full bootstrap
 /// (charlist -> play -> mapview + 3x3 MAPREQ -> MAPDATA + OBJDATA) with
@@ -18,6 +115,7 @@ use hnh_proto::{MSG_SESS, PVER, SESSERR_AUTH};
 /// creation, and the attack paginae shipped.
 #[test]
 fn world_entry_bootstrap_contract() {
+    let _slot = common::acquire_test_slot();
     // Arrange
     let server = ServerGuard::boot("world_entry");
     let mut sess = Session::connect(&server, "boottest");
@@ -97,6 +195,7 @@ fn world_entry_bootstrap_contract() {
 /// rejected with SESSERR_AUTH and no session is created.
 #[test]
 fn session_rejects_bogus_cookie() {
+    let _slot = common::acquire_test_slot();
     // Arrange
     let server = ServerGuard::boot("badcookie");
     let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
@@ -142,6 +241,7 @@ fn session_rejects_bogus_cookie() {
 /// that approach the target without a teleport.
 #[test]
 fn movement_click_walks_with_linstep_progress() {
+    let _slot = common::acquire_test_slot();
     // Arrange: full bootstrap (same flow as world_entry_bootstrap_contract).
     let server = ServerGuard::boot("movement");
     let mut sess = Session::connect(&server, "walker");
@@ -164,21 +264,25 @@ fn movement_click_walks_with_linstep_progress() {
     let player_gob = sess.player_gob.expect("player gob id in mapview args");
 
     // Act: ground click 20 tiles east of the spawn center (555, 555)
-    // subtiles - the probe_walk.py coordinates.
-    sess.click_ground(555 + 220, 555);
-
-    // Assert 1: an own-gob LINBEG appears toward the clicked target.
+    // subtiles - the probe_walk.py coordinates. The re-click mirrors the
+    // real client: the mv-phase LINBEG batch rides RAW UDP, a lost frame
+    // is invisible to the server, and a player whose walk did not start
+    // clicks again (each click retargets; the +/-22 tolerance below
+    // absorbs the interpolation offset).
     let own_linbeg = |s: &Session| {
         s.gobs
             .get(&player_gob)
             .and_then(|g| g.linbeg)
             .filter(|l| l.tx > l.sx) // eastward
     };
-    let linbeg = if sess.pump_until(|s| own_linbeg(s).is_some(), 10) {
-        own_linbeg(&sess)
-    } else {
-        None
-    };
+    let mut linbeg = None;
+    for _ in 0..4 {
+        sess.click_ground(555 + 220, 555);
+        if sess.pump_until(|s| own_linbeg(s).is_some(), 5) {
+            linbeg = own_linbeg(&sess);
+            break;
+        }
+    }
     assert!(
         linbeg.is_some(),
         "no own-gob LINBEG after ground click (unacked rel dgrams: {})\n{}",
@@ -186,17 +290,24 @@ fn movement_click_walks_with_linstep_progress() {
         server.log_tail(2000)
     );
     let linbeg = linbeg.expect("LINBEG asserted above");
+    // The clicked MAP POINT is the target (tx ~= 775, ty ~= 555): the
+    // re-click retargets from the interpolated position, so the segment
+    // LENGTH (tx - sx) is whatever remains of the walk, not 220.
     assert!(
-        (linbeg.tx - linbeg.sx - 220).abs() <= 22,
-        "LINBEG target not ~220 subtiles east: sx={} tx={}",
-        linbeg.sx,
+        (linbeg.tx - (555 + 220)).abs() <= 22,
+        "LINBEG target is not the clicked point: tx={}",
         linbeg.tx
     );
     assert!(
-        (linbeg.ty - linbeg.sy).abs() <= 22,
-        "LINBEG drifts on y: sy={} ty={}",
-        linbeg.sy,
+        (linbeg.ty - 555).abs() <= 22,
+        "LINBEG drifts on y: ty={}",
         linbeg.ty
+    );
+    assert!(
+        linbeg.tx > linbeg.sx,
+        "LINBEG must head east: sx={} tx={}",
+        linbeg.sx,
+        linbeg.tx
     );
 
     // Assert 2: LINSTEP step indices ascend to the LINBEG's step count,
@@ -266,6 +377,7 @@ fn movement_click_walks_with_linstep_progress() {
 /// regression that hid between the session-36 kit bump and session 50.
 #[test]
 fn build_flow_sinks_partial_stack_then_completes_after_cursor_return() {
+    let _slot = common::acquire_test_slot();
     // Arrange: full bootstrap + the inventory window (the slen button).
     let server = ServerGuard::boot("buildflow");
     let mut sess = Session::connect(&server, "builder");
@@ -445,5 +557,487 @@ fn build_flow_sinks_partial_stack_then_completes_after_cursor_return() {
         plan.res,
         Some(oven_wire),
         "completion must convert the plan in place (same gob id and resource)"
+    );
+}
+
+/// Walk the character toward `target` until within `stop` subtiles
+/// (Chebyshev) - the approach the real client performs before an act;
+/// the drop spawns next to the object and streams inside VIEW_RADIUS
+/// (300), so acting from <=220 guarantees the drop is visible. Hops are
+/// 6-tile ground clicks (inside the path-check budget, the probe_walk
+/// cadence); rapid clicks retarget from the interpolated position.
+/// Returns false when the walk budget is exhausted (unreachable object:
+/// water, rocks - the caller picks another candidate).
+fn approach_opt(sess: &mut Session, player: i32, target: (i32, i32), stop: i32) -> bool {
+    for _ in 0..60 {
+        let pos = sess.gob_pos(player).expect("player pos");
+        let (dx, dy) = (target.0 - pos.0, target.1 - pos.1);
+        if dx.abs().max(dy.abs()) <= stop {
+            return true;
+        }
+        // One axis per hop (the larger distance first): diagonal clicks
+        // can hit terrain the axis-aligned path avoids, and the server
+        // speed budget is Manhattan (~2.3s per 66-subtile axis hop).
+        let step = |v: i32| v.clamp(-HOP, HOP);
+        let steps_before = sess
+            .gobs
+            .get(&player)
+            .map(|g| g.linsteps.len())
+            .unwrap_or(0);
+        if dx.abs() >= dy.abs() {
+            sess.click_ground(pos.0 + step(dx), pos.1);
+        } else {
+            sess.click_ground(pos.0, pos.1 + step(dy));
+        }
+        // The walk STARTS only if the path check passed: a refused walk
+        // emits no own-gob LINSTEP at all (load-independent signal). A
+        // started hop streams LINSTEP frames on the 5 Hz cadence while
+        // the arrival MOVE op updates the position - under parallel-test
+        // CPU load the arrival can lag several seconds behind the
+        // nominal 2.3s, hence the generous windows.
+        let started = sess.pump_until(
+            |s| {
+                s.gobs
+                    .get(&player)
+                    .map(|g| g.linsteps.len() > steps_before)
+                    .unwrap_or(false)
+            },
+            12,
+        );
+        if !started {
+            return false; // path refused (water): the caller retries elsewhere
+        }
+        let arrived = sess.pump_until(
+            |s| {
+                let p = s.gob_pos(player).unwrap_or(pos);
+                if p != pos {
+                    return true;
+                }
+                (target.0 - p.0).abs().max((target.1 - p.1).abs()) <= stop
+            },
+            20,
+        );
+        if !arrived {
+            return false; // stalled mid-hop (severe load)
+        }
+    }
+    false
+}
+
+/// Contract (docs/mechanics/crafting-and-building.md "World gathering",
+/// session 60, over the real wire): a boulder pick spawns a stone item
+/// drop next to it, the BOULDER_STONES-th pick retracts the boulder, a
+/// tree pick spawns a branch drop and the tree survives, and a clicked
+/// drop lands in the inventory as its gfx/invobjs stack. The spawn area
+/// on seed 42 is open grass ringed by terrain that blocks some walks,
+/// so both phases walk to the first REACHABLE candidate (the approach
+/// the real client performs) and act from inside VIEW_RADIUS.
+///
+/// IGNORED in the default suite on purpose: this is a 40-90s walking
+/// scenario, and under the full parallel suite the two-core sandbox
+/// loses raw OBJDATA spawn frames and retract sweeps the streamed
+/// statics non-deterministically (the session-56 UDP finding, on the
+/// spawn path there is no retransmit to recover with). Run it explicitly
+/// on a quiet machine: `cargo test --test wire -- --ignored`.
+#[test]
+#[ignore = "walking scenario: run explicitly (cargo test -- --ignored), see doc"]
+fn world_gathering_picks_yield_drops_exhaust_and_land_in_inventory() {
+    let _slot = common::acquire_test_slot();
+    // Arrange
+    let server = ServerGuard::boot("gathering");
+    let (mut sess, player) = enter_world(&server, "gatherer");
+    // The candidate scans below sort by distance from the PLAYER; under
+    // parallel-test load the player's spawn MOVE op may land after the
+    // first statics batch - wait for it or the sort falls back to (0,0)
+    // and the candidates point behind the water.
+    assert!(
+        sess.pump_until(|s| s.gob_pos(player).is_some(), 15),
+        "player spawn MOVE never landed\n{}",
+        server.log_tail(2000)
+    );
+    let starter_branch = stack_count(&sess, "gfx/invobjs/branch").expect("starter branch");
+    let starter_stone = stack_count(&sess, "gfx/invobjs/stone").expect("starter stone");
+
+    // Act 1: BOULDER_STONES picks on a reachable boulder near spawn
+    // (the drop spawns next to the object with +-33 subtiles of jitter
+    // and streams only inside VIEW_RADIUS - the real client walks to
+    // the object before acting, the test walks to the first candidate
+    // the terrain allows; some seed-42 boulders sit behind water).
+    let collect_boulders = |s: &Session| -> Vec<(i32, (i32, i32))> {
+        let mut out: Vec<(i32, (i32, i32))> = s
+            .gobs
+            .iter()
+            .filter(|(gid, g)| !g.removed && s_res_prefix(s, **gid, BOULDER_PREFIX))
+            .map(|(gid, _)| *gid)
+            .filter_map(|gid| s.gob_pos(gid).map(|p| (gid, p)))
+            .collect();
+        let pp = s.gob_pos(player).unwrap_or((0, 0));
+        out.sort_by_key(|(_, p)| (p.0 - pp.0).abs().max((p.1 - pp.1).abs()));
+        out
+    };
+    let boulder_candidates = collect_boulders(&sess);
+    let streamed = sess.pump_until(|s| !collect_boulders(s).is_empty(), 15);
+    let boulder_candidates = if boulder_candidates.is_empty() && streamed {
+        collect_boulders(&sess)
+    } else {
+        boulder_candidates
+    };
+    assert!(
+        !boulder_candidates.is_empty(),
+        "no boulder streamed in view at spawn\n{}",
+        server.log_tail(2000)
+    );
+    let mut boulder_pos = None;
+    for (b, bpos) in boulder_candidates.iter().take(8) {
+        if approach_opt(&mut sess, player, *bpos, 200) {
+            boulder_pos = Some((*b, *bpos));
+            break;
+        }
+    }
+    let (boulder, bpos) = boulder_pos.expect("no reachable boulder among the candidates");
+    let mut stones_seen: Vec<i32> = Vec::new();
+    for pick in 1..=BOULDER_STONES {
+        assert!(
+            !sess.gobs[&boulder].removed,
+            "boulder retracted before pick {pick}"
+        );
+        sess.click_gob(boulder, bpos);
+        let got = sess.pump_until(
+            |s| {
+                s.gobs.iter().any(|(gid, g)| {
+                    !stones_seen.contains(gid)
+                        && !g.removed
+                        && s.gob_res_name(*gid) == Some(STONE_WORLD)
+                })
+            },
+            8,
+        );
+        assert!(
+            got,
+            "pick {pick}: no stone drop spawned (seen={stones_seen:?})\n{}",
+            server.log_tail(2000)
+        );
+        let drop = sess
+            .gobs
+            .iter()
+            .find(|(gid, g)| {
+                !stones_seen.contains(gid) && !g.removed && s_res_is(&sess, **gid, STONE_WORLD)
+            })
+            .map(|(gid, _)| *gid)
+            .expect("fresh stone drop");
+        stones_seen.push(drop);
+    }
+    assert_eq!(
+        stones_seen.len(),
+        BOULDER_STONES as usize,
+        "one stone drop per pick"
+    );
+    let depleted = sess.pump_until(|s| s.gobs[&boulder].removed, 8);
+    assert!(
+        depleted,
+        "depleted boulder must be retracted\n{}",
+        server.log_tail(2000)
+    );
+
+    // Act 2: a clicked stone drop lands in the inventory.
+    let first_drop = stones_seen[0];
+    let dpos = sess.gob_pos(first_drop).expect("drop pos");
+    sess.click_gob(first_drop, dpos);
+    let picked = sess.pump_until(
+        |s| stack_count(s, "gfx/invobjs/stone") == Some(starter_stone + 1),
+        8,
+    );
+    assert!(
+        picked,
+        "stone drop never landed in the inventory ({} -> ?)\n{}",
+        starter_stone,
+        server.log_tail(2000)
+    );
+
+    // Act 3: pick a tree; the tree must SURVIVE. The spawn area on
+    // seed 42 is open grass - the nearest trees sit in the grid (0, -1)
+    // forest, ~1200 subtiles north. The pick act itself has no reach
+    // check, so: click the nearest streamed tree NOW, walk to it (one
+    // axis per hop), and the branch drop streams into view on approach.
+    let collect_trees = |s: &Session| -> Vec<(i32, (i32, i32))> {
+        let mut out: Vec<(i32, (i32, i32))> = s
+            .gobs
+            .iter()
+            .filter(|(gid, g)| !g.removed && s_res_prefix(s, **gid, TREE_PREFIX))
+            .map(|(gid, _)| *gid)
+            .filter_map(|gid| s.gob_pos(gid).map(|p| (gid, p)))
+            .collect();
+        let pp = s.gob_pos(player).unwrap_or((0, 0));
+        out.sort_by_key(|(_, p)| (p.0 - pp.0).abs() + (p.1 - pp.1).abs());
+        out
+    };
+    let mut tree_candidates = collect_trees(&sess);
+    for _ in 0..NORTH_HOPS {
+        if !tree_candidates.is_empty() {
+            break;
+        }
+        let pos = sess.gob_pos(player).expect("player pos");
+        sess.click_ground(pos.0, pos.1 - HOP);
+        sess.pump_until(|s| !collect_trees(s).is_empty(), 2);
+        tree_candidates = collect_trees(&sess);
+    }
+    assert!(
+        !tree_candidates.is_empty(),
+        "no tree streamed among the loaded grids"
+    );
+    let mut tree = None;
+    'trees: for (candidate, tpos) in tree_candidates.iter().take(6) {
+        // Walk FIRST, then exactly ONE pick: every click on a tree burns
+        // one of its TREE_HARVESTS, so the retry policy may never re-click
+        // the same tree. From the 250-subtile stop radius the drop
+        // (spawned +-33 subtiles next to the tree) streams immediately.
+        if !approach_opt(&mut sess, player, *tpos, 250) {
+            continue;
+        }
+        sess.click_gob(*candidate, *tpos);
+        let got = sess.pump_until(
+            |s| {
+                s.gobs
+                    .iter()
+                    .any(|(gid, g)| !g.removed && s.gob_res_name(*gid) == Some(BRANCH_WORLD))
+            },
+            10,
+        );
+        if got {
+            tree = Some(*candidate);
+            break 'trees;
+        }
+    }
+    let tree = tree.expect("no reachable tree yielded a branch drop");
+    assert!(
+        !sess.gobs[&tree].removed,
+        "the tree must survive a pick (stump only after TREE_HARVESTS)"
+    );
+
+    // Act 4: the branch drop lands in the inventory.
+    let branch_drop = sess
+        .gobs
+        .iter()
+        .find(|(gid, g)| !g.removed && s_res_is(&sess, **gid, BRANCH_WORLD))
+        .map(|(gid, _)| *gid)
+        .expect("branch drop gob");
+    let bpos = sess.gob_pos(branch_drop).expect("branch drop pos");
+    sess.click_gob(branch_drop, bpos);
+    let branch_picked = sess.pump_until(
+        |s| stack_count(s, "gfx/invobjs/branch") == Some(starter_branch + 1),
+        8,
+    );
+    assert!(
+        branch_picked,
+        "branch drop never landed in the inventory ({} -> ?)\n{}",
+        starter_branch,
+        server.log_tail(2000)
+    );
+}
+
+/// Resource-name lookup outside a Session closure borrow (the gobs
+/// iteration above borrows sess.gobs, so the name check goes through a
+/// free function).
+fn s_res_is(sess: &Session, gid: i32, name: &str) -> bool {
+    sess.gob_res_name(gid) == Some(name)
+}
+
+/// Prefix variant of s_res_is (tree/boulder candidate scans).
+fn s_res_prefix(sess: &Session, gid: i32, prefix: &str) -> bool {
+    sess.gob_res_name(gid)
+        .map(|n| n.starts_with(prefix))
+        .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
+// Food Trough lift / place-back / fodder transfer (session 62)
+// ---------------------------------------------------------------------------
+
+/// The site search and sink choreography of the python buildbot
+/// (test_feeding.py build_trough): arm the pagina, try up to four tiles
+/// east of the player, commit the ghost, sink the branch demand from the
+/// starter stack, return the cursor remainder. Completion is asserted by
+/// the caller through a fodder delivery ("Fodder added to the trough."),
+/// the only completion signal a 1-stage build exposes on the wire.
+fn build_trough(sess: &mut Session, dx: i32, tag: &str) -> (i32, (i32, i32)) {
+    let ppos = sess
+        .gob_pos(sess.player_gob.expect("player gob"))
+        .expect("player pos");
+    let ptile = (ppos.0.div_euclid(11), ppos.1.div_euclid(11));
+    for dy in 0..4i32 {
+        let cand = (ptile.0 + dx, ptile.1 + dy);
+        let mc = (cand.0 * 11 + 5, cand.1 * 11 + 5);
+        sess.menu_act("trough");
+        let armed = sess.pump_until(|s| s.last_wdgmsg("place").is_some(), 10);
+        assert!(
+            armed,
+            "{tag}: no mapview place uimsg after arming the trough pagina\nchat={:?}",
+            sess.chat_lines
+        );
+        sess.send_place(mc.0, mc.1, 1, 0);
+        sess.pump_until(|s| s.gob_with_res_at(TROUGH_RES, mc).is_some(), 6);
+        if let Some(plan) = sess.gob_with_res_at(TROUGH_RES, mc) {
+            // Sink the branch demand (x4): the take removes the WHOLE
+            // starter stack, the plan credits 4, the remainder rides the
+            // cursor back via the inv drop (the session-51 contract).
+            take_to_cursor(sess, "gfx/invobjs/branch", tag);
+            sess.map_itemact(mc.0, mc.1, plan);
+            return_cursor(sess, tag);
+            return (plan, mc);
+        }
+        // Site refused (terrain/occupancy): the search moves on.
+    }
+    panic!(
+        "{tag}: no candidate site accepted a trough plan\nchat={:?}",
+        sess.chat_lines
+    );
+}
+
+/// Load `units` fodder units one itemact at a time from the named seed
+/// stack (one unit per click, the trough_itemact contract). `chat_base`
+/// is the "Fodder added" count to expect before the first click.
+fn load_fodder(
+    sess: &mut Session,
+    mc: (i32, i32),
+    trough: i32,
+    seed_res: &str,
+    units: usize,
+    chat_base: usize,
+    tag: &str,
+) {
+    for i in 0..units {
+        take_to_cursor(sess, seed_res, tag);
+        sess.map_itemact(mc.0, mc.1, trough);
+        let want = chat_base + i + 1;
+        let ok = sess.pump_until(|s| s.chat_count("Fodder added to the trough.") == want, 8);
+        assert!(
+            ok,
+            "{tag}: fodder click {i} never acknowledged (want {want})\nchat={:?}",
+            sess.chat_lines
+        );
+        // Settle the post-itemact refresh before re-resolving wids.
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    // Return whatever is left on the cursor (a partially drained seed
+    // stack) so later takes are not refused.
+    return_cursor(sess, tag);
+}
+
+/// Click the trough, choose the "Lift" petal, and wait for the gob
+/// retraction + the carry system line.
+fn lift_trough(sess: &mut Session, gob: i32, pos: (i32, i32), units: usize, tag: &str) {
+    sess.click_gob(gob, pos);
+    let menu = sess.pump_until(
+        |s| {
+            s.sm_menus
+                .values()
+                .any(|a| a.iter().any(|v| v.as_str() == Some("Lift")))
+        },
+        8,
+    );
+    assert!(
+        menu,
+        "{tag}: the trough menu never offered Lift\nmenus={:?}\nchat={:?}",
+        sess.sm_menus, sess.chat_lines
+    );
+    let wid = *sess
+        .sm_menus
+        .iter()
+        .find(|(_, a)| a.iter().any(|v| v.as_str() == Some("Lift")))
+        .map(|(w, _)| w)
+        .expect("sm wid asserted above");
+    sess.flower_choice(wid, 0);
+    let lift_line = format!("You lift the trough ({units} fodder units).");
+    let lifted = sess.pump_until(
+        |s| s.gobs.get(&gob).map(|g| g.removed).unwrap_or(false) && s.chat_count(&lift_line) >= 1,
+        8,
+    );
+    assert!(
+        lifted,
+        "{tag}: lift never confirmed (gob retracted + system line)\nchat={:?}",
+        sess.chat_lines
+    );
+}
+
+/// Contract (docs/mechanics/livestock/animals-and-husbandry.md
+/// "Feeding: troughs and grazing", session 62, over the real wire):
+/// the completed trough opens the one-petal "Lift" menu; the lift
+/// retracts the gob and starts the carry with the store's units; a map
+/// click places the carried trough back down with the same store;
+/// clicking a placed trough while carrying transfers fodder "like a
+/// liquid" (the moved units carry the source's average, the system
+/// lines name every outcome).
+#[test]
+fn trough_lift_place_back_and_fodder_transfer_contract() {
+    let _slot = common::acquire_test_slot();
+    // Arrange
+    let server = ServerGuard::boot("troughlift");
+    let (mut sess, _player) = enter_world(&server, "trougher");
+
+    // Act 1: build trough 1 east of the player and verify completion
+    // through a fodder delivery (a 1-stage build keeps sdt at 0, so the
+    // delivery is the visible completion signal).
+    let (t1, mc1) = build_trough(&mut sess, 1, "trough1");
+    load_fodder(
+        &mut sess,
+        mc1,
+        t1,
+        "gfx/invobjs/seed-wheat",
+        5,
+        0,
+        "trough1",
+    );
+
+    // Act 2: lift trough 1 - the gob retracts, the carry starts.
+    let t1_pos = sess.gob_pos(t1).expect("trough 1 pos");
+    lift_trough(&mut sess, t1, t1_pos, 5, "trough1");
+
+    // Act 3: place the carried trough back down at a fresh tile.
+    let ppos = sess
+        .gob_pos(sess.player_gob.expect("player gob"))
+        .expect("player pos");
+    let ptile = (ppos.0.div_euclid(11), ppos.1.div_euclid(11));
+    let site = (ptile.0 + 1, ptile.1 + 2);
+    let mc_back = (site.0 * 11 + 5, site.1 * 11 + 5);
+    sess.send_place(mc_back.0, mc_back.1, 1, 0);
+    let placed = sess.pump_until(
+        |s| {
+            s.gob_with_res_at(TROUGH_RES, mc_back).is_some()
+                && s.chat_count("You place the trough (5 fodder units).") >= 1
+        },
+        8,
+    );
+    assert!(
+        placed,
+        "the carried trough was never placed back\nchat={:?}",
+        sess.chat_lines
+    );
+    let t1b = sess
+        .gob_with_res_at(TROUGH_RES, mc_back)
+        .expect("placed trough gob");
+
+    // Act 4: build + load + lift trough 2 (2 carrot units carried).
+    let (t2, mc2) = build_trough(&mut sess, 2, "trough2");
+    load_fodder(
+        &mut sess,
+        mc2,
+        t2,
+        "gfx/invobjs/seed-carrot",
+        2,
+        5,
+        "trough2",
+    );
+    let t2_pos = sess.gob_pos(t2).expect("trough 2 pos");
+    lift_trough(&mut sess, t2, t2_pos, 2, "trough2");
+
+    // Act 5: click the placed trough while carrying - the liquid
+    // transfer moves the carried 2 units into trough 1.
+    let t1b_pos = sess.gob_pos(t1b).expect("placed trough pos");
+    sess.click_gob(t1b, t1b_pos);
+    let transferred = sess.pump_until(|s| s.chat_count("Transferred 2 fodder units.") >= 1, 8);
+    assert!(
+        transferred,
+        "no transfer system line\nchat={:?}",
+        sess.chat_lines
     );
 }

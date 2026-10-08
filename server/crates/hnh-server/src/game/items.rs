@@ -38,6 +38,7 @@ impl Game {
             1,
             0,
         );
+        debug!(gob = id, resname, world_res, "drop spawned");
         self.broadcast_spawn(id);
     }
 
