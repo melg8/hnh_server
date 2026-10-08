@@ -592,6 +592,15 @@ impl Game {
                         })
                     })
                 });
+                // Aux slot (session 66): only the crucible's tin bar
+                // rides here; restore it only when the label still is
+                // the alloy tin charge (the same leak-per-entry policy).
+                let aux = saved.aux.as_ref().and_then(|(_res, ql, label)| {
+                    let leaked: &'static str = Box::leak(label.clone().into_boxed_str());
+                    crate::craft::ALLOY_INPUT_TIN
+                        .eq_ignore_ascii_case(label)
+                        .then_some((world.res.intern("gfx/invobjs/bar-tin"), *ql, leaked))
+                });
                 world.stations.insert(
                     gob,
                     crate::build::StationState {
@@ -600,6 +609,7 @@ impl Game {
                         fuel_ql_sum: saved.fuel_ql_sum,
                         fuel_seen: saved.fuel_seen,
                         input,
+                        aux,
                         lit: false,
                         progress: saved.progress,
                         quality: saved.quality,
@@ -938,6 +948,17 @@ impl Game {
                         l.to_owned(),
                     )
                 }),
+                aux: station.aux.map(|(r, q, l)| {
+                    (
+                        self.world
+                            .res
+                            .name(r)
+                            .unwrap_or("gfx/invobjs/unknown")
+                            .to_owned(),
+                        q,
+                        l.to_owned(),
+                    )
+                }),
                 progress: station.progress,
             });
         }
@@ -968,6 +989,7 @@ impl Game {
                 fuel_ql_sum: 0,
                 fuel_seen: 0,
                 input: None,
+                aux: None,
                 progress: 0,
                 fodder_units: fodder.map(|t| t.units).unwrap_or(0),
                 fodder_ql_sum: fodder.map(|t| t.ql_sum).unwrap_or(0),
@@ -2925,6 +2947,16 @@ impl Game {
                     self.answer_station(player, crate::nodes::StationResult::NeedsInput);
                     return;
                 }
+                // The crucible needs BOTH slots (copper + tin) to light.
+                if crate::build::BUILDABLES[station.spec as usize]
+                    .station
+                    .as_ref()
+                    .is_some_and(|s| s.kind == crate::build::StationKind::Alloyer)
+                    && station.aux.is_none()
+                {
+                    self.answer_station(player, crate::nodes::StationResult::NeedsInput);
+                    return;
+                }
                 let st = self
                     .world
                     .stations
@@ -2982,18 +3014,33 @@ impl Game {
             self.answer_station_item(player, StationItemResult::BusyLit);
             return;
         }
-        if station.input.is_some() {
+        // The crucible's tin delivery lands in the aux slot, so the
+        // single-input gate below must not fire for it.
+        let aux_target = station_spec.kind == crate::build::StationKind::Alloyer
+            && stack
+                .label
+                .eq_ignore_ascii_case(crate::craft::ALLOY_INPUT_TIN);
+        if !aux_target && station.input.is_some() {
             self.answer_station_item(player, StationItemResult::InputFull);
             return;
         }
         // Station input dispatch mirrors station_itemact: the oven roasts
-        // meat labels, the smelter melts ore labels (session 66).
+        // meat labels, the smelter melts ore labels, the crucible takes
+        // copper (input) and tin (aux) (session 66).
         let accepts = match station_spec.kind {
             crate::build::StationKind::Oven => {
                 crate::craft::roast_result(leak_static(stack.label.as_str())).is_some()
             }
             crate::build::StationKind::Smelter => {
                 crate::craft::smelt_result(leak_static(stack.label.as_str())).is_some()
+            }
+            crate::build::StationKind::Alloyer => {
+                stack
+                    .label
+                    .eq_ignore_ascii_case(crate::craft::ALLOY_INPUT_COPPER)
+                    || stack
+                        .label
+                        .eq_ignore_ascii_case(crate::craft::ALLOY_INPUT_TIN)
             }
         };
         if !accepts {
@@ -3007,7 +3054,15 @@ impl Game {
             .stations
             .get_mut(&target)
             .expect("BUG: station checked above");
-        st.input = Some((res_idx, stack.ql, leak_static(stack.label.as_str())));
+        if aux_target {
+            if st.aux.is_some() {
+                self.answer_station_item(player, StationItemResult::InputFull);
+                return;
+            }
+            st.aux = Some((res_idx, stack.ql, leak_static(stack.label.as_str())));
+        } else {
+            st.input = Some((res_idx, stack.ql, leak_static(stack.label.as_str())));
+        }
         self.publish(target, GuestEv::Update);
         self.answer_station_item(player, StationItemResult::InputLoaded);
         info!(target, label = stack.label, "relay station input loaded");

@@ -683,8 +683,7 @@ pub fn roast_result(raw_label: &str) -> Option<&'static str> {
 /// pack's smelted-metal set is covered by the bars the economy reaches -
 /// copper and tin smelt to their bars, iron ore smelts to cast iron (the
 /// legacy finery-forge leg that would refine cast iron into wrought iron
-/// is not built; see the doc's Open questions). Bronze alloying is an
-/// open question, not invented data.
+/// is not built; see the doc's Open questions).
 pub const SMELT_MAP: &[(&str, (&str, &str))] = &[
     ("Copper Nugget", ("gfx/invobjs/bar-copper", "Bar of Copper")),
     ("Tin Nugget", ("gfx/invobjs/bar-tin", "Bar of Tin")),
@@ -697,6 +696,18 @@ pub fn smelt_result(raw_label: &str) -> Option<(&'static str, &'static str)> {
         .find(|(raw, _)| raw.eq_ignore_ascii_case(raw_label))
         .map(|(_, out)| *out)
 }
+
+/// Alloying Crucible charge (build.rs StationKind::Alloyer), the bronze
+/// leg of the metal chain. Legacy Ring of Brodgar: 2 Bars of Copper + 1
+/// Bar of Tin smelt into 3 Bars of Bronze - a 1:1 metal-to-bronze mass
+/// balance. This server's station holds one input slot plus one aux
+/// slot, so the charge is split across both slots as 1 copper + 1 tin
+/// and yields ALLOY_OUT_COUNT bars - the same 1:1 balance, rounded to
+/// whole bars (recorded in the mechanics doc, "Production stations").
+pub const ALLOY_INPUT_COPPER: &str = "Bar of Copper";
+pub const ALLOY_INPUT_TIN: &str = "Bar of Tin";
+pub const ALLOY_OUTPUT: (&str, &str) = ("gfx/invobjs/bar-bronze", "Bar of Bronze");
+pub const ALLOY_OUT_COUNT: u32 = 2;
 
 /// FEP accumulator state per player (integer tenths per attribute; the wire
 /// `food` message carries tenths, CharWnd divides by 10 for display).
@@ -843,6 +854,33 @@ Peapod=STR:0.1 PER:0.9
     /// repo root; a fresh clone may not have it - the wire gate must run
     /// without it), the bar resource AND its world-shape render path
     /// (own terobjs shape or the game.rs alias table) are pinned too.
+    /// The crucible charge pins: the output bar is the bronze resource,
+    /// and the 1+1 -> ALLOY_OUT_COUNT shape keeps the legacy 1:1
+    /// metal-to-bronze mass balance (2 copper + 1 tin -> 3 bronze).
+    #[test]
+    fn alloy_charge_pins() {
+        assert_eq!(ALLOY_OUTPUT.0, "gfx/invobjs/bar-bronze");
+        assert_eq!(ALLOY_OUTPUT.1, "Bar of Bronze");
+        assert_eq!(ALLOY_OUT_COUNT, 2);
+        // 2 input bars in -> 2 output bars out: the same 1:1 balance
+        // the legacy 2+1 -> 3 charge realizes (mass, not bar count).
+        // Pack-aware pin (optional like every resources-dependent test):
+        // the bronze bar must exist in the served pack when present.
+        if crate::resources::RES_DIR.get().is_none() {
+            let pack = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../gameres");
+            if pack.is_dir() {
+                crate::resources::init_res_dir(pack);
+            }
+        }
+        if crate::resources::RES_DIR.get().is_some() {
+            assert!(
+                crate::resources::served(ALLOY_OUTPUT.0),
+                "{} must exist in the served pack",
+                ALLOY_OUTPUT.0
+            );
+        }
+    }
+
     #[test]
     fn smelt_map_covers_the_world_ore_mix() {
         // Locate the pack once; tests never require it, so a missing

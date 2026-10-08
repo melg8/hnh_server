@@ -64,6 +64,10 @@ pub enum StationKind {
     /// Melts ore into metal bars (craft::SMELT_MAP); output rides the
     /// mapped bar resource.
     Smelter,
+    /// Alloys bars into bronze (craft::ALLOY_* constants): the input
+    /// slot holds the copper bar, the aux slot the tin bar. Both slots
+    /// must be loaded before the crucible lights.
+    Alloyer,
 }
 
 /// Station input/output policy this server: the oven roasts any raw meat
@@ -112,6 +116,27 @@ pub const BUILDABLES: &[Buildable] = &[
         // oven's 8-tick roast.
         station: Some(StationSpec {
             kind: StationKind::Smelter,
+            fuel: &["gfx/invobjs/branch"],
+            job_ticks: 30,
+        }),
+    },
+    Buildable {
+        id: "alloyer",
+        res: "gfx/terobjs/alloyer",
+        on_tile: true,
+        place_radius: None,
+        // Legacy Alloying Crucible demand is not reachable in this
+        // economy (Bar of Metal per the lost-era recipe). Server demand:
+        // the same stone+branch shape as the smelter, one notch lighter
+        // (the crucible is a smaller vessel).
+        demand: &[("gfx/invobjs/stone", 4), ("gfx/invobjs/branch", 4)],
+        hp: 2000,
+        stages: 2,
+        // Session 66: the bronze leg. Fuel policy matches the smelter
+        // (branch, the fuel this economy produces); job length matches
+        // the smelter's 30 ticks (alloying is the same smelting family).
+        station: Some(StationSpec {
+            kind: StationKind::Alloyer,
             fuel: &["gfx/invobjs/branch"],
             job_ticks: 30,
         }),
@@ -263,6 +288,10 @@ pub struct StationState {
     /// label). One slot per station (legacy ovens had four dough slots;
     /// one slot is this server's policy, documented).
     pub input: Option<(u16, u8, &'static str)>,
+    /// Aux input slot (session 66): the Alloying Crucible's tin bar
+    /// beside the copper bar in `input`. Always None for every other
+    /// station kind.
+    pub aux: Option<(u16, u8, &'static str)>,
     /// Whether the station is lit (a job is running).
     pub lit: bool,
     /// Elapsed job ticks (10 Hz) toward `StationSpec::job_ticks`.
@@ -301,6 +330,16 @@ mod tests {
         assert!(buildable_by_ad("oven").is_some());
         assert!(buildable_by_ad("smelter").is_some());
         assert!(buildable_by_ad("nonexistent").is_none());
+        // Session 66: the crucible (paginae/build/tools: alloyer).
+        assert!(buildable_by_ad("alloyer").is_some());
+        let al = &BUILDABLES[buildable_by_ad("alloyer").unwrap()];
+        assert_eq!(al.res, "gfx/terobjs/alloyer");
+        let spec = al
+            .station
+            .as_ref()
+            .expect("alloyer is a production station");
+        assert_eq!(spec.kind, StationKind::Alloyer);
+        assert!(spec.fuel.contains(&"gfx/invobjs/branch"));
     }
 
     #[test]

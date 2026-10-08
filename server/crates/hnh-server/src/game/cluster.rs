@@ -710,16 +710,25 @@ impl Game {
             // menu locally and the stage re-renders on the subscriber
             // through the sdt byte in the guest spawn/update blocks.
             Kind::Station { spec, lit } => {
-                let view = self
-                    .world
-                    .stations
-                    .get(&id)
-                    .map(|st| crate::nodes::StationView {
+                let view = self.world.stations.get(&id).map(|st| {
+                    // The crucible's Light readiness needs BOTH slots
+                    // (copper input + tin aux); every other kind keys
+                    // on the input slot alone.
+                    let alloyer = crate::build::BUILDABLES[st.spec as usize]
+                        .station
+                        .as_ref()
+                        .is_some_and(|s| s.kind == crate::build::StationKind::Alloyer);
+                    crate::nodes::StationView {
                         spec: st.spec,
                         lit: st.lit,
                         fuel: st.fuel,
-                        has_input: st.input.is_some(),
-                    });
+                        has_input: if alloyer {
+                            st.input.is_some() && st.aux.is_some()
+                        } else {
+                            st.input.is_some()
+                        },
+                    }
+                });
                 GuestKind::Static {
                     res_name: self.static_res_name(slot),
                     class: crate::nodes::StaticClass::Station,

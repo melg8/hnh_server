@@ -477,6 +477,7 @@ impl Game {
                     fuel_ql_sum: 0,
                     fuel_seen: 0,
                     input: None,
+                    aux: None,
                     lit: false,
                     progress: 0,
                     quality,
@@ -616,17 +617,32 @@ impl Game {
             self.system_line(sid, "The fire is burning; wait for it to finish.");
             return;
         }
-        if station.input.is_some() {
+        // The crucible's tin delivery lands in the aux slot, so the
+        // single-input gate below must not fire for it.
+        let aux_target = station_spec.kind == crate::build::StationKind::Alloyer
+            && cursor
+                .label
+                .eq_ignore_ascii_case(crate::craft::ALLOY_INPUT_TIN);
+        if !aux_target && station.input.is_some() {
             self.system_line(sid, "The station already holds an input.");
             return;
         }
         // Station input dispatch: the oven roasts any raw meat label in
         // craft::ROAST_MAP; the smelter melts any ore label in
-        // craft::SMELT_MAP (session 66 metal chain).
+        // craft::SMELT_MAP (session 66 metal chain); the crucible takes
+        // the copper bar into the input slot and the tin bar into aux.
         let accepts = match station_spec.kind {
             crate::build::StationKind::Oven => crate::craft::roast_result(cursor.label).is_some(),
             crate::build::StationKind::Smelter => {
                 crate::craft::smelt_result(cursor.label).is_some()
+            }
+            crate::build::StationKind::Alloyer => {
+                cursor
+                    .label
+                    .eq_ignore_ascii_case(crate::craft::ALLOY_INPUT_COPPER)
+                    || cursor
+                        .label
+                        .eq_ignore_ascii_case(crate::craft::ALLOY_INPUT_TIN)
             }
         };
         if !accepts {
@@ -638,7 +654,15 @@ impl Game {
             .stations
             .get_mut(&gob)
             .expect("BUG: station checked above");
-        station.input = Some((cursor.res, cursor.ql, cursor.label));
+        if aux_target {
+            if station.aux.is_some() {
+                self.system_line(sid, "The crucible already holds a tin bar.");
+                return;
+            }
+            station.aux = Some((cursor.res, cursor.ql, cursor.label));
+        } else {
+            station.input = Some((cursor.res, cursor.ql, cursor.label));
+        }
         cursor.count -= 1;
         if let Some(out) = self.sessions.get_mut(&sid) {
             out.cursor = if cursor.count == 0 {
@@ -788,6 +812,16 @@ impl Game {
             self.system_line(sid, "The station needs an input before lighting.");
             return;
         }
+        // The crucible needs BOTH slots loaded (copper in input, tin in
+        // aux) before it can light (craft::ALLOY_* charge rule).
+        let alloyer = crate::build::BUILDABLES[station.spec as usize]
+            .station
+            .as_ref()
+            .is_some_and(|s| s.kind == crate::build::StationKind::Alloyer);
+        if alloyer && station.aux.is_none() {
+            self.system_line(sid, "The crucible needs a tin bar beside the copper.");
+            return;
+        }
         let station = self
             .world
             .stations
@@ -853,6 +887,10 @@ impl Game {
             let Some((res_idx, q_item, label)) = station.input.take() else {
                 continue;
             };
+            // The crucible consumes both slots; every other kind has aux
+            // permanently None. The take result carries no QL influence
+            // (the output formula keys on the input + station qualities).
+            let _ = station.aux.take();
             let ql =
                 crate::build::station_output_ql(q_item, station.quality, station.fuel_quality());
             match spec.kind {
@@ -870,6 +908,19 @@ impl Game {
                         finished.push((*gob, input_res, label, q_item));
                     }
                 },
+                crate::build::StationKind::Alloyer => {
+                    // The charge yields ALLOY_OUT_COUNT bronze bars - the
+                    // legacy 1:1 metal-to-bronze mass balance (craft.rs
+                    // documents the 2+1->3 split across the two slots).
+                    for _ in 0..crate::craft::ALLOY_OUT_COUNT {
+                        finished.push((
+                            *gob,
+                            crate::craft::ALLOY_OUTPUT.0,
+                            crate::craft::ALLOY_OUTPUT.1,
+                            ql,
+                        ));
+                    }
+                }
             }
         }
         for gob in unlit {

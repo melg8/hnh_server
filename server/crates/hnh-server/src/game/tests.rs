@@ -4198,6 +4198,7 @@ fn built_oven(g: &mut Game, fuel: u32, input: Option<(&'static str, u8)>) -> Gob
             fuel_ql_sum: 10 * fuel as u64,
             fuel_seen: fuel as u64,
             input: input_row,
+            aux: None,
             lit: false,
             progress: 0,
             quality: 10,
@@ -7523,10 +7524,15 @@ async fn trough_build_flow_opens_fodder_store() {
     );
     assert_eq!(g.world.plans.len(), 1, "the plan placed");
     let gob = *g.world.plans.keys().next().unwrap();
+    // Resolve the trough spec index through the registry (ids are
+    // stable; positional indices are not - the alloyer insertion
+    // shifted them once already).
+    let trough_spec = crate::build::buildable_by_ad("trough")
+        .expect("trough is buildable") as u8;
     assert!(
         matches!(
             g.world.gobs.kind[g.world.gobs.get(gob).unwrap()],
-            Kind::Plan { spec: 2, .. }
+            Kind::Plan { spec, .. } if spec == trough_spec
         ),
         "the plan carries the trough spec"
     );
@@ -7547,7 +7553,7 @@ async fn trough_build_flow_opens_fodder_store() {
     assert!(
         matches!(
             g.world.gobs.kind[g.world.gobs.get(gob).unwrap()],
-            Kind::Structure { spec: 2 }
+            Kind::Structure { spec } if spec == trough_spec
         ),
         "the plan finished as a trough structure"
     );

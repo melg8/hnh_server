@@ -154,6 +154,10 @@ pub struct SavedStructure {
     /// Loaded station input: (item resource name, quality, label).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<(String, u8, String)>,
+    /// Alloying Crucible aux slot (session 66, additive): the tin bar
+    /// beside the copper input. None for every other station kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aux: Option<(String, u8, String)>,
     #[serde(default)]
     pub progress: u32,
     /// Food Trough fodder store (session 48, additive; zero for every
