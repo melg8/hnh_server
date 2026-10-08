@@ -3200,14 +3200,19 @@ async fn relay_chop_authority_decrements_and_acks() {
         matches!(g.world.gobs.kind[tslot], Kind::Tree { harvests: 1 }),
         "one chop off"
     );
-    // A fresh wood drop spawned next to the tree.
-    let mut wood_drops = 0;
+    // A fresh branch drop spawned next to the tree (session 60: picking
+    // yields BRANCH - the crafting chain's material - not dead wood).
+    let mut branch_drops = 0;
     for slot in 0..g.world.gobs.alive.len() {
-        if g.world.gobs.alive[slot] && matches!(g.world.gobs.kind[slot], Kind::Drop { .. }) {
-            wood_drops += 1;
+        if g.world.gobs.alive[slot] {
+            if let Kind::Drop { inv_res_idx, .. } = g.world.gobs.kind[slot] {
+                if g.world.res.name(inv_res_idx) == Some("gfx/invobjs/branch") {
+                    branch_drops += 1;
+                }
+            }
         }
     }
-    assert_eq!(wood_drops, 1, "the chop spawned one wood drop");
+    assert_eq!(branch_drops, 1, "the pick spawned one branch drop");
     // Exhaust the tree: second chop -> 1 harvest -> third chop kills it.
     g.on_node_msg(crate::nodes::NodeMsg::RelayStaticAct {
         player: clicker,
@@ -3272,6 +3277,148 @@ async fn relay_static_mismatch_is_dropped() {
 fn pgob_of(g: &Game) -> GobId {
     let pidx = *g.world.by_session.get(&1).unwrap();
     g.world.players[pidx].gob
+}
+
+/// World gathering (session 60): each boulder pick takes ONE stone off
+/// the BOULDER_STONES supply; the depleted boulder disappears. Every
+/// pick (including the last) acks the stone LP.
+#[tokio::test]
+async fn relay_mine_boulder_yields_one_stone_per_pick() {
+    let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("authmine", 0, 2);
+    let pslot = g.world.gobs.get(pgob_of(&g)).unwrap();
+    let (px, py) = g.world.gobs.pos[pslot];
+    let stone_res = g.world.res.intern("gfx/terobjs/bumlings/01");
+    let boulder = g.world.gobs.spawn(
+        Kind::Boulder {
+            left: crate::state::BOULDER_STONES,
+        },
+        (px + 22, py),
+        stone_res,
+        1,
+        0,
+    );
+    let clicker = foreign_node_gob_id(0, 2, 71);
+    for _ in 0..crate::state::BOULDER_STONES {
+        g.on_node_msg(crate::nodes::NodeMsg::RelayStaticAct {
+            player: clicker,
+            target: boulder,
+            act: crate::nodes::StaticAct::Mine,
+        });
+    }
+    assert!(
+        g.world.gobs.get(boulder).is_none(),
+        "depleted boulder removed"
+    );
+    // One stone drop per pick, all carrying the stone inventory resource.
+    let mut stone_drops = 0;
+    for slot in 0..g.world.gobs.alive.len() {
+        if g.world.gobs.alive[slot] {
+            if let Kind::Drop { inv_res_idx, .. } = g.world.gobs.kind[slot] {
+                if g.world.res.name(inv_res_idx) == Some("gfx/invobjs/stone") {
+                    stone_drops += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(stone_drops, 5, "one stone drop per pick at BOULDER_STONES");
+    let mut acks_lp = Vec::new();
+    while let Ok((_peer, msg)) = mesh_rx.try_recv() {
+        if let crate::nodes::NodeMsg::StaticAck { lp, .. } = msg {
+            acks_lp.push(lp);
+        }
+    }
+    assert_eq!(acks_lp, vec![3; 5], "stone LP acks every pick");
+}
+
+/// Picking a stump yields nothing: the stump survives, no drop spawns,
+/// no LP is granted (local click path; docs "World gathering").
+#[tokio::test]
+async fn stump_pick_yields_nothing() {
+    let (mut g, _rx, _raw, mesh_rx) = clustered_game("stump", 0, 2);
+    let pgob = pgob_of(&g);
+    let pslot = g.world.gobs.get(pgob).unwrap();
+    let (px, py) = g.world.gobs.pos[pslot];
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let lp_before = g.world.players[pidx].lp;
+    let log_res = g.world.res.intern("gfx/terobjs/trees/log");
+    let stump = g
+        .world
+        .gobs
+        .spawn(Kind::Stump, (px + 11, py), log_res, 1, 0);
+    g.player_interact(1, pgob, stump, (px + 11, py));
+    assert!(
+        g.world.gobs.get(stump).is_some(),
+        "the stump survives the pick"
+    );
+    let mut drops = 0;
+    for slot in 0..g.world.gobs.alive.len() {
+        if g.world.gobs.alive[slot] && matches!(g.world.gobs.kind[slot], Kind::Drop { .. }) {
+            drops += 1;
+        }
+    }
+    assert_eq!(drops, 0, "a stump yields no drops");
+    assert_eq!(g.world.players[pidx].lp, lp_before, "no LP for a stump");
+    let _ = mesh_rx;
+}
+
+/// The exhausted tree's stump renders for cross-node guests too: the
+/// relay chop that exhausts a tree spawns a Stump kind whose guest view
+/// classifies under Structure (no relay act), unlike the old
+/// Stone-mineable classification (session 60).
+#[tokio::test]
+async fn relay_chop_exhaustion_leaves_a_structure_class_stump() {
+    let (mut g, _rx, _raw, _mesh_rx) = clustered_game("stumpview", 0, 2);
+    let pslot = g.world.gobs.get(pgob_of(&g)).unwrap();
+    let (px, py) = g.world.gobs.pos[pslot];
+    let tree_res = g.world.res.intern("gfx/terobjs/trees/old");
+    let tree = g
+        .world
+        .gobs
+        .spawn(Kind::Tree { harvests: 1 }, (px + 22, py), tree_res, 1, 0);
+    let clicker = foreign_node_gob_id(0, 2, 81);
+    // Two picks: the first takes the last harvest, the second finds the
+    // tree exhausted and leaves the stump.
+    g.on_node_msg(crate::nodes::NodeMsg::RelayStaticAct {
+        player: clicker,
+        target: tree,
+        act: crate::nodes::StaticAct::Chop,
+    });
+    assert!(
+        g.world.gobs.get(tree).is_some(),
+        "the last-harvest tree still stands"
+    );
+    g.on_node_msg(crate::nodes::NodeMsg::RelayStaticAct {
+        player: clicker,
+        target: tree,
+        act: crate::nodes::StaticAct::Chop,
+    });
+    assert!(g.world.gobs.get(tree).is_none(), "tree removed");
+    // The stump gob exists at the tree's spot and classifies as
+    // Structure in the guest view mapping.
+    let stump = (0..g.world.gobs.alive.len())
+        .find(|&slot| {
+            g.world.gobs.alive[slot]
+                && matches!(g.world.gobs.kind[slot], Kind::Stump)
+                && g.world.gobs.pos[slot] == (px + 22, py)
+        })
+        .map(|slot| crate::state::gob_id_from_slot(slot, g.world.gobs.gen[slot]));
+    let stump = stump.expect("stump spawned at the tree spot");
+    let slot = g.world.gobs.get(stump).unwrap();
+    let state = g
+        .guest_state_from_slot(stump, slot)
+        .expect("stump guest state");
+    assert_eq!(
+        state.kind,
+        crate::nodes::GuestKind::Static {
+            res_name: "gfx/terobjs/trees/log".to_string(),
+            class: crate::nodes::StaticClass::Structure,
+            crop: None,
+            station: None,
+            stage: None,
+            drop: None,
+        },
+        "stump guests carry no relay act"
+    );
 }
 
 // ------------------------------------------------------------------

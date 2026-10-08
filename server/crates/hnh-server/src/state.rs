@@ -277,6 +277,21 @@ impl Species {
     }
 }
 
+/// Server policy (docs/mechanics/crafting-and-building.md, "World
+/// gathering"): a pickable tree yields this many branch picks before it
+/// becomes a stump.
+pub const TREE_HARVESTS: u8 = 5;
+/// Server policy: a boulder yields this many stones before it
+/// disappears.
+pub const BOULDER_STONES: u8 = 5;
+/// Flat gathering quality, matched to the starter kit (branch/stone at
+/// ql 10) so world-gathered materials craft identically.
+pub const GATHER_QL: u8 = 10;
+/// LP granted per branch pick (existing server policy, carried).
+pub const TREE_PICK_LP: i32 = 5;
+/// LP granted per stone pick (existing server policy, carried).
+pub const STONE_PICK_LP: i32 = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Player {
@@ -311,7 +326,15 @@ pub enum Kind {
     Structure {
         spec: u8,
     },
-    Stone,
+    /// Stone boulder (bumling) with a finite supply: each pick takes one
+    /// stone; a depleted boulder disappears. See the "World gathering"
+    /// section of crafting-and-building.md.
+    Boulder {
+        left: u8,
+    },
+    /// Decorative stump left where a tree's harvests ran out. Not
+    /// harvestable: picking a stump yields nothing.
+    Stump,
     /// Item lying on the ground. `label` carries the display name so food
     /// keeps its fep.conf identity from ground to inventory. The gob
     /// renders with `resname_idx` (a gfx/terobjs/items world shape that
@@ -502,7 +525,9 @@ impl Gobs {
         self.res_idx.push(0);
         self.frame.push(0);
         self.alive.push(false);
-        self.kind.push(Kind::Stone);
+        // Column-fill placeholder: never streamed before a real spawn
+        // overwrites it (alive = false).
+        self.kind.push(Kind::Stump);
         self.hp.push(0);
         self.max_hp.push(0);
         self.speed.push(0);
@@ -1356,10 +1381,17 @@ impl World {
                         continue;
                     }
                 }
+                // Trees are pickable (branches) and bumlings are boulders
+                // with a stone supply; see the "World gathering" section
+                // of crafting-and-building.md.
                 let kind = if res.contains("trees/") {
-                    Kind::Tree { harvests: 5 }
+                    Kind::Tree {
+                        harvests: TREE_HARVESTS,
+                    }
                 } else {
-                    Kind::Stone
+                    Kind::Boulder {
+                        left: BOULDER_STONES,
+                    }
                 };
                 let id = self.gobs.spawn(kind, pos, res_idx, 100, 0);
                 out.push(id);
@@ -1506,7 +1538,7 @@ mod cluster_tests {
                 let mut g = Gobs::with_layout(nz(nodes), me);
                 // Allocate 8 gobs per node; ids must be unique cluster-wide.
                 for _ in 0..8 {
-                    let id = g.spawn(Kind::Stone, (0, 0), 0, 1, 0);
+                    let id = g.spawn(Kind::Stump, (0, 0), 0, 1, 0);
                     let (slot, _gen) = split_gob_id(id);
                     assert!(
                         seen.insert(slot),
@@ -1569,7 +1601,7 @@ mod cluster_tests {
         // The slot is not free: another forced insert on the same slot
         // must overwrite in place, and a normal spawn never claims it.
         let mut fresh = Gobs::with_layout(nz(2), 0);
-        let taken = fresh.spawn(Kind::Stone, (0, 0), 0, 1, 0);
+        let taken = fresh.spawn(Kind::Stump, (0, 0), 0, 1, 0);
         let (tslot, tgen) = split_gob_id(taken);
         fresh.kill(taken);
         let other = fresh.spawn(Kind::Tree { harvests: 0 }, (1, 1), 0, 1, 0);

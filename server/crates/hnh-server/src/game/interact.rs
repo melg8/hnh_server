@@ -68,6 +68,62 @@ impl Game {
         }
     }
 
+    // ------------------------------------------------------------------
+    // World gathering (docs/mechanics/crafting-and-building.md, "World
+    // gathering"): the shared pick legs behind BOTH the local click path
+    // (player_interact above) and the cross-node relay act (relay_static
+    // in game.rs). Keeping one implementation prevents the local and
+    // relay outcomes from drifting.
+    // ------------------------------------------------------------------
+
+    /// One branch pick off a tree: a branch drop lands next to the tree,
+    /// the frame bump re-renders the harvest state for every viewer, and
+    /// an exhausted tree leaves a decorative stump. Returns the LP the
+    /// act grants (0 once exhausted).
+    pub(super) fn harvest_tree(&mut self, target: GobId, tslot: usize) -> i32 {
+        let Kind::Tree { harvests } = self.world.gobs.kind[tslot] else {
+            return 0;
+        };
+        let pos = self.world.gobs.pos[tslot];
+        if harvests > 0 {
+            self.world.gobs.kind[tslot] = Kind::Tree {
+                harvests: harvests - 1,
+            };
+            self.world.gobs.frame[tslot] += 1;
+            self.spawn_drop_near(pos, "gfx/invobjs/branch", crate::state::GATHER_QL, "");
+            // Re-publish so guest copies on subscriber nodes re-render.
+            self.publish(target, GuestEv::Update);
+            crate::state::TREE_PICK_LP
+        } else {
+            // Exhausted: remove the tree, leave a stump.
+            self.world.gobs.kill(target);
+            self.broadcast_retract(target);
+            let stump = self.world.res.intern("gfx/terobjs/trees/log");
+            let id = self.world.gobs.spawn(Kind::Stump, pos, stump, 1, 0);
+            self.broadcast_spawn(id);
+            0
+        }
+    }
+
+    /// One stone pick off a boulder: a stone drop lands next to it; the
+    /// depleted boulder disappears. Returns the LP the act grants.
+    pub(super) fn harvest_boulder(&mut self, target: GobId, tslot: usize) -> i32 {
+        let Kind::Boulder { left } = self.world.gobs.kind[tslot] else {
+            return 0;
+        };
+        let pos = self.world.gobs.pos[tslot];
+        self.spawn_drop_near(pos, "gfx/invobjs/stone", crate::state::GATHER_QL, "");
+        if left > 1 {
+            self.world.gobs.kind[tslot] = Kind::Boulder { left: left - 1 };
+            self.world.gobs.frame[tslot] += 1;
+            self.publish(target, GuestEv::Update);
+        } else {
+            self.world.gobs.kill(target);
+            self.broadcast_retract(target);
+        }
+        crate::state::STONE_PICK_LP
+    }
+
     pub(super) fn player_interact(
         &mut self,
         sid: SessionId,
@@ -177,39 +233,30 @@ impl Game {
         };
         trace!(sid, target, kind = ?self.world.gobs.kind[tslot], "player_interact");
         match self.world.gobs.kind[tslot] {
-            Kind::Tree { harvests } => {
-                if harvests > 0 {
-                    self.world.gobs.kind[tslot] = Kind::Tree {
-                        harvests: harvests - 1,
-                    };
-                    self.world.gobs.frame[tslot] += 1;
-                    let pos = self.world.gobs.pos[tslot];
-                    self.spawn_drop_near(pos, "gfx/invobjs/wood", 10, "");
+            Kind::Tree { .. } => {
+                let lp = self.harvest_tree(target, tslot);
+                if lp > 0 {
                     if let Some(p) = self.world.player_mut(sid) {
-                        p.lp += 5;
+                        p.lp += lp;
                     }
                     self.push_cattr(sid);
                     // Refresh the char sheet LP balance if it is open.
                     self.push_lp_msgs(sid);
-                } else {
-                    // Tree exhausted: remove and leave a stump.
-                    let pos = self.world.gobs.pos[tslot];
-                    self.world.gobs.kill(target);
-                    let stump = self.world.res.intern("gfx/terobjs/trees/log");
-                    let id = self.world.gobs.spawn(Kind::Stone, pos, stump, 1, 0);
-                    self.broadcast_spawn(id);
                 }
             }
-            Kind::Stone => {
-                let pos = self.world.gobs.pos[tslot];
-                self.world.gobs.kill(target);
-                self.spawn_drop_near(pos, "gfx/invobjs/stone", 10, "");
+            Kind::Boulder { .. } => {
+                let lp = self.harvest_boulder(target, tslot);
                 if let Some(p) = self.world.player_mut(sid) {
-                    p.lp += 3;
+                    p.lp += lp;
                 }
                 self.push_cattr(sid);
                 // Refresh the char sheet LP balance if it is open.
                 self.push_lp_msgs(sid);
+            }
+            Kind::Stump => {
+                // Decorative remnant: nothing to pick (docs "World
+                // gathering").
+                trace!(sid, target, "stump pick: nothing to yield");
             }
             Kind::Drop { .. } => {
                 // Pick up: move into inventory. The stack carries the

@@ -163,6 +163,54 @@ Stations combine the building system (they are built from plans with material de
 
 All of them share the same server shape: an inventory (per-gob item store), a fuel store with fuel-quality averaging, a lit/unlit state machine with burn-down per tick, a job queue or per-item progress values, and the station quality term in the output formula. Fueling and loading are driven by `itemact` on the station gob and by flower-menu options (Light, and so on); internal inventories are mirrored with `inv` widgets; `Item.meter` (the 0-100 red-to-green bar, `Item.uimsg` case `meter`) is the per-item progress overlay the client can display inside such stores. When a station job finishes, the server morphs the stored item widget in place rather than recreating it: the `chres` uimsg swaps resource and quality (`Item.chres`), `tt` replaces the tooltip, and `num` updates stack counts - all three are handled in `Item.uimsg` (`src/haven/Item.java`).
 
+## World gathering: branch picking and stone picking
+
+Raw materials enter the economy without any tool or station: trees yield
+branches and boulders (bumlings) yield stones (RoB item pages Branch and
+Stone: obtained by picking branches off a tree / taking stone from a
+boulder). On this server trees and boulders are plain static gobs
+spawned by the deterministic grid populate (map-and-terrain.md documents
+the client-side flavor alternative); a right-click carries the pick act.
+The character walks to the object, and the material falls on the ground
+next to it as a ground item (the standard drop flow,
+visibility-and-lifecycles.md).
+
+Legacy counts that the wiki documents:
+- A tree keeps yielding branches; the wiki gives no per-tree branch cap
+  (stumps and regrowth belong to the tree-stage model,
+  map-and-terrain.md).
+- A boulder yields a finite number of stones, then disappears; the page
+  gives no exact count.
+
+Server implementation notes (this repo, session 60):
+
+- Every pick is one click: the pick act rides the same `player_interact`
+  statics path (no flower menu yet - server policy; a single verb needs
+  no choice UI).
+- A pick drops ONE branch (gfx/invobjs/branch) or ONE stone
+  (gfx/invobjs/stone) as a ground drop. Drop quality is flat
+  GATHER_QL = 10, matching the starter kit so gathered materials craft
+  identically to kit materials (server policy; legacy rolls the tree's
+  own quality - the server has no per-tree quality yet, see Open
+  questions).
+- A tree holds TREE_HARVESTS = 5 branch picks; the interaction that
+  finds an exhausted tree leaves a decorative Stump gob (Kind::Stump)
+  which yields nothing. Server policy: legacy trees persist; the stump
+  is how this server bounds the statics population without a regrowth
+  tick.
+- A boulder holds BOULDER_STONES = 5 stone picks, then is removed.
+- Each pick grants LP (5 branch, 3 stone) - carried from the session-3
+  statics economy.
+- The pick legs are SHARED between the local click path and the
+  cross-node relay act (game/interact.rs harvest_tree/harvest_boulder):
+  one implementation, so local and relay outcomes cannot drift. Guests
+  see boulders under StaticClass::Stone and stumps under
+  StaticClass::Structure (no relay act).
+- Wire verification: server/scripts/test_gather.py walks to the seed-42
+  forest, picks a branch, picks a boulder dry (5 stones) and asserts
+  every drop lands in the inventory; the cargo battery pins the
+  relay/state contracts.
+
 ## Repair and decay
 
 - Structures and placeables have HP and soak; repair materials are per-object ("Repaired With": Brick for the oven and smelter, Branch for the roundpole fence). Repair is an `itemact` with the material on the damaged gob, restoring HP; it never alters the structure's quality (Legacy:Quality).
@@ -401,3 +449,10 @@ All of them share the same server shape: an inventory (per-gob item store), a fu
 - **Skill prerequisite names.** The prerequisite field in action resources is a short code (seen: "geo" for a potion page). Build the full code-to-skill mapping from the legacy resource set.
 - **Structure stage encodings.** The mapping from `sdt` bytes to construction-stage sprites is defined by each structure resource's sprite code; the full legacy resource pack is required (this repo's `res/compiled` only carries a client-side subset such as the hide-filter paginae and one craft pagina).
 - **Instant-craft timing.** Whether legacy used the `prog` widget for any hand-crafting (versus only for station/construction work) is unresolved; if timed crafts exist, their durations are data.
+- **Gathering fidelity (session 60).** Legacy pick timing (working
+  seconds per branch/stone), the per-tree branch cap (if any), per-tree
+  quality rolls, and whether the pick verb opened a flower menu with
+  extra options are unknown from the pack and the reachable wiki pages.
+  The flat GATHER_QL, TREE_HARVESTS = 5 and BOULDER_STONES = 5 are
+  chosen server policy (state.rs constants); reconcile them against
+  Legacy:Branch / Legacy:Stone / Legacy:Quality when reachable.

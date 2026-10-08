@@ -3012,11 +3012,14 @@ impl Game {
                 (Kind::Drop { .. }, StaticAct::Pickup) => self
                     .relay_pickup(target, tslot)
                     .map(|(s, lp)| (vec![s], lp)),
-                (Kind::Tree { harvests }, StaticAct::Chop) => self
-                    .relay_chop(target, tslot, *harvests)
-                    .map(|(s, lp)| (vec![s], lp)),
-                (Kind::Stone, StaticAct::Mine) => {
-                    self.relay_mine(target, tslot).map(|(s, lp)| (vec![s], lp))
+                // The pick legs are SHARED with the local click path
+                // (game/interact.rs harvest_tree/harvest_boulder): one
+                // implementation, no drift between local and relay.
+                (Kind::Tree { .. }, StaticAct::Chop) => {
+                    Some((vec![None], self.harvest_tree(target, tslot)))
+                }
+                (Kind::Boulder { .. }, StaticAct::Mine) => {
+                    Some((vec![None], self.harvest_boulder(target, tslot)))
                 }
                 (Kind::Crop { .. }, StaticAct::HarvestCrop) => Some((
                     self.relay_crop_harvest(target, tslot)
@@ -3138,50 +3141,6 @@ impl Game {
             }),
             0,
         ))
-    }
-
-    /// Chop leg: one harvest off the tree. Fresh wood drops land on THIS
-    /// node (subscribers see them as guests); the frame bump publishes to
-    /// viewers so remote trees re-render their harvest state.
-    fn relay_chop(
-        &mut self,
-        target: GobId,
-        tslot: usize,
-        harvests: u8,
-    ) -> Option<(Option<crate::nodes::StaticStack>, i32)> {
-        if harvests > 0 {
-            self.world.gobs.kind[tslot] = Kind::Tree {
-                harvests: harvests - 1,
-            };
-            self.world.gobs.frame[tslot] += 1;
-            let pos = self.world.gobs.pos[tslot];
-            self.spawn_drop_near(pos, "gfx/invobjs/wood", 10, "");
-            // Frame/publish so every viewer (local and guest) re-renders.
-            self.publish(target, GuestEv::Update);
-            Some((None, 5))
-        } else {
-            // Exhausted: remove the tree, leave a stump (same as local).
-            let pos = self.world.gobs.pos[tslot];
-            self.world.gobs.kill(target);
-            self.broadcast_retract(target);
-            let stump = self.world.res.intern("gfx/terobjs/trees/log");
-            let id = self.world.gobs.spawn(Kind::Stone, pos, stump, 1, 0);
-            self.broadcast_spawn(id);
-            Some((None, 0))
-        }
-    }
-
-    /// Mine leg: the stone breaks into a pick-up-able stone drop.
-    fn relay_mine(
-        &mut self,
-        target: GobId,
-        tslot: usize,
-    ) -> Option<(Option<crate::nodes::StaticStack>, i32)> {
-        let pos = self.world.gobs.pos[tslot];
-        self.world.gobs.kill(target);
-        self.broadcast_retract(target);
-        self.spawn_drop_near(pos, "gfx/invobjs/stone", 10, "");
-        Some((None, 3))
     }
 
     /// Authority-side application of one relayed swing (cluster mode):

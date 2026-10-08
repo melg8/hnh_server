@@ -668,9 +668,19 @@ impl Game {
                 stage: None,
                 drop: None,
             },
-            Kind::Stone => GuestKind::Static {
+            Kind::Boulder { .. } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Stone,
+                crop: None,
+                station: None,
+                stage: None,
+                drop: None,
+            },
+            // Stumps render but are not harvestable; the Structure class
+            // carries no relay act, so a guest click on one is a no-op.
+            Kind::Stump => GuestKind::Static {
+                res_name: self.static_res_name(slot),
+                class: crate::nodes::StaticClass::Structure,
                 crop: None,
                 station: None,
                 stage: None,
