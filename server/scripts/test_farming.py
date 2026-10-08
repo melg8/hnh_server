@@ -16,425 +16,66 @@ Modes: default runs the full plant-grow-harvest flow; `skillbot` verifies
 the skill gate (planting refused without the Farming skill value, purchased
 via the char sheet sattr contract at the legacy cost, then planting works,
 unknown buys refused).
+
+The transport, the session driver and the char-sheet/chat tracking live
+in hnhlib.py.
 """
 import os
-import socket
-import struct
-import subprocess
 import sys
 import time
 
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-BIN = os.path.join(REPO, "server", "target", "release", "hnh-server")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-LIST_END, LIST_INT, LIST_STR, LIST_COORD = 0, 1, 2, 3
-MSG_REL, MSG_MAPDATA, MSG_OBJDATA = 1, 5, 6
-RMSG_WDGMSG, RMSG_RESID, RMSG_CATTR = 1, 6, 9
-OD_MOVE, OD_RES, OD_LINBEG, OD_LINSTEP, OD_LAYERS, OD_AVATAR, OD_BUDDY, OD_END = \
-    1, 2, 3, 4, 6, 9, 15, 255
-OD_LAYERS, OD_HEALTH = 6, 14
-
-
-def le16(v):
-    return struct.pack("<H", v & 0xFFFF)
-
-
-def le32(v):
-    return struct.pack("<i", v)
+from hnhlib import (  # noqa: E402
+    LIST_END,
+    LIST_INT,
+    LIST_STR,
+    REPO,
+    WireClient,
+    enter_world,
+    ensure_server,
+    havstr,
+    le32,
+)
 
 
-def havstr(s):
-    return s.encode() + b"\x00"
-
-
-def auth_cookie(username, password="x"):
-    import hashlib
-    import ssl
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    raw = socket.create_connection(("127.0.0.1", 1871), timeout=5)
-    tls = ctx.wrap_socket(raw)
-
-    def send_frame(ty, payload):
-        tls.sendall(bytes([ty, len(payload)]) + payload)
-
-    def recv_frame():
-        head = b""
-        while len(head) < 2:
-            c = tls.recv(2 - len(head))
-            if not c:
-                raise RuntimeError("eof")
-            head += c
-        ln = head[1]
-        body = b""
-        while len(body) < ln:
-            c = tls.recv(ln - len(body))
-            if not c:
-                raise RuntimeError("eof")
-            body += c
-        return head[0], body
-
-    send_frame(1, username.encode())
-    ty, _ = recv_frame()
-    assert ty == 0, "CMD_USR rejected"
-    send_frame(2, hashlib.sha256(password.encode()).digest())
-    ty, body = recv_frame()
-    assert ty == 0, "CMD_PASSWD rejected"
-    return body
-
-
-def ensure_server():
-    """Start an isolated fast-clock server if none is listening."""
-    probe = socket.socket()
-    probe.settimeout(0.4)
-    try:
-        probe.connect(("127.0.0.1", 1871))
-        probe.close()
-        return None
-    except OSError:
-        pass
-    env = dict(os.environ)
-    env["HNH_CROP_TIME_SCALE"] = "10000000"
-    env["HNH_LP_RATE"] = "1000"
-    # Per-run isolated save: a shared fixed path accumulates restored
-    # crops/characters across runs, and the flow's find_gobs then clicks a
-    # stale first-seen crop instead of the one this run planted (the yield
-    # grant lands correctly either way, but the harness's inventory-widget
-    # assertion only tracks this run's expectations). Fresh state per run
-    # keeps the wire contract deterministic.
-    env["HNH_SAVE_FILE"] = os.path.join(
-        REPO, "server", "target",
-        "farm-test-save-%d.json" % (os.getpid() % 100000),
+def ensure_farm_server():
+    """Fast-crop-clock isolated server on a per-run save file."""
+    return ensure_server(
+        env_extra={"HNH_CROP_TIME_SCALE": "10000000"},
+        save_path=os.path.join(
+            REPO, "server", "target",
+            "farm-test-save-%d.json" % (os.getpid() % 100000),
+        ),
     )
-    proc = subprocess.Popen(
-        [BIN, "--seed", "42"],
-        cwd=os.path.join(REPO, "server"),
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        try:
-            probe = socket.socket()
-            probe.settimeout(0.4)
-            probe.connect(("127.0.0.1", 1871))
-            probe.close()
-            return proc
-        except OSError:
-            time.sleep(0.4)
-    raise RuntimeError("server did not come up")
 
 
-class FarmClient:
+class FarmClient(WireClient):
+    """Farming scenario client.
+
+    The historical scenario actions keep their tile-based signatures:
+    click_tile/map_itemact take tile coords and convert to the tile's
+    center subtile. Item tracking rides the shared item_info table.
+    The char sheet stays closed until the flow asks for it (the old
+    FarmClient never sent `chr` on slen bind).
+    """
+
     def __init__(self, username):
-        self.username = username
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.settimeout(0.25)
-        self.server = ("127.0.0.1", 1870)
-        self.tseq = 0
-        self.rseq = 0
-        self.held = {}
-        self.widgets = {}
-        self.charlist_id = None
-        self.mapview_id = None
-        self.scm_id = None
-        self.chr_id = None
-        self.chat_id = None
-        self.exp_seen = None
-        self.attrs = {}  # cattr name -> compiled value
-        self.chat_lines = []  # (text, color or None)
-        self.items = {}  # wid -> tooltip
-        self.resids = {}  # wire id -> name
-        self.gobs = {}  # gobid -> {"res": name, "sdt": bytes, "pos": (x,y)}
-        self.player_gob = None
-        self.played = False
-
-    # ---- session plumbing -------------------------------------------------
-    def connect(self):
-        cookie = auth_cookie(self.username)
-        sess = (
-            bytes([0])
-            + le16(1)
-            + havstr("Haven")
-            + le16(2)
-            + havstr(self.username)
-            + cookie
-        )
-        for _ in range(8):
-            self.sock.sendto(sess, self.server)
-            try:
-                data, _ = self.sock.recvfrom(65536)
-                if data[0] == 0 and len(data) == 2 and data[1] == 0:
-                    return
-            except socket.timeout:
-                continue
-        raise RuntimeError("session not accepted")
-
-    def send_rel(self, subs):
-        out = bytes([1]) + le16(self.tseq)
-        for i, p in enumerate(subs):
-            if i < len(subs) - 1:
-                out += bytes([p[0] | 0x80]) + le16(len(p) - 1) + p[1:]
-            else:
-                out += p
-        self.tseq += len(subs)
-        self.sock.sendto(out, self.server)
-
-    def wdgmsg(self, wid, name, args=b""):
-        self.send_rel([bytes([1]) + le16(wid) + havstr(name) + args])
-
-    def pump(self, seconds):
-        deadline = time.time() + seconds
-        while time.time() < deadline:
-            try:
-                data, _ = self.sock.recvfrom(65536)
-            except socket.timeout:
-                continue
-            self.on_datagram(data)
-
-    def wait_for(self, predicate, timeout, step=0.25):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if predicate():
-                return True
-            self.pump(step)
-        return False
-
-    # ---- protocol handlers -------------------------------------------------
-    def on_datagram(self, data):
-        if data[0] == 2:
-            return  # ack
-        if data[0] == MSG_OBJDATA:
-            # Datagram layout: [MSG_OBJDATA][flags][gob blocks...]
-            self.on_objdata(data[2:])
-            return
-        if data[0] != MSG_REL:
-            return
-        seq = struct.unpack("<H", data[1:3])[0]
-        off = 3
-        while off < len(data):
-            t = data[off]
-            off += 1
-            if t & 0x80:
-                ln = struct.unpack("<H", data[off : off + 2])[0]
-                body = data[off : off + ln]
-                off += ln
-            else:
-                body = data[off:]
-                off = len(data)
-            t &= 0x7F
-            if seq == self.rseq:
-                self.on_rel(t, body)
-                self.rseq = (self.rseq + 1) & 0xFFFF
-                while self.rseq in self.held:
-                    t2, b2 = self.held.pop(self.rseq)
-                    self.on_rel(t2, b2)
-                    self.rseq = (self.rseq + 1) & 0xFFFF
-                self.sock.sendto(bytes([2]) + le16((self.rseq - 1) & 0xFFFF), self.server)
-            elif ((seq - self.rseq) & 0xFFFF) < 0x8000:
-                self.held[seq] = (t, body)
-            seq = (seq + 1) & 0xFFFF
-
-    def on_rel(self, t, body):
-        if t == 0:  # NEWWDG: [id u16][type\0][x i32][y i32][parent u16][args]
-            wid = struct.unpack("<H", body[0:2])[0]
-            nend = body.index(0, 2)
-            name = body[2:nend].decode()
-            self.widgets[wid] = name
-            aoff = nend + 1 + 10  # skip x, y, parent
-            args = list(self.parse_args(body[aoff:]))
-            if name == "charlist":
-                self.charlist_id = wid
-            elif name == "mapview":
-                self.mapview_id = wid
-                for gy in (-1, 0, 1):
-                    for gx in (-1, 0, 1):
-                        self.sock.sendto(bytes([4]) + le32(gx) + le32(gy), self.server)
-            elif name == "scm":
-                self.scm_id = wid
-            elif name == "chr":
-                self.chr_id = wid
-            elif name == "slenchat":
-                self.chat_id = wid
-            elif name == "item" and len(args) >= 4:
-                # args: [res, ql, flags, (drag coord), tooltip, num]
-                tooltip = args[3] if isinstance(args[3], str) else ""
-                self.items[wid] = tooltip
-        elif t == RMSG_WDGMSG:
-            wid = struct.unpack("<H", body[0:2])[0]
-            nend = body.index(0, 2)
-            name = body[2:nend].decode()
-            args = list(self.parse_args(body[nend + 1 :]))
-            if name == "exp" and wid == self.chr_id:
-                self.exp_seen = args[0] if args else None
-            elif name == "log" and wid == self.chat_id:
-                color = next((a for a in args if isinstance(a, tuple)), None)
-                self.chat_lines.append((args[0] if args else "", color))
-        elif t == RMSG_RESID:  # RESID: u16 wire, str name, u16 ver
-            wire = struct.unpack("<H", body[0:2])[0]
-            end = body.index(0, 2)
-            name = body[2:end].decode()
-            self.resids[wire] = name
-        elif t == RMSG_CATTR:
-            # entries (string name, i32 base, i32 compiled) until eom
-            off = 0
-            while off < len(body):
-                nend = body.index(0, off)
-                nm = body[off:nend].decode()
-                off = nend + 1
-                base, comp = struct.unpack("<ii", body[off : off + 8])
-                off += 8
-                self.attrs[nm] = comp
-
-    def parse_args(self, buf):
-        off = 0
-        while off < len(buf) and buf[off] != LIST_END:
-            ty = buf[off]
-            off += 1
-            if ty == LIST_INT:
-                yield struct.unpack("<i", buf[off : off + 4])[0]
-                off += 4
-            elif ty == LIST_STR:
-                end = buf.index(0, off)
-                yield buf[off:end].decode()
-                off = end + 1
-            elif ty == LIST_COORD:
-                x, y = struct.unpack("<ii", buf[off : off + 8])
-                off += 8
-                yield (x, y)
-            else:
-                return
-
-    def on_objdata(self, body):
-        off = 0
-        while off + 8 <= len(body):
-            gobid = struct.unpack("<i", body[off : off + 4])[0]
-            off += 4
-            off += 4  # frame
-            g = self.gobs.setdefault(gobid, {"res": None, "sdt": b"", "pos": None})
-            while off < len(body):
-                code = body[off]
-                off += 1
-                if code == OD_END:
-                    break
-                if code == OD_RES:
-                    wire = struct.unpack("<H", body[off : off + 2])[0]
-                    off += 2
-                    if wire & 0x8000:
-                        ln = body[off]
-                        off += 1
-                        g["sdt"] = body[off : off + ln]
-                        off += ln
-                        wire &= 0x7FFF
-                    g["res"] = self.resids.get(wire)
-                elif code == OD_MOVE:
-                    x, y = struct.unpack("<ii", body[off : off + 8])
-                    off += 8
-                    g["pos"] = (x, y)
-                elif code == OD_LINBEG:
-                    off += 20  # 2x coord(8) + int32 steps
-                elif code == OD_LINSTEP:
-                    off += 4
-                elif code == OD_LAYERS or code == OD_AVATAR:
-                    # OD_LAYERS: u16 base res, then u16 layer ids until the
-                    # 65535 sentinel. OD_AVATAR: layers only. The count is
-                    # variable (session 18 spawns 5 concrete pose frames);
-                    # a fixed stride misaligns the rest of the block.
-                    if code == OD_LAYERS:
-                        off += 2  # base res
-                    while True:
-                        layer = struct.unpack("<H", body[off : off + 2])[0]
-                        off += 2
-                        if layer == 65535:
-                            break
-                elif code == OD_HEALTH:
-                    off += 1  # quarters byte
-                elif code == OD_BUDDY:
-                    end = body.index(0, off)
-                    if body[off:end].decode(errors="replace") == self.username:
-                        self.player_gob = gobid
-                    off = end + 3  # name NUL + two flag bytes
-                else:
-                    return  # unknown sub-message: skip the rest safely
-
-    # ---- scenario actions --------------------------------------------------
-    def play(self, name):
-        assert self.charlist_id is not None
-        self.send_rel(
-            [
-                bytes([1])
-                + le16(self.charlist_id)
-                + b"play\x00"
-                + bytes([2])
-                + name.encode()
-                + b"\x00"
-                + bytes([0])
-            ]
-        )
+        super().__init__(username, request_chr=False)
 
     def click_tile(self, tile):
         mc = (tile[0] * 11 + 5, tile[1] * 11 + 5)
-        self.wdgmsg(
-            self.mapview_id,
-            "click",
-            bytes([LIST_COORD]) + le32(0) + le32(0)
-            + bytes([LIST_COORD]) + le32(mc[0]) + le32(mc[1])
-            + bytes([LIST_INT]) + le32(1)
-            + bytes([LIST_INT]) + le32(0)
-            + bytes([LIST_END]),
-        )
-
-    def click_gob(self, gobid, pos):
-        self.wdgmsg(
-            self.mapview_id,
-            "click",
-            bytes([LIST_COORD]) + le32(0) + le32(0)
-            + bytes([LIST_COORD]) + le32(pos[0]) + le32(pos[1])
-            + bytes([LIST_INT]) + le32(1)
-            + bytes([LIST_INT]) + le32(0)
-            + bytes([LIST_INT]) + le32(gobid)
-            + bytes([LIST_COORD]) + le32(pos[0]) + le32(pos[1])
-            + bytes([LIST_END]),
-        )
+        self.click_ground(*mc)
 
     def arm_plow(self):
-        self.wdgmsg(
-            self.scm_id,
-            "act",
-            bytes([LIST_STR]) + havstr("plow") + bytes([LIST_END]),
-        )
+        self.menu_act("plow")
 
-    def take_item(self, wid):
-        self.wdgmsg(wid, "take", bytes([LIST_COORD]) + le32(0) + le32(0) + bytes([LIST_END]))
-
-    def map_itemact(self, tile):
+    def map_itemact_tile(self, tile):
         mc = (tile[0] * 11 + 5, tile[1] * 11 + 5)
-        self.wdgmsg(
-            self.mapview_id,
-            "itemact",
-            bytes([LIST_COORD]) + le32(0) + le32(0)
-            + bytes([LIST_COORD]) + le32(mc[0]) + le32(mc[1])
-            + bytes([LIST_INT]) + le32(0)
-            + bytes([LIST_END]),
-        )
-
-    def flower_choice(self, wid, idx=0):
-        self.wdgmsg(wid, "cl", bytes([LIST_INT]) + le32(idx) + bytes([LIST_END]))
+        self.map_itemact(mc)
 
     def find_item(self, tooltip):
-        for wid, tt in self.items.items():
-            if tt == tooltip:
-                return wid
-        return None
-
-    def find_gobs(self, resname):
-        return {
-            g: info
-            for g, info in self.gobs.items()
-            if info["res"] == resname
-        }
+        return self.find_item_by_tooltip(tooltip)
 
 
 def buy_farming_value(c):
@@ -460,7 +101,7 @@ def buy_farming_value(c):
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "farmbot"
-    server_proc = ensure_server()
+    server_proc = ensure_farm_server()
     try:
         if mode == "skillbot":
             run_skillbot()
@@ -476,29 +117,7 @@ def run(mode):
     # Per-run character: fresh starter kit every time (a reused character
     # may have spent its seeds in an earlier run).
     username = "%s%d%d" % (mode, int(time.time()) % 100000, os.getpid() % 1000)
-    c = FarmClient(username)
-    c.connect()
-    print("session accepted")
-    c.pump(1.5)
-    c.play(username)
-    ok = c.wait_for(lambda: c.mapview_id is not None and c.player_gob is not None, 12)
-    if not ok and c.player_gob is None:
-        # Fallback: the avatar gob carries the unique body resource.
-        mine = [
-            g for g, info in c.gobs.items()
-            if info["res"] == "gfx/borka/body"
-        ]
-        c.player_gob = mine[0] if mine else None
-    assert ok or c.player_gob is not None, (
-        "world entry incomplete: mapview=%s player=%s gobs=%d resids=%d" % (
-            c.mapview_id, c.player_gob, len(c.gobs), len(c.resids)))
-    # Open the inventory the way the client's slen button does.
-    slen_wid = next(w for w, n in c.widgets.items() if n == "slen")
-    for _ in range(4):
-        c.wdgmsg(slen_wid, "inv", bytes([LIST_END]))
-        c.pump(0.3)
-    c.wait_for(lambda: any(n == "inv" for n in c.widgets.values()), 4)
-    print("world entry: player gob", c.player_gob)
+    c = enter_world(username, client_cls=FarmClient)
 
     # The Farming skill value gates planting: buy it through the char
     # sheet before the plow/plant loop (legacy cost 100 for point 1).
@@ -511,7 +130,7 @@ def run(mode):
     # --- plow + plant: scan nearby tiles until a crop gob appears ---------
     wheat_item = c.find_item("Wheat Seeds")
     assert wheat_item is not None, "starter wheat seeds missing (items=%s widgets=%s)" % (
-        c.items, sorted(set(c.widgets.values())))
+        {w: i["tt"] for w, i in c.item_info.items()}, sorted(set(c.widgets.values())))
     crop = None
     for dx in range(-2, 3):
         for dy in range(-2, 3):
@@ -524,7 +143,7 @@ def run(mode):
             c.pump(0.3)
             c.take_item(wheat_item)
             c.pump(0.25)
-            c.map_itemact(tile)
+            c.map_itemact_tile(tile)
             if not c.wait_for(
                 lambda: any(
                     (r or "").startswith("gfx/terobjs/plants/")
@@ -562,16 +181,16 @@ def run(mode):
     )
     assert ok, "harvest flower menu never opened"
     sm_wid = next(w for w, n in c.widgets.items() if n == "sm")
-    before_wids = set(c.items)
+    before_wids = set(c.item_info)
     c.flower_choice(sm_wid)
 
     def new_yields():
         # refresh_inventory recreates every item widget, so yields show up
         # as NEW widget ids carrying the yield tooltip.
         return [
-            tt
-            for wid, tt in c.items.items()
-            if wid not in before_wids and tt in ("Straw", "Wheat Seeds")
+            info["tt"]
+            for wid, info in c.item_info.items()
+            if wid not in before_wids and info["tt"] in ("Straw", "Wheat Seeds")
         ]
 
     ok = c.wait_for(lambda: new_yields(), 5.0)
@@ -585,19 +204,8 @@ def run_skillbot():
     value; sattr purchase at the exact legacy cost; planting then works;
     unknown catalog buys are refused."""
     username = "skill%d%d" % (int(time.time()) % 100000, os.getpid() % 1000)
-    c = FarmClient(username)
-    c.connect()
-    print("session accepted")
-    c.pump(1.5)
-    c.play(username)
-    ok = c.wait_for(lambda: c.mapview_id is not None and c.player_gob is not None, 12)
-    assert ok or c.player_gob is not None, "world entry incomplete"
+    c = enter_world(username, client_cls=FarmClient)
     assert c.chat_id is not None, "Area Chat widget missing"
-    slen_wid = next(w for w, n in c.widgets.items() if n == "slen")
-    for _ in range(4):
-        c.wdgmsg(slen_wid, "inv", bytes([LIST_END]))
-        c.pump(0.3)
-    c.wait_for(lambda: any(n == "inv" for n in c.widgets.values()), 4)
 
     ppos = c.gobs[c.player_gob]["pos"] or (0, 0)
     ptile = (ppos[0] // 11, ppos[1] // 11)
@@ -633,7 +241,7 @@ def run_skillbot():
         if not cursor_held:
             c.take_item(wheat_item)
             c.pump(0.25)
-        c.map_itemact(tile)
+        c.map_itemact_tile(tile)
         c.wait_for(lambda: len(plant_gobs()) > len(before), 2.5)
         return plant_gobs() - before
 
@@ -669,7 +277,7 @@ def run_skillbot():
     c.pump(0.25)
     c.click_tile(tile2)
     c.pump(0.3)
-    c.map_itemact(tile2)
+    c.map_itemact_tile(tile2)
     ok = c.wait_for(
         lambda: any(
             (r or "").startswith("gfx/terobjs/plants/")

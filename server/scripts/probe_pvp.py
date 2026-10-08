@@ -24,14 +24,17 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_build import (  # noqa: E402
-    BuildClient,
+from hnhlib import (  # noqa: E402
     ensure_server,
+    havstr,
     le16,
     le32,
     RMSG_WDGMSG,
+    LIST_END,
+    LIST_INT,
+    LIST_STR,
 )
-from test_build import havstr, LIST_END, LIST_INT, LIST_STR  # noqa: E402
+from test_build import BuildClient  # noqa: E402
 from test_equip import EquipClient, open_epry  # noqa: E402
 
 OD_HEALTH = 14
@@ -66,11 +69,18 @@ class PvpClient(EquipClient):
     def on_objdata(self, body):
         # Base parser first (res / pos / buddy bookkeeping), then a
         # light second pass that records only the OD_HEALTH quarters.
+        # Body layout matches hnhlib.parse_objdata: [flags][gobid i32]
+        # [frame i32][ops...] - a flag-1 block is the removal itself and
+        # carries no ops.
         super().on_objdata(body)
         off = 0
-        while off + 8 <= len(body):
-            gobid = struct.unpack("<i", body[off : off + 4])[0]
-            off += 8  # id + frame
+        while off + 8 < len(body):
+            fl = body[off]
+            off += 1
+            gobid = struct.unpack("<i", body[off:off + 4])[0]
+            off += 8  # gobid + frame
+            if fl & 1:
+                continue
             while off < len(body):
                 code = body[off]
                 off += 1

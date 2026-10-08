@@ -26,70 +26,10 @@ import time
 # Shared wire harness: hnhlib.py is the single source of the transport
 # plumbing (constants, auth, reliability walk, OBJDATA op table, session
 # driver). This module keeps its historical CLI (buildbot/stationbot/
-# persistbot/persistcheck modes) and re-exports the shared names so the
-# probes that historically imported them from test_build keep working.
+# persistbot/persistcheck modes) and the BuildClient the station/equip
+# probes build on.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from hnhlib import (  # noqa: E402,F401
-    REPO,
-    BIN,
-    GAME_PORT,
-    AUTH_PORT,
-    MSG_SESS,
-    MSG_REL,
-    MSG_ACK,
-    MSG_BEAT,
-    MSG_MAPREQ,
-    MSG_MAPDATA,
-    MSG_OBJDATA,
-    MSG_OBJACK,
-    MSG_CLOSE,
-    RMSG_NEWWDG,
-    RMSG_WDGMSG,
-    RMSG_DSTWDG,
-    RMSG_MAPIV,
-    RMSG_GLOBLOB,
-    RMSG_PAGINAE,
-    RMSG_RESID,
-    RMSG_PARTY,
-    RMSG_SFX,
-    RMSG_CATTR,
-    RMSG_MUSIC,
-    RMSG_TILES,
-    RMSG_BUFF,
-    OD_REM,
-    OD_MOVE,
-    OD_RES,
-    OD_LINBEG,
-    OD_LINSTEP,
-    OD_SPEECH,
-    OD_LAYERS,
-    OD_DRAWOFF,
-    OD_LUMIN,
-    OD_AVATAR,
-    OD_FOLLOW,
-    OD_HOMING,
-    OD_OVERLAY,
-    OD_HEALTH,
-    OD_BUDDY,
-    OD_END,
-    SESSERR_AUTH,
-    PVER,
-    LIST_END,
-    LIST_INT,
-    LIST_STR,
-    LIST_COORD,
-    LIST_COLOR,
-    REQUIRED_CATTR,
-    le16,
-    le32,
-    havstr,
-    auth_cookie,
-    ensure_server,
-    parse_objdata,
-    WireClient,
-    enter_world,
-    stop_server,
-)
+from hnhlib import WireClient, ensure_server, enter_world  # noqa: E402
 
 class BuildClient(WireClient):
     """Historical name: the build-flow probes keep their exact pre-chr

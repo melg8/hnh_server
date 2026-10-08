@@ -23,12 +23,13 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_build import (  # noqa: E402
+from hnhlib import (  # noqa: E402
     le16,
     le32,
     RMSG_WDGMSG,
+    LIST_END,
+    LIST_INT,
 )
-from test_build import LIST_END, LIST_INT  # noqa: E402
 from probe_pvp import PvpClient, enter, gob_click  # noqa: E402
 
 

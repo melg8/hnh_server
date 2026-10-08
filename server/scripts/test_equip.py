@@ -25,14 +25,16 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_build import (  # noqa: E402
-    BuildClient,
+from hnhlib import (  # noqa: E402
     ensure_server,
+    havstr,
     le16,
     le32,
     RMSG_WDGMSG,
+    LIST_END,
+    LIST_INT,
 )
-from test_build import havstr, LIST_END, LIST_INT  # noqa: E402
+from test_build import BuildClient  # noqa: E402
 
 
 def enter_equip_world(username):
@@ -127,21 +129,36 @@ def open_epry(c):
 
 def equip_item(c, slot, expected_res):
     """Take the named stack onto the cursor and equip it into `slot`."""
-    item_wid = next(
-        (w for w, i in c.item_info.items() if i["res"] == expected_res), None
-    )
-    assert item_wid is not None, "no %s item widget to equip" % expected_res
-    c.wdgmsg(item_wid, "take", bytes([LIST_END]))
-    c.wait_for(lambda: any(n == "item" for n in c.widgets.values()), 4)
-    c.pump(0.3)
-    c.wdgmsg(c.epry_id, "drop", bytes([LIST_INT]) + le32(slot) + bytes([LIST_END]))
-    ok = c.wait_for(
-        lambda: c.epry_slots is not None
-        and c.epry_slots[slot] is not None
-        and c.epry_slots[slot][0] == expected_res,
-        6,
-    )
-    assert ok, "slot %d never received %s: %r" % (slot, expected_res, c.epry_slots)
+    # refresh_inventory recreates item widgets with fresh ids (the inv
+    # drop after an unequip is exactly that case) and DSTWDG pruning
+    # lags the wire, so the wid resolved right after a refresh can be
+    # the dying cursor copy - the take is then a no-op and the epry
+    # drop runs with an empty hand. Retry the take/drop round trip on
+    # a freshly resolved wid until the `set` confirms the slot.
+    last_err = None
+    for _attempt in range(4):
+        item_wid = max(
+            (w for w, i in c.item_info.items() if i["res"] == expected_res),
+            default=None,
+        )
+        assert item_wid is not None, "no %s item widget to equip" % expected_res
+        c.wdgmsg(item_wid, "take", bytes([LIST_END]))
+        c.wait_for(lambda: any(n == "item" for n in c.widgets.values()), 4)
+        c.pump(0.3)
+        c.wdgmsg(c.epry_id, "drop", bytes([LIST_INT]) + le32(slot) + bytes([LIST_END]))
+        if c.wait_for(
+            lambda: c.epry_slots is not None
+            and c.epry_slots[slot] is not None
+            and c.epry_slots[slot][0] == expected_res,
+            6,
+        ):
+            break
+        last_err = c.epry_slots
+        c.pump(0.5)
+    else:
+        raise AssertionError(
+            "slot %d never received %s: %r" % (slot, expected_res, last_err)
+        )
     ql, tip = c.epry_slots[slot][1], c.epry_slots[slot][2]
     assert isinstance(ql, int) and ql > 0, "quality must be positive"
     print("equipped %s into slot %d (q=%s, tip=%r)" % (expected_res, slot, ql, tip))

@@ -112,8 +112,14 @@ def auth_cookie(username, password="x", port=AUTH_PORT):
     return body
 
 
-def ensure_server():
-    """Start an isolated server (fresh save) if none is listening."""
+def ensure_server(env_extra=None, save_path=None):
+    """Start an isolated server (fresh save) if none is listening.
+
+    env_extra: extra environment variables for the server process (for
+    scenario clocks such as HNH_CROP_TIME_SCALE). save_path overrides
+    the default per-scenario save file; it is removed before boot so
+    every run starts from a fresh world.
+    """
     probe = socket.socket()
     probe.settimeout(0.4)
     try:
@@ -124,7 +130,8 @@ def ensure_server():
         pass
     env = dict(os.environ)
     env["HNH_LP_RATE"] = "1000"
-    save_path = os.path.join(REPO, "server", "target", "build-test-save.json")
+    if save_path is None:
+        save_path = os.path.join(REPO, "server", "target", "build-test-save.json")
     # Fresh world: persistent plans from earlier runs would occupy the
     # spawn-area tiles and intercept this run's itemacts.
     try:
@@ -132,6 +139,8 @@ def ensure_server():
     except OSError:
         pass
     env["HNH_SAVE_FILE"] = save_path
+    if env_extra:
+        env.update(env_extra)
     proc = subprocess.Popen(
         [BIN, "--seed", "42"],
         cwd=os.path.join(REPO, "server"),
@@ -298,6 +307,15 @@ class WireClient:
         self.slen_id = None
         self.sm_wid = None
         self.sm_opts = []
+        self.sm_args = {}  # every open flower menu: sm wid -> option labels
+        self.chat_id = None  # slenchat Area Chat widget
+        self.chat_lines = []  # (text, color tuple or None) from `log`
+        self.chr_id = None  # char sheet window
+        self.exp_seen = None  # last `exp` uimsg arg on the chr widget
+        self.attrs = {}  # cattr name -> compiled value
+        self.pv_id = None  # party roster widget
+        self.destroyed = set()  # widget ids seen in DSTWDG
+        self.buddy_names = {}  # gobid -> OD_BUDDY character name
         self.resids = {}  # wire id -> name
         self.gobs = {}  # gobid -> {"res","sdt","pos","linbeg","linsteps","moves"}
         self.item_info = {}  # item wid -> {"res","ql","tt"}
@@ -468,6 +486,13 @@ class WireClient:
             elif name == "sm":
                 self.sm_wid = wid
                 self.sm_opts = [a for a in args if isinstance(a, str)]
+                self.sm_args[wid] = list(self.sm_opts)
+            elif name == "slenchat":
+                self.chat_id = wid
+            elif name == "chr":
+                self.chr_id = wid
+            elif name == "pv":
+                self.pv_id = wid
             elif name == "item" and len(args) >= 4:
                 # args: [wire res, ql, drag, tooltip, num]
                 self.item_info[wid] = {
@@ -481,6 +506,11 @@ class WireClient:
             wid = struct.unpack("<H", body[0:2])[0]
             self.widgets.pop(wid, None)
             self.item_info.pop(wid, None)
+            self.sm_args.pop(wid, None)
+            self.destroyed.add(wid)
+            if wid == self.sm_wid:
+                self.sm_wid = None
+                self.sm_opts = []
         elif t == RMSG_WDGMSG:
             wid = struct.unpack("<H", body[0:2])[0]
             nend = body.index(0, 2)
@@ -488,16 +518,26 @@ class WireClient:
             args = list(self.parse_args(body[nend + 1:]))
             if name == "place" and wid == self.mapview_id:
                 self.place_seen = args
+            elif name == "exp" and wid == self.chr_id:
+                self.exp_seen = args[0] if args else None
+            elif name == "log" and wid == self.chat_id:
+                text = args[0] if args else ""
+                color = next((a for a in args if isinstance(a, tuple)), None)
+                self.chat_lines.append((text, color))
         elif t == RMSG_RESID:
             wire = struct.unpack("<H", body[0:2])[0]
             end = body.index(0, 2)
             name = body[2:end].decode()
             self.resids[wire] = name
         elif t == RMSG_CATTR:
+            # entries (string name, i32 base, i32 compiled) until eom
             off = 0
             while off < len(body):
                 end = body.index(0, off)
-                self.cattr_names.add(body[off:end].decode())
+                nm = body[off:end].decode()
+                self.cattr_names.add(nm)
+                base, comp = struct.unpack("<ii", body[end + 1:end + 9])
+                self.attrs[nm] = comp
                 off = end + 9  # name\0 + two LE int32
         elif t == RMSG_PAGINAE:
             off = 0
@@ -531,6 +571,9 @@ class WireClient:
                 x, y = struct.unpack("<ii", buf[off:off + 8])
                 off += 8
                 yield (x, y)
+            elif ty == LIST_COLOR:
+                yield tuple(buf[off:off + 4])
+                off += 4
             else:
                 return
 
@@ -564,8 +607,10 @@ class WireClient:
                     # players spawn without a plain OD_RES.
                     if base is not None:
                         g["res"] = self.resids.get(base)
-                elif op == "BUDDY" and arg == self.username:
-                    self.player_gob = gobid
+                elif op == "BUDDY":
+                    self.buddy_names[gobid] = arg
+                    if arg == self.username:
+                        self.player_gob = gobid
 
     # ---- scenario actions --------------------------------------------------
     def play(self, name):

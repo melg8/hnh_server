@@ -22,9 +22,8 @@ taming) that are easier to drive from python.
     bootstrap behaviors (3x3 MAPREQ on mapview bind, opt-in `chr`
     request on slen bind, batched MSG_OBJACK behind a flag), and an
     `on_event()` hook for script-specific widgets.
-- `test_build.py` — build/station/persist scenario CLI; also re-exports
-  the harness names for the probes that import them
-  (probe_melee/pvp/drop/plow, test_equip, probe_station).
+- `test_build.py` — build/station/persist scenario CLI and the
+  `BuildClient` the station/equip probes build on.
 
 ## Probes
 
@@ -51,7 +50,6 @@ taming) that are easier to drive from python.
 - `make-gameres.sh` - build the `gameres/` pack (jar extract + fork
   overlay); the Windows twin is `windows/make-gameres.ps1`, which
   additionally calls `fix_gameres_versions.py`.
-- `dump_paginae.py` - dump the paginae the server pushes at login.
 - `scan_paginae.py` - static AButton decode of every
   paginae/craft/*.res (offline; needs `unzip -o -q lib/haven-res.jar
   'res/paginae/craft/*' -d /tmp/hx` first). Session-58 recipe
@@ -60,7 +58,8 @@ taming) that are easier to drive from python.
   lacks (string, tanhide) into `res/compiled/`; donor image layer +
   new AButton layer, layout verified by scan_paginae.py.
 - `profile_guests.sh` - guest-scan profiling run (session-43 artifact;
-  the O(guests) rescan issue it measures is still open in HANDOFF.md).
+  the O(guests) rescan cost it measured was removed in sessions 54/59
+  (view-cell-bounded scan, packed guest pose batch) - kept for history.
 - `profile_multinode.sh` - session-59 multi-node scaling harness:
   `MODE=single|cluster BOTS=<per node> ./profile_multinode.sh` boots
   the single-node baseline or a 2-node cluster (both nodes loaded) and
@@ -77,16 +76,14 @@ write a probe on `hnhlib.py` (or a cargo wire test) instead.
 
 ## Adding a probe
 
-Subclass `hnhlib.WireClient`, override `on_event(t, body)` for your
-widgets, drive the flow with the built-in action helpers
+Subclass `hnhlib.WireClient`, override `on_event(t, body)` (and
+`on_objdata(body)` for extra gob-op tracking - call `parse_objdata`
+first for your own event log, then `super().on_objdata(body)`), drive
+the flow with the built-in action helpers
 (`play`, `click_ground`, `click_gob`, `menu_act`, `send_place`,
 `map_itemact`, `flower_choice`, `find_item_by_res`, ...). Do not
 re-implement auth, the reliability walk, or the OBJDATA op table.
-
-## Legacy self-contained scripts
-
-`probe_animals.py`, `probe_direction.py`, `dump_paginae.py`,
-`test_farming.py`, `test_party_chat.py` still carry their own plumbing
-pre-hnhlib; they work, but a wire change must be patched in each until
-they migrate. Migrating one = delete its `auth_cookie`/`decode_objdata`
-transport blocks, subclass `WireClient`, keep the verdict logic.
+Shared contracts already tracked by `WireClient`: widgets + DSTWDG
+bookkeeping, RESID map, gob state, item widgets, flower menus,
+char sheet (`chr_id`/`exp_seen`/`attrs`), Area Chat (`chat_id`/
+`chat_lines`), party roster (`pv_id`), OD_BUDDY names, cattr names.

@@ -26,6 +26,7 @@ import zlib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import test_farming as tf  # noqa: E402
+from hnhlib import le32  # noqa: E402
 from test_farming import FarmClient  # noqa: E402
 
 MSG_MAPDATA = 5
@@ -107,8 +108,10 @@ class PlowProbe(FarmClient):
         tiles = zlib.decompress(payload[o:])[:10000]
         self.grids[(gx, gy)] = tiles
 
-    def mapreq(self, gc):
-        self.sock.sendto(bytes([4]) + tf.le32(gc[0]) + tf.le32(gc[1]), self.server)
+    def mapreq_grid(self, gc):
+        # Grid snapshot request. Named apart from WireClient.mapreq(gx,
+        # gy), which the shared mapview-bind path calls.
+        self.sock.sendto(bytes([4]) + le32(gc[0]) + le32(gc[1]), self.server)
 
     def tile_at(self, tx, ty):
         gc = (tx // 100, ty // 100)
@@ -156,7 +159,7 @@ def main():
                     continue  # my own cell: the local path, not the relay
                 gc = (tile[0] // 100, tile[1] // 100)
                 if gc not in c.grids:
-                    c.mapreq(gc)
+                    c.mapreq_grid(gc)
                     c.wait_for(lambda: gc in c.grids, 4)
                 if c.tile_at(*tile) != TILE_GRASS:
                     continue

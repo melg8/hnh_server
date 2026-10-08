@@ -135,6 +135,11 @@ def build_oven_rim(c, observer, nodes, me):
     c.map_itemact(mc, plan)
     ok = co_wait(pair, lambda: c.gobs[plan]["sdt"] == b"\x01", 4, "stage 1")
     assert ok, "[%s] stage never advanced after the stone sink" % c.username
+    # The kit's stone stack (6) exceeds the plan's stone demand (2): the
+    # remainder stays on the drag cursor and blocks the branch take (one
+    # cursor item at a time, game/items.rs inv_take; session-51 contract).
+    assert c.return_cursor(), "[%s] inventory window missing for cursor return" % c.username
+    co_pump(pair, 0.3)
 
     branch = c.find_item_by_res("gfx/invobjs/branch")
     assert branch is not None, "[%s] starter branch missing" % c.username
@@ -144,6 +149,9 @@ def build_oven_rim(c, observer, nodes, me):
     ok = co_wait(pair, lambda: c.gobs[plan]["sdt"] == b"\x00", 6, "completion")
     assert ok, "[%s] oven never completed (sdt=%r)" % (c.username, c.gobs[plan]["sdt"])
     print("[%s] rim oven completed: gob %s" % (c.username, plan))
+    # Same contract for the branch stack (6 vs the 1-unit demand line).
+    assert c.return_cursor(), "[%s] inventory window missing for cursor return" % c.username
+    co_pump(pair, 0.3)
     return plan, mc
 
 

@@ -41,17 +41,17 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import test_build as tb  # noqa: E402
-from test_build import (  # noqa: E402
+import hnhlib as tb  # noqa: E402
+from hnhlib import (  # noqa: E402
     LIST_COORD,
     LIST_END,
     LIST_INT,
     LIST_STR,
-    BuildClient,
     havstr,
     le16,
     le32,
 )
+from test_build import BuildClient  # noqa: E402
 
 M64 = (1 << 64) - 1
 
@@ -508,6 +508,11 @@ def build_oven_near(c, observer, nodes, me):
     ok = co_wait(pair, lambda: c.gobs[plan]["sdt"] == b"\x01", 4, "stage 1")
     assert ok, "[%s] stage never advanced after the stone sink" % c.username
     print("[%s] stones sunk: stage 1" % c.username)
+    # The kit's stone stack (6) exceeds the plan's stone demand (2): the
+    # remainder stays on the drag cursor and blocks the branch take (one
+    # cursor item at a time, game/items.rs inv_take; session-51 contract).
+    assert c.return_cursor(), "[%s] inventory window missing for cursor return" % c.username
+    co_pump(pair, 0.3)
 
     branch = c.find_item_by_res("gfx/invobjs/branch")
     assert branch is not None, "[%s] starter branch missing" % c.username
@@ -520,6 +525,9 @@ def build_oven_near(c, observer, nodes, me):
         c.gobs[plan]["sdt"],
     )
     print("[%s] oven completed: gob %s" % (c.username, plan))
+    # Same contract for the branch stack (6 vs the 1-unit demand line).
+    assert c.return_cursor(), "[%s] inventory window missing for cursor return" % c.username
+    co_pump(pair, 0.3)
     return plan, mc
 
 

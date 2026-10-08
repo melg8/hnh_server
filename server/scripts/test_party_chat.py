@@ -15,263 +15,90 @@ Modes:
 
 Auto-starts the server binary on an isolated save when 1871 is free;
 otherwise reuses the already-running server.
+
+The transport, the session driver, the chat/flower-menu/widget tracking
+and the DSTWDG bookkeeping live in hnhlib.py.
 """
 import os
-import socket
 import struct
-import subprocess
 import sys
 import time
 
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-BIN = os.path.join(REPO, "server", "target", "release", "hnh-server")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-LIST_END, LIST_INT, LIST_STR, LIST_COORD, LIST_COL = 0, 1, 2, 3, 6
-MSG_REL, MSG_MAPDATA, MSG_OBJDATA = 1, 5, 6
-RMSG_NEWWDG, RMSG_WDGMSG, RMSG_DSTWDG, RMSG_PARTY, RMSG_RESID = 0, 1, 2, 7, 6
+from hnhlib import (  # noqa: E402
+    LIST_END,
+    LIST_STR,
+    REPO,
+    WireClient,
+    ensure_server,
+    havstr,
+    parse_objdata,
+)
+
 PD_LIST, PD_LEADER, PD_MEMBER = 0, 1, 2
-OD_MOVE, OD_RES, OD_LINBEG, OD_LINSTEP, OD_BUDDY, OD_END = 1, 2, 3, 4, 15, 255
-OD_LAYERS, OD_HEALTH = 6, 14
 
 
-def le16(v):
-    return struct.pack("<H", v & 0xFFFF)
-
-
-def le32(v):
-    return struct.pack("<i", v)
-
-
-def havstr(s):
-    return s.encode() + b"\x00"
-
-
-def auth_cookie(username, password="x"):
-    import hashlib
-    import ssl
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    raw = socket.create_connection(("127.0.0.1", 1871), timeout=5)
-    tls = ctx.wrap_socket(raw)
-
-    def send_frame(ty, payload):
-        tls.sendall(bytes([ty, len(payload)]) + payload)
-
-    def recv_frame():
-        head = b""
-        while len(head) < 2:
-            c = tls.recv(2 - len(head))
-            if not c:
-                raise RuntimeError("eof")
-            head += c
-        ln = head[1]
-        body = b""
-        while len(body) < ln:
-            c = tls.recv(ln - len(body))
-            if not c:
-                raise RuntimeError("eof")
-            body += c
-        return head[0], body
-
-    send_frame(1, username.encode())
-    ty, _ = recv_frame()
-    assert ty == 0, "CMD_USR rejected"
-    send_frame(2, hashlib.sha256(password.encode()).digest())
-    ty, body = recv_frame()
-    assert ty == 0, "CMD_PASSWD rejected"
-    return body
-
-
-def ensure_server():
-    """Start an isolated server if none is listening."""
-    probe = socket.socket()
-    probe.settimeout(0.4)
-    try:
-        probe.connect(("127.0.0.1", 1871))
-        probe.close()
-        return None
-    except OSError:
-        pass
-    env = dict(os.environ)
-    env["HNH_SAVE_FILE"] = os.path.join(REPO, "server", "target", "party-test-save.json")
-    proc = subprocess.Popen(
-        [BIN, "--seed", "42"],
-        cwd=os.path.join(REPO, "server"),
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+def ensure_party_server():
+    """Isolated server on the party scenario save."""
+    return ensure_server(
+        save_path=os.path.join(REPO, "server", "target", "party-test-save.json")
     )
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        try:
-            probe = socket.socket()
-            probe.settimeout(0.4)
-            probe.connect(("127.0.0.1", 1871))
-            probe.close()
-            return proc
-        except OSError:
-            time.sleep(0.4)
-    raise RuntimeError("server did not come up")
 
 
-class PartyClient:
+class PartyClient(WireClient):
+    """Party/chat scenario client.
+
+    Movement fidelity (session 20 semantics): the server's logical
+    position is the ON-PATH interpolated point, never the destination
+    ahead of time - the mv phase set_pos()es lm.pos_at(now) every tick
+    and only pins the destination on arrival. The walk-away assertions
+    must judge distance by the same measure, so this subclass tracks
+    the client-side interpolation: LINBEG records the path, LINSTEP
+    advances the position along it (arrival = l >= c pins the target).
+    Party records and the scenario helpers keep their old shapes.
+    """
+
     def __init__(self, username):
-        self.username = username
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.settimeout(0.25)
-        self.server = ("127.0.0.1", 1870)
-        self.tseq = 0
-        self.rseq = 0
-        self.held = {}
-        self.widgets = {}  # wid -> type name
-        self.sm_args = {}  # sm wid -> option labels
-        self.destroyed = set()
-        self.charlist_id = None
-        self.mapview_id = None
-        self.scm_id = None
-        self.chat_id = None
-        self.pv_id = None
-        self.chat_lines = []  # (text, color or None)
+        super().__init__(username)
         self.party_msgs = []  # parsed RMSG_PARTY record lists
-        self.items = {}  # wid -> tooltip
-        self.resids = {}  # wire id -> name
-        self.gobs = {}  # gobid -> {"res": name, "sdt": bytes, "pos": (x,y)}
-        self.player_gob = None
-        self.played = False
+        self.linpaths = {}  # gobid -> (sx, sy, tx, ty, c) active path
 
-    # ---- session plumbing -------------------------------------------------
-    def connect(self):
-        cookie = auth_cookie(self.username)
-        sess = (
-            bytes([0])
-            + le16(1)
-            + havstr("Haven")
-            + le16(2)
-            + havstr(self.username)
-            + cookie
-        )
-        for _ in range(8):
-            self.sock.sendto(sess, self.server)
-            try:
-                data, _ = self.sock.recvfrom(65536)
-                if data[0] == 0 and len(data) == 2 and data[1] == 0:
-                    return
-            except socket.timeout:
-                continue
-        raise RuntimeError("session not accepted")
+    def _gob(self, gobid):
+        return self.gobs.setdefault(gobid, {
+            "res": None, "sdt": b"", "pos": None,
+            "linbeg": None, "linbegs": [], "linsteps": [], "moves": [],
+        })
 
-    def send_rel(self, subs):
-        out = bytes([1]) + le16(self.tseq)
-        for i, p in enumerate(subs):
-            if i < len(subs) - 1:
-                out += bytes([p[0] | 0x80]) + le16(len(p) - 1) + p[1:]
-            else:
-                out += p
-        self.tseq += len(subs)
-        self.sock.sendto(out, self.server)
+    def on_objdata(self, body):
+        for gobid, _frame, ops in parse_objdata(body):
+            for op, arg in ops:
+                if op == "LINBEG":
+                    sx, sy, tx, ty, c = arg
+                    self._gob(gobid)["pos"] = (sx, sy)
+                    self.linpaths[gobid] = (sx, sy, tx, ty, max(c, 1))
+                elif op == "LINSTEP":
+                    p = self.linpaths.get(gobid)
+                    if p is None:
+                        continue
+                    sx, sy, tx, ty, c = p
+                    l = arg
+                    if l >= c:
+                        self._gob(gobid)["pos"] = (tx, ty)
+                        self.linpaths.pop(gobid, None)
+                    else:
+                        self._gob(gobid)["pos"] = (
+                            sx + (tx - sx) * l // c, sy + (ty - sy) * l // c)
+                elif op == "MOVE":
+                    # A plain MOVE (spawn/teleport/arrival pin) replaces
+                    # any active path.
+                    self.linpaths.pop(gobid, None)
+        super().on_objdata(body)
 
-    def wdgmsg(self, wid, name, args=b""):
-        self.send_rel([bytes([1]) + le16(wid) + havstr(name) + args])
-
-    def pump(self, seconds):
-        deadline = time.time() + seconds
-        while time.time() < deadline:
-            try:
-                data, _ = self.sock.recvfrom(65536)
-            except socket.timeout:
-                continue
-            self.on_datagram(data)
-
-    def wait_for(self, predicate, timeout, step=0.25):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if predicate():
-                return True
-            self.pump(step)
-        return False
-
-    # ---- protocol handlers -------------------------------------------------
-    def on_datagram(self, data):
-        if data[0] == 2:
-            return  # ack
-        if data[0] == MSG_OBJDATA:
-            self.on_objdata(data[2:])
-            return
-        if data[0] != MSG_REL:
-            return
-        seq = struct.unpack("<H", data[1:3])[0]
-        off = 3
-        while off < len(data):
-            t = data[off]
-            off += 1
-            if t & 0x80:
-                ln = struct.unpack("<H", data[off : off + 2])[0]
-                body = data[off : off + ln]
-                off += ln
-            else:
-                body = data[off:]
-                off = len(data)
-            t &= 0x7F
-            if seq == self.rseq:
-                self.on_rel(t, body)
-                self.rseq = (self.rseq + 1) & 0xFFFF
-                while self.rseq in self.held:
-                    t2, b2 = self.held.pop(self.rseq)
-                    self.on_rel(t2, b2)
-                    self.rseq = (self.rseq + 1) & 0xFFFF
-                self.sock.sendto(bytes([2]) + le16((self.rseq - 1) & 0xFFFF), self.server)
-            elif ((seq - self.rseq) & 0xFFFF) < 0x8000:
-                self.held[seq] = (t, body)
-            seq = (seq + 1) & 0xFFFF
-
-    def on_rel(self, t, body):
-        if t == RMSG_NEWWDG:
-            wid = struct.unpack("<H", body[0:2])[0]
-            nend = body.index(0, 2)
-            name = body[2:nend].decode()
-            self.widgets[wid] = name
-            aoff = nend + 1 + 10  # skip x, y, parent
-            args = list(self.parse_args(body[aoff:]))
-            if name == "charlist":
-                self.charlist_id = wid
-            elif name == "mapview":
-                self.mapview_id = wid
-                for gy in (-1, 0, 1):
-                    for gx in (-1, 0, 1):
-                        self.sock.sendto(bytes([4]) + le32(gx) + le32(gy), self.server)
-            elif name == "scm":
-                self.scm_id = wid
-            elif name == "slenchat":
-                self.chat_id = wid
-            elif name == "pv":
-                self.pv_id = wid
-            elif name == "sm":
-                self.sm_args[wid] = [a for a in args if isinstance(a, str)]
-            elif name == "item" and len(args) >= 4:
-                tooltip = args[3] if isinstance(args[3], str) else ""
-                self.items[wid] = tooltip
-        elif t == RMSG_RESID:
-            # u16 wire id, str name, u16 version
-            wire = struct.unpack("<H", body[0:2])[0]
-            end = body.index(0, 2)
-            name = body[2:end].decode()
-            self.resids[wire] = name
-        elif t == RMSG_WDGMSG:
-            wid = struct.unpack("<H", body[0:2])[0]
-            nend = body.index(0, 2)
-            name = body[2:nend].decode()
-            args = list(self.parse_args(body[nend + 1 :]))
-            if name == "log" and wid == self.chat_id:
-                text = args[0] if args else ""
-                color = next((a for a in args if isinstance(a, tuple)), None)
-                self.chat_lines.append((text, color))
-        elif t == RMSG_DSTWDG:
-            wid = struct.unpack("<H", body[0:2])[0]
-            self.destroyed.add(wid)
-            self.widgets.pop(wid, None)
-            self.sm_args.pop(wid, None)
-        elif t == RMSG_PARTY:
+    def on_event(self, t, body):
+        # RMSG_PARTY is a party-domain record stream: keep the raw
+        # records for the choreography assertions.
+        if t == 7:  # RMSG_PARTY
             self.party_msgs.append(self.parse_party(body))
 
     @staticmethod
@@ -285,151 +112,34 @@ class PartyClient:
             if tag == PD_LIST:
                 ids = []
                 while off + 4 <= len(body):
-                    gid = struct.unpack("<i", body[off : off + 4])[0]
+                    gid = struct.unpack("<i", body[off:off + 4])[0]
                     off += 4
                     if gid == -1:
                         break
                     ids.append(gid)
                 records.append((PD_LIST, ids))
             elif tag == PD_LEADER:
-                records.append((PD_LEADER, struct.unpack("<i", body[off : off + 4])[0]))
+                records.append((PD_LEADER, struct.unpack("<i", body[off:off + 4])[0]))
                 off += 4
             elif tag == PD_MEMBER:
-                gob = struct.unpack("<i", body[off : off + 4])[0]
+                gob = struct.unpack("<i", body[off:off + 4])[0]
                 off += 4
                 visible = body[off]
                 off += 1
                 pos = None
                 if visible == 1:
-                    pos = struct.unpack("<ii", body[off : off + 8])
+                    pos = struct.unpack("<ii", body[off:off + 8])
                     off += 8
-                color = tuple(body[off : off + 4])
+                color = tuple(body[off:off + 4])
                 off += 4
                 records.append((PD_MEMBER, gob, pos, color))
             else:
                 break
         return records
 
-    def parse_args(self, buf):
-        off = 0
-        while off < len(buf) and buf[off] != LIST_END:
-            ty = buf[off]
-            off += 1
-            if ty == LIST_INT:
-                yield struct.unpack("<i", buf[off : off + 4])[0]
-                off += 4
-            elif ty == LIST_STR:
-                end = buf.index(0, off)
-                yield buf[off:end].decode()
-                off = end + 1
-            elif ty == LIST_COORD:
-                x, y = struct.unpack("<ii", buf[off : off + 8])
-                off += 8
-                yield (x, y)
-            elif ty == LIST_COL:
-                yield tuple(buf[off : off + 4])
-                off += 4
-            else:
-                return
-
-    def on_objdata(self, body):
-        off = 0
-        while off + 8 <= len(body):
-            gobid = struct.unpack("<i", body[off : off + 4])[0]
-            off += 4
-            off += 4  # frame
-            g = self.gobs.setdefault(gobid, {"res": None, "sdt": b"", "pos": None})
-            while off < len(body):
-                code = body[off]
-                off += 1
-                if code == OD_END:
-                    break
-                if code == OD_RES:
-                    wire = struct.unpack("<H", body[off : off + 2])[0]
-                    off += 2
-                    if wire & 0x8000:
-                        ln = body[off]
-                        off += 1
-                        g["sdt"] = body[off : off + ln]
-                        off += ln
-                        wire &= 0x7FFF
-                    g["res"] = self.resids.get(wire)
-                elif code == OD_MOVE:
-                    x, y = struct.unpack("<ii", body[off : off + 8])
-                    off += 8
-                    g["pos"] = (x, y)
-                elif code == OD_LINBEG:
-                    _sx, _sy, tx, ty = struct.unpack("<iiii", body[off : off + 16])
-                    off += 20  # 2x coord(8) + int32 steps
-                    # The server's logical position is the destination;
-                    # record it so walk-away assertions see real moves.
-                    g["pos"] = (tx, ty)
-                elif code == OD_LINSTEP:
-                    off += 4
-                elif code == OD_LAYERS:
-                    base = struct.unpack("<H", body[off : off + 2])[0]
-                    off += 2
-                    while True:
-                        layer = struct.unpack("<H", body[off : off + 2])[0]
-                        off += 2
-                        if layer == 0xFFFF:
-                            break
-                    # The layered base is the avatar body resource; record
-                    # it so player-gob detection keeps working now that
-                    # players spawn without a plain OD_RES.
-                    g["res"] = self.resids.get(base)
-                elif code == OD_HEALTH:
-                    off += 1
-                elif code == OD_BUDDY:
-                    end = body.index(0, off)
-                    nm = body[off:end].decode(errors="replace")
-                    if not hasattr(self, "buddy_names"):
-                        self.buddy_names = {}
-                    self.buddy_names[gobid] = nm
-                    if nm == self.username:
-                        self.player_gob = gobid
-                    off = end + 3
-                else:
-                    return
-
     # ---- scenario actions --------------------------------------------------
-    def play(self, name):
-        assert self.charlist_id is not None
-        self.send_rel(
-            [
-                bytes([1])
-                + le16(self.charlist_id)
-                + b"play\x00"
-                + bytes([2])
-                + name.encode()
-                + b"\x00"
-                + bytes([0])
-            ]
-        )
-
-    def click_gob(self, gobid, pos):
-        self.wdgmsg(
-            self.mapview_id,
-            "click",
-            bytes([LIST_COORD]) + le32(0) + le32(0)
-            + bytes([LIST_COORD]) + le32(pos[0]) + le32(pos[1])
-            + bytes([LIST_INT]) + le32(1)
-            + bytes([LIST_INT]) + le32(0)
-            + bytes([LIST_INT]) + le32(gobid)
-            + bytes([LIST_COORD]) + le32(pos[0]) + le32(pos[1])
-            + bytes([LIST_END]),
-        )
-
     def walk_to(self, x, y):
-        self.wdgmsg(
-            self.mapview_id,
-            "click",
-            bytes([LIST_COORD]) + le32(0) + le32(0)
-            + bytes([LIST_COORD]) + le32(x) + le32(y)
-            + bytes([LIST_INT]) + le32(1)
-            + bytes([LIST_INT]) + le32(0)
-            + bytes([LIST_END]),
-        )
+        self.click_ground(x, y)
 
     def chat(self, line):
         self.wdgmsg(
@@ -437,9 +147,6 @@ class PartyClient:
             "msg",
             bytes([LIST_STR]) + havstr(line) + bytes([LIST_END]),
         )
-
-    def flower_choice(self, wid, idx=0):
-        self.wdgmsg(wid, "cl", bytes([LIST_INT]) + le32(idx) + bytes([LIST_END]))
 
     def open_sm(self):
         """Return the currently open sm widget id (or None)."""
@@ -456,7 +163,7 @@ class PartyClient:
         for gob, info in sorted(self.gobs.items()):
             if gob == self.player_gob or info["res"] != "gfx/borka/body":
                 continue
-            if name is None or (getattr(self, "buddy_names", {}).get(gob) == name):
+            if name is None or self.buddy_names.get(gob) == name:
                 return gob
         return None
 
@@ -483,32 +190,34 @@ def run_chatbot():
     print("three sessions entered world; area chat widgets present")
 
     # Walk C out of the area radius. Terrain may refuse some directions
-    # (water/mountain), so try several until the server-confirmed
-    # destination (LINBEG endpoint) lands beyond the radius.
+    # (water/mountain), so try several until the client's interpolated
+    # position - the same on-path measure the server's chat filter uses
+    # - crosses beyond the radius plus a safety margin.
     origin = c.my_pos() or (0, 0)
     candidates = [
-        (6000, 0),
-        (0, 6000),
-        (-6000, 0),
-        (0, -6000),
-        (4000, 4000),
-        (-4000, -4000),
-        (4000, -4000),
-        (-4000, 4000),
+        (600, 0),
+        (0, 600),
+        (-600, 0),
+        (0, -600),
+        (425, 425),
+        (-425, -425),
+        (425, -425),
+        (-425, 425),
     ]
+
+    def beyond_radius(p):
+        return (p is not None
+                and (p[0] - origin[0]) ** 2 + (p[1] - origin[1]) ** 2 > 550 ** 2)
+
     moved = False
     for dx, dy in candidates:
         c.walk_to(origin[0] + dx, origin[1] + dy)
-        dest = c.my_pos()
-        if dest is None or dest == origin:
-            c.pump(0.4)
-            dest = c.my_pos()
-        if dest is not None and (dest[0] - origin[0]) ** 2 + (dest[1] - origin[1]) ** 2 > 500 ** 2:
+        if c.wait_for(lambda: beyond_radius(c.my_pos()), 24):
             moved = True
             break
     assert moved, "could not walk the out-of-range client away (pos=%s)" % (c.my_pos(),)
     c.pump(1.0)
-    print("C walked away to", c.my_pos())
+    print("C walked beyond the radius to", c.my_pos())
 
     # A chats: A hears the echo, B hears it, C must not.
     marker_a = "greeting-from-a-%d" % (os.getpid(),)
@@ -645,7 +354,7 @@ def run_partybot():
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "chatbot"
-    server_proc = ensure_server()
+    server_proc = ensure_party_server()
     try:
         if mode == "chatbot":
             run_chatbot()
