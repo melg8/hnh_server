@@ -219,13 +219,20 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    reason: 40-90 s of wall-clock-bound walk hops starve under two
    concurrent boots on the 2-core sandbox. Run explicitly: `cargo
    test --test wire -- --ignored`.
+9. **Load bots never OBJACKed**: CLOSED (session 65). The S64 sweep's
+   "near-zero in the steady state" assumption was FALSE at the 1000-bot
+   scale: the cohort pinned every spawn/finalizer block until retirement,
+   but queue-full refusals never burn attempts, so pending grew to 1.6M
+   and the sweep hit 426 ms (see the S65 entry). The load cohort now
+   echoes batched MSG_OBJACK like the real client, a hard age ceiling
+   and a queue-full throttle bound any peer's table regardless.
 
 ## Session type rotation log (consolidated)
 
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2, 62=3, 63=4, 64=1. All six
+53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2, 62=3, 63=4, 64=1, 65=5. All six
 types have been served - pick freely, but avoid serving the same type as
 the previous session.
 
@@ -290,6 +297,7 @@ the previous session.
 - S62 (type 3): Food Trough lift mechanic - lift menu / carry / place-back / fodder transfer "like a liquid"; carried store persists (save v7 field) and rides cross-node migration (CharData boxed); test_feeding.py wire probe + 5 new unit pins; livestock doc session-62 section.
 - S63 (type 4): wire tier 4 -> 6 - trough lift contract IN the default gate; gathering walking scenario (#[ignore], explicit run); harness: sm menus, chat lines, click_gob/flower_choice, candidate scans, 2-slot concurrency governor, OD_REM decode fix; movement contract retargeted to the clicked point.
 - S64 (type 1): the missing OBJACK retransmission half built - unacked blocks now BTreeMap<frame, UnackedBlock> + per-gob acked high-water mark (Option: frame 0 is real); in-order ~300 ms sweep resends lost spawn/retract/re-render (critical) and finalizer/hp (self-healing) blocks and retires exhausted ones; OD_REM rides max-seen-frame+1 and supersedes the gob history; probe lost_static_spawn_wave_is_retransmitted in the gate; gathering #[ignore] re-labeled (walk length, not spawn loss).
+- S65 (type 5): retransmit death spiral measured and broken - the 1000-bot run showed 1.6M pending blocks and a 426 ms sweep (load bots never OBJACK + no-burn on queue-full refusals = retirement never fires); fixes: retx_* perf attribution, hard age ceiling (10 s), per-session queue-full throttle (1 s skip), expired blocks latch the in-order walk, load bots echo batched MSG_OBJACK like the real client; post-fix mean tick 31-86 ms at 1000 sessions (was 226 ms).
 
 ---
 
@@ -297,89 +305,6 @@ the previous session.
 
 ---
 
-## 2026-10-08 - Session 63 (type 4: test coverage / test pyramid)
-
-SESSION TYPE ROTATION LOG: 59=5, 60=3, 61=2, 62=3, 63=4. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: the last three feature sessions (S58 recipes, S60 gathering,
-S62 trough lift) shipped mechanics with unit pins and python probes
-but ZERO coverage in the black-box wire tier - the only test layer
-that boots the real binary and runs inside `cargo test` without
-python. The gate could regress any of those mechanics silently.
-
-WIRE TIER 4 -> 6:
-
-- trough_lift_place_back_and_fodder_transfer_contract (IN the gate):
-  build pagina "trough" -> plan spawn -> branch sink (whole starter
-  stack, remainder rides the cursor back - the session-51 contract) ->
-  fodder delivery as the completion signal (a 1-stage build keeps sdt
-  at 0, so the delivery IS the only visible completion) -> 5 wheat
-  units one itemact each -> the one-petal "Lift" flower menu ->
-  gob retraction + the carry system line -> place-back with the store
-  -> second trough (2 carrot units) lifted -> the "like a liquid"
-  transfer ("Transferred 2 fodder units."). Every step asserts the
-  system line.
-- world_gathering_picks_yield_drops_exhaust_and_land_in_inventory
-  (#[ignore]; run `cargo test --test wire -- --ignored`): 5 boulder
-  picks each spawn a stone drop, the fifth retracts the boulder, a
-  tree pick drops a branch and the tree survives, clicked drops land
-  in the inventory (stack counts). A walking scenario: the harness
-  approaches REACHABLE candidates one axis per hop (diagonal clicks
-  hit water the axis path avoids) with a LINSTEP-based walk-start
-  detector (a refused path emits no own-gob LINSTEP at all -
-  load-independent).
-
-HARNESS (tests/common/mod.rs):
-- sm flower-menu tracking (petal strings per wid, DSTWDG-pruned),
-  Area Chat lines (the "log" uimsg path system lines ride),
-  click_gob (the (c0, mc, button, modflags, gobid, gobrc) shape),
-  flower_choice, gob candidate scans (prefix/nearest, position
-  verified), cursor_held + take-to-cursor retry loop (an inventory
-  refresh retires wids mid-phase; the take must resolve the LIVE
-  widget or the server refuses silently).
-- OD_REM DECODE FIX: a flag-0 block carrying OD_REM is the removal
-  (bots.rs ObjOp::Remove semantics) - the harness had only ever met
-  flag-1 removals, so retract never registered and the trough lift
-  was invisible. The OD_END byte after OD_REM must still be consumed
-  or the next block parse desyncs.
-- 2-slot concurrency governor (RAII): six servers on the two-core
-  sandbox starve each other's tick loops and lose raw OBJDATA/
-  MAPDATA datagrams (the session-56 localhost-UDP finding); the
-  governor keeps the gate deterministic.
-- movement contract REFINED: the re-click (the real client's
-  behavior when a walk does not start - the mv-phase LINBEG batch
-  rides RAW UDP) retargets from the interpolated position, so the
-  LINBEG target is the clicked MAP POINT (tx ~= 775) and the segment
-  length (tx - sx) is the remaining walk, not 220.
-
-SERVER (observability only): debug! on the harvest paths
-(tree pick / boulder pick / drop spawned) - debug level, no hot-path
-cost, follows the obs-tracing rule.
-
-VERIFIED (fresh runs):
-- Gate: cargo fmt --all -- --check, clippy -D warnings, cargo test
-  --workspace: 300 tests green (11 proto + 274 unit + 5 wire + 1
-  ignored + 9 world) - repeated green runs at the end of the session.
-- test_feeding.py choreography parity: the wire test walks the same
-  steps the S62 probe drives (pagina, sink, load, lift, place,
-  transfer) - both green against the same binary.
-- Gathering wire test: green solo runs recorded mid-session (41s);
-  flaky even solo late in the session (see gap #8) - hence #[ignore]
-  with the documented explicit-run command. The root cause is
-  server-side (no statics re-stream), not test-side.
-
-COMMITS: wire tests + harness + handoff.
-
-NEXT (handoff):
-- Type-1/5 candidate: statics re-stream mechanism (MAPREQ-like
-  re-request or OBJACK-triggered resend) - closes gap #8 and makes
-  the gathering wire test gate-ready.
-- Type-3 candidates: metal chain groundwork (ore + smelter), flower
-  pick verbs, per-animal breed stat rows.
-- Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
-  (no display host), multi-machine cluster profile, CI push when the
-  token gets the scope.
 ## 2026-10-08 - Session 64 (type 1: architecture review)
 
 SESSION TYPE ROTATION LOG: 60=3, 61=2, 62=3, 63=4, 64=1. All six types
@@ -487,6 +412,84 @@ NEXT (handoff):
 - Type-5 candidate: profile the retransmit sweep at the 1000-bot
   scale (it is O(pending) per ~300 ms; expect near-zero in the
   steady state - verify, do not assume).
+- Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
+  (no display host), multi-machine cluster profile, CI push when the
+  token gets the workflow scope.
+
+## 2026-10-08 - Session 65 (type 5: performance)
+
+SESSION TYPE ROTATION LOG: 61=2, 62=3, 63=4, 64=1, 65=5. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the S64 handoff named the one unverified perf claim - "the
+retransmit sweep is O(pending) per ~300 ms; expect near-zero in the
+steady state - verify, do not assume". First step was honesty
+instrumentation: the sweep had no perf attribution at all, only a
+debug! line that fires on resend work.
+
+MEASURED (1000 bots, saturated world, release build, `--perf`):
+
+- `retx_pending` 1 616 372 - NOT near-zero. `retx_sweep_us` 426 860 -
+  the sweep alone cost more than four ticks of budget.
+- `retx_queue_full` 1 382 303 of ~1.6M attempts (85% refusals);
+  `mean_tick_us` 226 529 - the tick budget was broken 2.2x over.
+- Root cause chain: the load-bot cohort never echoed MSG_OBJACK
+  (grep bots.rs: zero hits), so every spawn/finalizer block lived in
+  its session's unacked table until the try-count retirement; BUT the
+  S64 no-burn rule on queue-full refusals meant a saturated session's
+  blocks never retired at all (positive feedback: more pending ->
+  bigger walk -> more refusals -> still no retirement). The S64
+  "near-zero" assumption held for acking clients only.
+
+FIX (one change set, measured first, re-measured after):
+
+- Perf attribution: `retx_sweep_us / retx_pending / retx_resent /
+  retx_queue_full / retx_busy_sessions` per sweep in the perf report -
+  the sweep's cost is now a first-class number, not an inference.
+- Hard age ceiling `RETRANS_MAX_AGE_MS` (10 s from first send): every
+  block retires deterministically regardless of send attempts. A
+  throttled or dead session drains its table; the sweep walk is bounded
+  by the recent past.
+- Per-session backpressure throttle: after a raw-queue-full refusal the
+  session's retransmit pass is skipped for 1 s (`retx_throttle_until`);
+  retries stop firing into a saturated channel, and the walk skips the
+  session wholesale (`busy_sessions` count shows the real depth).
+- Expired blocks latch the gob's in-order walk (`blocked = true`), so
+  no later frame of that gob escapes through the retirement hole.
+- Load bots mirror the real client's SWorker: `parse_objdata` tracks
+  the max decoded frame per gob and the bot echoes one batched
+  MSG_OBJACK datagram every 200 ms (the wire shape the sweep is keyed
+  on). The load cohort now exercises the same retransmission contract
+  the wire harness does - which is what a 1k-player load test MEANS.
+
+POST-FIX (same 1000-bot scenario):
+
+- `retx_pending` 10 010-47 782 (~30x down); `retx_sweep_us`
+  3 355-41 063 (~10-100x down); `retx_queue_full` 98-12 446 (~200x
+  down, and the throttle keeps refusals from compounding).
+- `mean_tick_us` 30 808-86 092 - back INSIDE the 100 ms budget
+  (window max spikes 62-283 ms are the bot-entry spawn burst, already
+  known and windowed by `wmax_tick_us`).
+- `WORLD ENTRY: OK` python probe green against the new binary.
+
+VERIFIED (fresh runs): fmt --check clean; clippy -D warnings clean;
+cargo test --workspace 300 green (11 proto + 274 unit + 6 wire +
+9 world, gathering scenario #[ignore]d as documented). The
+`lost_static_spawn_wave_is_retransmitted` probe still passes - the age
+ceiling (10 s) sits an order above the test's 1.2 s loss window, and
+the throttle cannot fire on a single session with an empty queue.
+
+NOT DONE (deliberate): `Arc<Vec<u8>>` for block bytes would remove the
+deep clone on resend - deferred until the retx_* fields show the clone
+matters (post-fix resends are ~1-20k per sweep, not 114k; verify first,
+do not optimize on vibes).
+
+NEXT (handoff):
+- Type-3 candidates: metal chain groundwork (ore + smelter), flower
+  pick verbs, per-animal breed stat rows.
+- Type-5 candidates: mvbat_fanout_us remains the top single phase at
+  1000 sessions (14-38 ms in the post-fix run) - profile the
+  per-session fan-out walk; entry-burst wmax (283 ms) attribution.
 - Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
   (no display host), multi-machine cluster profile, CI push when the
   token gets the workflow scope.

@@ -4215,3 +4215,77 @@ NEXT (handoff):
 - Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
   (no display host), multi-machine cluster profile, CI push when the
   token gets the scope.
+
+## 2026-10-08 - Session 63 (type 4: test coverage / test pyramid)
+
+SESSION TYPE ROTATION LOG: 59=5, 60=3, 61=2, 62=3, 63=4. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the last three feature sessions (S58 recipes, S60 gathering,
+S62 trough lift) shipped mechanics with unit pins and python probes
+but ZERO coverage in the black-box wire tier - the only test layer
+that boots the real binary and runs inside `cargo test` without
+python. The gate could regress any of those mechanics silently.
+
+WIRE TIER 4 -> 6:
+
+- trough_lift_place_back_and_fodder_transfer_contract (IN the gate):
+  build pagina "trough" -> plan spawn -> branch sink (whole starter
+  stack, remainder rides the cursor back - the session-51 contract) ->
+  fodder delivery as the completion signal (a 1-stage build keeps sdt
+  at 0, so the delivery IS the only visible completion) -> 5 wheat
+  units one itemact each -> the one-petal "Lift" flower menu ->
+  gob retraction + the carry system line -> place-back with the store
+  -> second trough (2 carrot units) lifted -> the "like a liquid"
+  transfer ("Transferred 2 fodder units."). Every step asserts the
+  system line.
+- world_gathering_picks_yield_drops_exhaust_and_land_in_inventory
+  (#[ignore]; run `cargo test --test wire -- --ignored`): 5 boulder
+  picks each spawn a stone drop, the fifth retracts the boulder, a
+  tree pick drops a branch and the tree survives, clicked drops land
+  in the inventory (stack counts). A walking scenario: the harness
+  approaches REACHABLE candidates one axis per hop (diagonal clicks
+  hit water the axis path avoids) with a LINSTEP-based walk-start
+  detector (a refused path emits no own-gob LINSTEP at all -
+  load-independent).
+
+HARNESS (tests/common/mod.rs):
+- sm flower-menu tracking (petal strings per wid, DSTWDG-pruned),
+  Area Chat lines (the "log" uimsg path system lines ride),
+  click_gob (the (c0, mc, button, modflags, gobid, gobrc) shape),
+  flower_choice, gob candidate scans (prefix/nearest, position
+  verified), cursor_held + take-to-cursor retry loop (an inventory
+  refresh retires wids mid-phase; the take must resolve the LIVE
+  widget or the server refuses silently).
+- OD_REM DECODE FIX: a flag-0 block carrying OD_REM is the removal
+  (bots.rs ObjOp::Remove semantics) - the harness had only ever met
+  flag-1 removals, so retract never registered and the trough lift
+  was invisible. The OD_END byte after OD_REM must still be consumed
+  or the next block parse desyncs.
+- 2-slot concurrency governor (RAII): six servers on the two-core
+  sandbox starve each other's tick loops and lose raw OBJDATA/
+  MAPDATA datagrams (the session-56 localhost-UDP finding); the
+  governor keeps the gate deterministic.
+- movement contract REFINED: the re-click (the real client's
+  behavior when a walk does not start - the mv-phase LINBEG batch
+  rides RAW UDP) retargets from the interpolated position, so the
+  LINBEG target is the clicked MAP POINT (tx ~= 775) and the segment
+  length (tx - sx) is the remaining walk, not 220.
+
+SERVER (observability only): debug! on the harvest paths
+(tree pick / boulder pick / drop spawned) - debug level, no hot-path
+cost, follows the obs-tracing rule.
+
+VERIFIED (fresh runs):
+- Gate: cargo fmt --all -- --check, clippy -D warnings, cargo test
+  --workspace: 300 tests green (11 proto + 274 unit + 5 wire + 1
+  ignored + 9 world) - repeated green runs at the end of the session.
+- test_feeding.py choreography parity: the wire test walks the same
+  steps the S62 probe drives (pagina, sink, load, lift, place,
+  transfer) - both green against the same binary.
+- Gathering wire test: green solo runs recorded mid-session (41s);
+  flaky even solo late in the session (see gap #8) - hence #[ignore]
+  with the documented explicit-run command. The root cause is
+  server-side (no statics re-stream), not test-side.
+
+COMMITS: wire tests + harness + handoff.
