@@ -7527,8 +7527,7 @@ async fn trough_build_flow_opens_fodder_store() {
     // Resolve the trough spec index through the registry (ids are
     // stable; positional indices are not - the alloyer insertion
     // shifted them once already).
-    let trough_spec = crate::build::buildable_by_ad("trough")
-        .expect("trough is buildable") as u8;
+    let trough_spec = crate::build::buildable_by_ad("trough").expect("trough is buildable") as u8;
     assert!(
         matches!(
             g.world.gobs.kind[g.world.gobs.get(gob).unwrap()],
