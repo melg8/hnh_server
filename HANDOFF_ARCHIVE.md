@@ -4047,3 +4047,98 @@ NEXT (handoff):
   display host), multi-machine cluster profile, CI push when the
   token gets the scope.
 
+## 2026-10-08 - Session 61 (type 2: refactoring / technical debt)
+
+SESSION TYPE ROTATION LOG: 57=5, 58=3, 59=5, 60=3, 61=2. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the carried gap #3 - migrate the five legacy self-contained
+probes onto the shared hnhlib harness and retire the test_build
+re-export layer. The migration's job was to be PURE (verdict logic
+byte-for-byte), and it was - which is exactly what made the three
+STALE probe contracts it surfaced visible as failures this session.
+
+MIGRATION (scripts/):
+- hnhlib.WireClient absorbed the duplicated shared contracts the
+  legacy clients each re-implemented: Area Chat (chat_id/chat_lines),
+  char sheet (chr_id/exp_seen), cattr compiled values (attrs), party
+  roster (pv_id), DSTWDG bookkeeping (destroyed set + sm cleanup),
+  OD_BUDDY names (buddy_names), the flower-menu sm_args map, LIST_COLOR
+  arg decoding. ensure_server gained env_extra/save_path parameters
+  (scenario clocks, per-run saves) - the default behavior is
+  unchanged.
+- probe_animals, probe_direction: subclass WireClient with their own
+  parse_objdata pre-pass for the pose-level event logs they verdict on
+  (first spawn LAYERS per gob, walking streams, overlays); the base
+  class keeps the gob-state tracking.
+- test_farming: FarmClient is now a 20-line WireClient subclass (tile
+  helpers + request_chr=False to keep the historical wire shape); the
+  fast-crop server boot rides ensure_server(env_extra, save_path).
+- test_party_chat: PartyClient = WireClient + party record hook +
+  client-side LINBEG/LINSTEP interpolation (see the stale-contract
+  fix below). parse_party stays party-domain.
+- test_build: the 60-name re-export block is gone (the file keeps
+  BuildClient + its own CLI); probe_melee/probe_pvp/test_equip import
+  from hnhlib directly, probe_station aliases hnhlib as tb (its own
+  parser is carried - a separate, larger migration), probe_plow takes
+  le32 from hnhlib.
+- dump_paginae.py DELETED: it speaks the pre-session-2 TCP game
+  protocol ("hlauhunk" to port 1870, now UDP-only) and dies with
+  ConnectionRefused against any server since the UDP switch -
+  verified, not assumed. README: legacy section removed, the
+  "Adding a probe" recipe documents the on_objdata pre-pass pattern
+  and every shared contract WireClient already tracks.
+
+STALE CONTRACTS FIXED (each proven pre-existing by running the
+pre-migration script from git before touching the verdict):
+- test_party_chat chatbot walked C to a LINBEG DESTINATION and judged
+  distance by it - but the server has been reporting the ON-PATH
+  interpolated position since the session-20 movement fidelity fix
+  (game/interact.rs "never the destination ahead of time"), so the
+  out-of-range client was still inside the 500-subtile chat radius
+  when the marker fired. The probe now interpolates LINSTEP progress
+  client-side and walks C beyond radius+margin before chatting.
+- probe_direction expected the movement-octant digit, but session 22
+  introduced the art-ring offset (art_dir = (octant + 7) & 7,
+  unit-pinned); the probe now expects the art digit and prints both.
+- test_equip equipbot resolved the branch item ONCE by resource name;
+  after the unequip round trip the refresh_inventory recreate lagged
+  DSTWDG on the wire and the resolved wid was the dying cursor copy -
+  the epry drop then ran with an empty hand. equip_item now re-resolves
+  and retries the take/drop round trip until the `set` confirms.
+- probe_station + probe_drop: the kit's stone stack grew to 6 (bow
+  chain, session 36) while the plan demand is 2 - the remainder rode
+  the drag cursor and blocked the branch take (the session-51 cursor
+  return contract, applied to test_build but never to these two).
+  Both now return the cursor after each sink.
+- probe_plow: PlowProbe.mapreq(gc) shadowed WireClient.mapreq(gx, gy)
+  and crashed on the shared mapview bind; renamed to mapreq_grid.
+
+VERIFICATION (every line is a fresh run this session):
+- 293 cargo tests green (11 proto + 269 unit + 4 wire + 9 world);
+  fmt + clippy -D warnings clean (no Rust changes this session).
+- Probe battery, single node: WORLD ENTRY: OK, CATTR ORDER: OK,
+  FARMING FLOW: OK, SKILL GATE: OK, CHAT FLOW: OK, PARTY FLOW: OK,
+  DIRECTION WIRE: OK, ANIMALS WIRE: OK (330 layered animals, 115
+  walking streams, bite overlays), BUILD FLOW: OK, STATION FLOW: OK,
+  EQUIP FLOW: OK, EQUIP PERSIST: OK (server restart + slot-5
+  restore), MELEE WIRE: OK, PVP WIRE: OK (arrow 75 dmg, HP 1/4).
+- Probe battery, 2-node cluster (mesh 18790/18791): STATION RELAY:
+  OK (fuel+input+light+output through the guest path), DROP TRANSFER:
+  OK (output drop crossed the boundary and was picked up LOCALLY on
+  node 0), PLOW RELAY: OK (TileMutation through the authority node),
+  GUEST WALK: OK (four legs across peer-owned cells).
+- One chatbot run failed on the sender echo (single UDP wdgmsg loss -
+  the python probes have no client-side retransmit; the wire.rs tier
+  does). Re-run green; recording as known test-harness flake.
+
+COMMITS: scripts consolidation + probe fixes + docs + this handoff.
+
+NEXT (handoff):
+- probe_station's StationProbeClient still carries its own transport
+  parser (aliased as tb); moving it onto WireClient is the remaining
+  mechanical step when a session wants another type-2 item.
+- Carried: feeding lift, metal chain groundwork, five-probe follow-ups
+  none, GL e2e + Windows smoke (no display host), multi-machine
+  cluster profile, CI push when the token gets the scope.
+

@@ -134,6 +134,10 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
   on ephemeral ports, speaks the real protocol: auth, bootstrap,
   REQUIRED_CATTR set, MAPDATA, movement LINBEG/LINSTEP, build flow).
   Needs no gameres, no python. fmt + clippy -D warnings clean.
+  Session 63: 300 tests (11 proto + 274 unit + 6 wire + 9 world) - the
+  wire tier grew to 6: trough lift (in the gate) and the gathering
+  walking scenario (#[ignore], run with `cargo test --test wire --
+  --ignored`).
 - Python scenario probes (server/scripts/): WORLD ENTRY, CATTR ORDER,
   MOVE, DIRECTION, ANIMALS, MELEE/PVP, STATION, BUILD FLOW, FARMING,
   EQUIP, PARTY/CHAT, NEWCRAFT, GATHER on the shared hnhlib.py harness
@@ -159,8 +163,8 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 
 1. **CI**: `.github/workflows/rust.yml` (fmt, clippy -D warnings, cargo
    test --workspace on push/PR) could not be pushed - the PAT lacks the
-   `workflow` scope (session 50; retried in 53/55/56/57/61, see those
-   entries). The full file content is preserved in the archive
+   `workflow` scope (session 50; retried in 53/55/56/57/61/63, see
+   those entries). The full file content is preserved in the archive
    (session-50 addendum). Retry the push every session; a green local
    run stays mandatory.
 2. **Pair-work fan-out at scale**: MEASURED (session 59). The fan-out
@@ -207,15 +211,27 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    p95 <= 314 us with 646-984 guests per node at 2x300 - two orders
    below anything actionable. Do not revisit without a multi-node
    profile that shows phase_cluster in the milliseconds.
+8. **Gathering wire test stability**: OPEN (session 63). The
+   walking-scenario test
+   (world_gathering_picks_yield_drops_exhaust_and_land_in_inventory)
+   is #[ignore]d in the default suite: even solo it races the statics
+   stream - raw OBJDATA spawn frames are lost under load (the
+   session-56 finding; a lost spawn is unrecoverable - the client
+   never re-requests statics) and the 2x-VIEW retract sweep clears
+   streamed candidates mid-test. A durable fix is a server-side
+   re-stream mechanism for statics (a MAPREQ-like re-request or an
+   OBJACK-triggered resend) - a type-1/type-5 session item, not a
+   test-side hack. The trough lift wire test IS in the default gate
+   (stable across runs).
 
 ## Session type rotation log (consolidated)
 
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2, 62=3. All six types
-have been served - pick freely, but avoid serving the same type as the
-previous session.
+53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2, 62=3, 63=4. All six
+types have been served - pick freely, but avoid serving the same type as
+the previous session.
 
 ## Session index (one line each; full entries in the archive)
 
@@ -276,107 +292,13 @@ previous session.
 - S60 (type 3): world gathering - trees yield branch picks (TREE_HARVESTS = 5, then a decorative Stump), boulders yield stone picks (BOULDER_STONES = 5, then gone); the dead 'wood x10' drop and the clickable-stump bug are gone; shared pick legs for local + relay paths; test_gather.py wire probe + crafting-and-building.md "World gathering" section.
 - S61 (type 2): probe corpus consolidated on hnhlib - the five legacy self-contained scripts migrated/deleted, test_build re-exports removed; three stale probe contracts surfaced and fixed (chatbot walk-away distance, direction art-ring offset, equipbot item-wid staleness, station/drop cursor return); dead dump_paginae removed.
 - S62 (type 3): Food Trough lift mechanic - lift menu / carry / place-back / fodder transfer "like a liquid"; carried store persists (save v7 field) and rides cross-node migration (CharData boxed); test_feeding.py wire probe + 5 new unit pins; livestock doc session-62 section.
+- S63 (type 4): wire tier 4 -> 6 - trough lift contract IN the default gate; gathering walking scenario (#[ignore], explicit run); harness: sm menus, chat lines, click_gob/flower_choice, candidate scans, 2-slot concurrency governor, OD_REM decode fix; movement contract retargeted to the clicked point.
 
 ---
 
 ---
 
 ---
-
-## 2026-10-08 - Session 61 (type 2: refactoring / technical debt)
-
-SESSION TYPE ROTATION LOG: 57=5, 58=3, 59=5, 60=3, 61=2. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: the carried gap #3 - migrate the five legacy self-contained
-probes onto the shared hnhlib harness and retire the test_build
-re-export layer. The migration's job was to be PURE (verdict logic
-byte-for-byte), and it was - which is exactly what made the three
-STALE probe contracts it surfaced visible as failures this session.
-
-MIGRATION (scripts/):
-- hnhlib.WireClient absorbed the duplicated shared contracts the
-  legacy clients each re-implemented: Area Chat (chat_id/chat_lines),
-  char sheet (chr_id/exp_seen), cattr compiled values (attrs), party
-  roster (pv_id), DSTWDG bookkeeping (destroyed set + sm cleanup),
-  OD_BUDDY names (buddy_names), the flower-menu sm_args map, LIST_COLOR
-  arg decoding. ensure_server gained env_extra/save_path parameters
-  (scenario clocks, per-run saves) - the default behavior is
-  unchanged.
-- probe_animals, probe_direction: subclass WireClient with their own
-  parse_objdata pre-pass for the pose-level event logs they verdict on
-  (first spawn LAYERS per gob, walking streams, overlays); the base
-  class keeps the gob-state tracking.
-- test_farming: FarmClient is now a 20-line WireClient subclass (tile
-  helpers + request_chr=False to keep the historical wire shape); the
-  fast-crop server boot rides ensure_server(env_extra, save_path).
-- test_party_chat: PartyClient = WireClient + party record hook +
-  client-side LINBEG/LINSTEP interpolation (see the stale-contract
-  fix below). parse_party stays party-domain.
-- test_build: the 60-name re-export block is gone (the file keeps
-  BuildClient + its own CLI); probe_melee/probe_pvp/test_equip import
-  from hnhlib directly, probe_station aliases hnhlib as tb (its own
-  parser is carried - a separate, larger migration), probe_plow takes
-  le32 from hnhlib.
-- dump_paginae.py DELETED: it speaks the pre-session-2 TCP game
-  protocol ("hlauhunk" to port 1870, now UDP-only) and dies with
-  ConnectionRefused against any server since the UDP switch -
-  verified, not assumed. README: legacy section removed, the
-  "Adding a probe" recipe documents the on_objdata pre-pass pattern
-  and every shared contract WireClient already tracks.
-
-STALE CONTRACTS FIXED (each proven pre-existing by running the
-pre-migration script from git before touching the verdict):
-- test_party_chat chatbot walked C to a LINBEG DESTINATION and judged
-  distance by it - but the server has been reporting the ON-PATH
-  interpolated position since the session-20 movement fidelity fix
-  (game/interact.rs "never the destination ahead of time"), so the
-  out-of-range client was still inside the 500-subtile chat radius
-  when the marker fired. The probe now interpolates LINSTEP progress
-  client-side and walks C beyond radius+margin before chatting.
-- probe_direction expected the movement-octant digit, but session 22
-  introduced the art-ring offset (art_dir = (octant + 7) & 7,
-  unit-pinned); the probe now expects the art digit and prints both.
-- test_equip equipbot resolved the branch item ONCE by resource name;
-  after the unequip round trip the refresh_inventory recreate lagged
-  DSTWDG on the wire and the resolved wid was the dying cursor copy -
-  the epry drop then ran with an empty hand. equip_item now re-resolves
-  and retries the take/drop round trip until the `set` confirms.
-- probe_station + probe_drop: the kit's stone stack grew to 6 (bow
-  chain, session 36) while the plan demand is 2 - the remainder rode
-  the drag cursor and blocked the branch take (the session-51 cursor
-  return contract, applied to test_build but never to these two).
-  Both now return the cursor after each sink.
-- probe_plow: PlowProbe.mapreq(gc) shadowed WireClient.mapreq(gx, gy)
-  and crashed on the shared mapview bind; renamed to mapreq_grid.
-
-VERIFICATION (every line is a fresh run this session):
-- 293 cargo tests green (11 proto + 269 unit + 4 wire + 9 world);
-  fmt + clippy -D warnings clean (no Rust changes this session).
-- Probe battery, single node: WORLD ENTRY: OK, CATTR ORDER: OK,
-  FARMING FLOW: OK, SKILL GATE: OK, CHAT FLOW: OK, PARTY FLOW: OK,
-  DIRECTION WIRE: OK, ANIMALS WIRE: OK (330 layered animals, 115
-  walking streams, bite overlays), BUILD FLOW: OK, STATION FLOW: OK,
-  EQUIP FLOW: OK, EQUIP PERSIST: OK (server restart + slot-5
-  restore), MELEE WIRE: OK, PVP WIRE: OK (arrow 75 dmg, HP 1/4).
-- Probe battery, 2-node cluster (mesh 18790/18791): STATION RELAY:
-  OK (fuel+input+light+output through the guest path), DROP TRANSFER:
-  OK (output drop crossed the boundary and was picked up LOCALLY on
-  node 0), PLOW RELAY: OK (TileMutation through the authority node),
-  GUEST WALK: OK (four legs across peer-owned cells).
-- One chatbot run failed on the sender echo (single UDP wdgmsg loss -
-  the python probes have no client-side retransmit; the wire.rs tier
-  does). Re-run green; recording as known test-harness flake.
-
-COMMITS: scripts consolidation + probe fixes + docs + this handoff.
-
-NEXT (handoff):
-- probe_station's StationProbeClient still carries its own transport
-  parser (aliased as tb); moving it onto WireClient is the remaining
-  mechanical step when a session wants another type-2 item.
-- Carried: feeding lift, metal chain groundwork, five-probe follow-ups
-  none, GL e2e + Windows smoke (no display host), multi-machine
-  cluster profile, CI push when the token gets the scope.
 
 ## 2026-10-08 - Session 62 (type 3: new functionality)
 
@@ -448,6 +370,90 @@ COMMITS: trough lift mechanic + probe + docs + this handoff.
 NEXT (handoff):
 - Type-3 candidates: metal chain groundwork (ore gathering + smelter
   numbers), flower-menu pick verbs, per-animal breed stat rows.
+- Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
+  (no display host), multi-machine cluster profile, CI push when the
+  token gets the scope.
+
+## 2026-10-08 - Session 63 (type 4: test coverage / test pyramid)
+
+SESSION TYPE ROTATION LOG: 59=5, 60=3, 61=2, 62=3, 63=4. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the last three feature sessions (S58 recipes, S60 gathering,
+S62 trough lift) shipped mechanics with unit pins and python probes
+but ZERO coverage in the black-box wire tier - the only test layer
+that boots the real binary and runs inside `cargo test` without
+python. The gate could regress any of those mechanics silently.
+
+WIRE TIER 4 -> 6:
+
+- trough_lift_place_back_and_fodder_transfer_contract (IN the gate):
+  build pagina "trough" -> plan spawn -> branch sink (whole starter
+  stack, remainder rides the cursor back - the session-51 contract) ->
+  fodder delivery as the completion signal (a 1-stage build keeps sdt
+  at 0, so the delivery IS the only visible completion) -> 5 wheat
+  units one itemact each -> the one-petal "Lift" flower menu ->
+  gob retraction + the carry system line -> place-back with the store
+  -> second trough (2 carrot units) lifted -> the "like a liquid"
+  transfer ("Transferred 2 fodder units."). Every step asserts the
+  system line.
+- world_gathering_picks_yield_drops_exhaust_and_land_in_inventory
+  (#[ignore]; run `cargo test --test wire -- --ignored`): 5 boulder
+  picks each spawn a stone drop, the fifth retracts the boulder, a
+  tree pick drops a branch and the tree survives, clicked drops land
+  in the inventory (stack counts). A walking scenario: the harness
+  approaches REACHABLE candidates one axis per hop (diagonal clicks
+  hit water the axis path avoids) with a LINSTEP-based walk-start
+  detector (a refused path emits no own-gob LINSTEP at all -
+  load-independent).
+
+HARNESS (tests/common/mod.rs):
+- sm flower-menu tracking (petal strings per wid, DSTWDG-pruned),
+  Area Chat lines (the "log" uimsg path system lines ride),
+  click_gob (the (c0, mc, button, modflags, gobid, gobrc) shape),
+  flower_choice, gob candidate scans (prefix/nearest, position
+  verified), cursor_held + take-to-cursor retry loop (an inventory
+  refresh retires wids mid-phase; the take must resolve the LIVE
+  widget or the server refuses silently).
+- OD_REM DECODE FIX: a flag-0 block carrying OD_REM is the removal
+  (bots.rs ObjOp::Remove semantics) - the harness had only ever met
+  flag-1 removals, so retract never registered and the trough lift
+  was invisible. The OD_END byte after OD_REM must still be consumed
+  or the next block parse desyncs.
+- 2-slot concurrency governor (RAII): six servers on the two-core
+  sandbox starve each other's tick loops and lose raw OBJDATA/
+  MAPDATA datagrams (the session-56 localhost-UDP finding); the
+  governor keeps the gate deterministic.
+- movement contract REFINED: the re-click (the real client's
+  behavior when a walk does not start - the mv-phase LINBEG batch
+  rides RAW UDP) retargets from the interpolated position, so the
+  LINBEG target is the clicked MAP POINT (tx ~= 775) and the segment
+  length (tx - sx) is the remaining walk, not 220.
+
+SERVER (observability only): debug! on the harvest paths
+(tree pick / boulder pick / drop spawned) - debug level, no hot-path
+cost, follows the obs-tracing rule.
+
+VERIFIED (fresh runs):
+- Gate: cargo fmt --all -- --check, clippy -D warnings, cargo test
+  --workspace: 300 tests green (11 proto + 274 unit + 5 wire + 1
+  ignored + 9 world) - repeated green runs at the end of the session.
+- test_feeding.py choreography parity: the wire test walks the same
+  steps the S62 probe drives (pagina, sink, load, lift, place,
+  transfer) - both green against the same binary.
+- Gathering wire test: green solo runs recorded mid-session (41s);
+  flaky even solo late in the session (see gap #8) - hence #[ignore]
+  with the documented explicit-run command. The root cause is
+  server-side (no statics re-stream), not test-side.
+
+COMMITS: wire tests + harness + handoff.
+
+NEXT (handoff):
+- Type-1/5 candidate: statics re-stream mechanism (MAPREQ-like
+  re-request or OBJACK-triggered resend) - closes gap #8 and makes
+  the gathering wire test gate-ready.
+- Type-3 candidates: metal chain groundwork (ore + smelter), flower
+  pick verbs, per-animal breed stat rows.
 - Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
   (no display host), multi-machine cluster profile, CI push when the
   token gets the scope.
