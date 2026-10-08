@@ -233,7 +233,7 @@ Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
 53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2, 62=3, 63=4, 64=1, 65=5,
-66=3, 67=4. All six
+66=3, 67=4, 68=5. All six
 types have been served - pick freely, but avoid serving the same type as
 the previous session.
 
@@ -303,6 +303,13 @@ the previous session.
   rocky belt, the smelter becomes a working station (StationKind dispatch, SMELT_MAP
   ore -> bars), refinement tier from the shipped bloom2wrought/shammer paginae
   (castiron -> wrought iron -> smithy's hammer); test_smelt.py wire probe, 306 green.
+- S67 (type 4): GitNexus deployed; bronze world-shape fix; hnhlib navigation
+  layer (mapdata reassembly, BFS find_tile_path, nav_walk); MAPDATA pktid fix
+  (monotonic mapdata_seq); test_smelt.py rewrite (copper leg stable, tin reach
+  oscillation open); 307 green.
+- S68 (type 5): fan-out pair attribution + wmax phase snapshot instrumented
+  the two named S65 candidates and fixed them (visible bitset fast path,
+  ack-lag adaptive retx RTO, conditional retire pass) - see the S68 entry.
 
 ---
 ## 2026-10-08 - Session 65 (type 5: performance)
@@ -564,3 +571,91 @@ NEXT (handoff):
 
 COMMITS: 318e215 (gitnexus), 80f12e0 (bronze shape), + this session's
 mapdata pktid fix, rcvbuf, nav harness, probe rewrite, docs.
+
+---
+## 2026-10-08 - Session 68 (type 5: performance)
+
+SESSION TYPE ROTATION LOG: 64=1, 65=5, 66=3, 67=4, 68=5. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the S65/S67 handoffs named two type-5 candidates - mvbat_fanout_us
+(the top single phase at 1000 sessions) and the entry-burst wmax (283 ms)
+attribution. Both were fixed this session behind first-step instrumentation
+(perf-profile-first: attribute, then cut).
+
+INSTRUMENTED BASELINE (1000 bots, saturated world, release build; the
+attribution commit efbddb1 produced these):
+
+- fanout_pairs 347K vs fanout_hits 183K per tick: 53% of the pair work
+  is a visible-set HashSet probe that ends in a REJECT (scattered
+  FxHashSet bucket walk per (session, block) pair); fanout_fin only 19K
+  (finalizer copies are NOT the dominant cost); fanout_msgs ~2000.
+- mvbat_fanout_us 8-62 ms steady; mean_tick_us 71-92 ms.
+- wmax attribution (the new snapshot): wmax_retx_sweep_us 85-107 ms -
+  the RETRANSMIT SWEEP owns the entry-burst spikes (wmax_tick 188-208
+  ms), not the fan-out (wmax_mvbat_fanout 22-27 ms). The sweep's
+  retx_resent hit 44-73K blocks per pass with retx_pending 158-538K:
+  the 80 ms first-retry schedule expires BEFORE the load bots' batched
+  200 ms OBJACK lands, so every in-flight block reads as lost once and
+  is resent (each with a deep bytes clone). The S65 "post-fix" numbers
+  were measured on a smaller cohort; at a full 1000 the artificial-loss
+  storm returns through the ack lag, not the missing OBJACK echo.
+
+FIX (commit 20a96d4, one change set):
+
+- SessionOut.visible_bits: a slot-index bitset mirror of the visible
+  set (GobId packs the slot into the low 16 bits; a live gob owns its
+  slot exclusively, so the mirror is exact when updated at the same
+  three sites that mutate `visible` - spawn stream.rs, retract
+  stream.rs, guest spawn cluster.rs). The fan-out pair loop probes one
+  aligned word (~1 L1 load) instead of hashing into the scattered set;
+  the authoritative set re-checks every bit-set pair, so a stale bit
+  costs one probe, never a wrong send. Pinned by the
+  visible_bitset_mirror_tracks_the_set unit test (direct method
+  contract + live-path invariant after entry ticks).
+- Ack-lag adaptive RTO: on_objack samples now - last_sent of the
+  highest newly-confirmed block into an EMA (ack_lag_ema_ms); the sweep
+  floors a block's FIRST retry at 2x the peer's mean lag (capped 4 s;
+  tries > 0 keep the legacy schedule). A peer that acks in 200 ms
+  batches no longer has its in-flight blocks retried at 80 ms. Fast
+  ackers (lag < 40 ms) keep the legacy behavior unchanged.
+- Retire pass (the second full O(pending) retain walk) now runs only
+  when the main walk SAW an expired block (expired_n counter).
+
+POST-FIX (same 1000-bot scenario, fresh runs):
+
+- mean_tick_us 52-78 ms (was 71-92); wmax_tick_us 90-183 ms (was
+  188-208); wmax_retx_sweep_us 22-85 ms (was 85-107).
+- retx_resent 18-44K per pass (was 44-73K); retx_pending 54-165K (was
+  158-538K); queue_full refusals mostly single digits after the burst
+  (was 14-61K spikes).
+- mvbat_fanout_us 3.5-43 ms band (was 8-62); hit ratio 42% of pairs
+  (was 53%) - the bitset rejects the non-visible majority cheaply.
+
+VERIFIED (fresh runs): fmt --check clean; clippy --all-targets -D
+warnings clean; cargo test --workspace 308 green (11 proto + 281 unit
+[incl. the new bitset pin] + 6 wire + 10 world). WORLD ENTRY: OK +
+CATTR ORDER: OK on the final binary (python probe).
+
+NOT DONE (deliberate, measured out of scope for the remaining budget):
+- UnackedBlock.bytes as Arc<Vec<u8>> only pays if the raw channel
+  carries Arcs too (a Vec channel forces the deep clone on resend
+  regardless); with the ack-lag RTO the resend count fell ~2x already -
+  revisit only if retx_resent climbs again.
+- Budget-capped incremental sweep (round-robin cursor): the residual
+  wmax_retx spikes (up to 85 ms during the worst entry window) are the
+  next type-5 candidate if they persist after the RTO settles in.
+
+NEXT (handoff):
+- Type-5 candidates: budget-capped incremental retx sweep (cursor +
+  per-sweep budget) for the residual entry-burst spikes;
+  mvbat_fanout_us is now 3.5-43 ms - re-rank before cutting again.
+- Type-3 candidates (from S66/S67): kiln + brick chain, anvil +
+  tool-gated recipes, flower pick verbs, per-animal breed stat rows.
+- Finish test_smelt.py tin leg (S67 finding; smelter/crucible phases
+  are written and waiting).
+- Carried: GL e2e + Windows smoke; multi-machine cluster profile; CI
+  push when the token gets the workflow scope.
+
+COMMITS: efbddb1 (fan-out pair attribution + wmax snapshot),
+20a96d4 (bitset fast path + ack-lag RTO + conditional retire).
