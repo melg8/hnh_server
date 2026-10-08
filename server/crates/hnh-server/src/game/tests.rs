@@ -5038,6 +5038,53 @@ fn set_inv(g: &mut Game, stacks: &[(&'static str, u32, u8)]) {
         .collect();
 }
 
+/// Session 66 refinement tier, end to end through craft_once: the
+/// smelted cast-iron bar refines into wrought iron (the shipped
+/// bloom2wrought pagina, the finery-forge stand-in), and the bar +
+/// branch make the smithy's hammer (shammer pagina). Quality chain:
+/// cast iron q40 -> wrought (10+40)/2 = 25; hammer (25 + 10)/2 = 17
+/// -> softcap (10 + 17)/2 = 13.
+#[tokio::test]
+async fn metal_refinement_chain_crafts_bar_and_hammer() {
+    let (mut g, _rx, _raw) = entered_game("metalref");
+    set_inv(
+        &mut g,
+        &[
+            ("gfx/invobjs/bar-castiron", 2, 40),
+            ("gfx/invobjs/branch", 2, 10),
+        ],
+    );
+    assert!(g.craft_once(1, "wroughtiron"), "cast iron refines");
+    {
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let bar = g.world.res.intern("gfx/invobjs/bar-wroughtiron");
+        let s = g.world.players[pidx]
+            .inv
+            .iter()
+            .find(|s| s.res == bar)
+            .expect("wrought-iron bar in inventory");
+        assert_eq!(s.count, 1);
+        assert_eq!(s.ql, 25, "cast iron q40 softcapped by str 10 -> 25");
+    }
+    assert!(g.craft_once(1, "shammer"), "bar + branch make the hammer");
+    {
+        let pidx = *g.world.by_session.get(&1).unwrap();
+        let bar = g.world.res.intern("gfx/invobjs/bar-wroughtiron");
+        let hammer = g.world.res.intern("gfx/invobjs/hammer-smithys");
+        assert!(
+            !g.world.players[pidx].inv.iter().any(|s| s.res == bar),
+            "the bar is consumed"
+        );
+        let h = g.world.players[pidx]
+            .inv
+            .iter()
+            .find(|s| s.res == hammer)
+            .expect("hammer in inventory");
+        assert_eq!(h.ql, 13, "hammer quality follows the weighted chain");
+        assert_eq!(h.count, 1);
+    }
+}
+
 /// Session 58 breadth batch. The leather chain: hides (animal loot)
 /// tan into leather through the tanhide fork page, and the shipped
 /// leather-tier pages consume it. Quality: 4 hides at q40 average the

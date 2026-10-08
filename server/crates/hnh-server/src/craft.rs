@@ -617,6 +617,39 @@ pub const RECIPES: &[Recipe] = &[
         tool: None,
         q_weights: &[1, 1],
     },
+    // Session 66 metal-chain refinement tier, on top of the ore ->
+    // bar smelting leg. The SHIPPED pagina bloom2wrought (ad
+    // "wroughtiron") refines cast iron into wrought iron - legacy ran
+    // this step on a finery forge; a hand-craft entry is the
+    // tanhide-pattern stand-in until that station exists. Unit count
+    // 1:1 is server policy (Open questions).
+    Recipe {
+        id: "wroughtiron",
+        name: "Wrought Iron",
+        inputs: &[("gfx/invobjs/bar-castiron", 1)],
+        outputs: &[("gfx/invobjs/bar-wroughtiron", 1)],
+        pagina: "paginae/craft/bloom2wrought",
+        softcap_attr: "str",
+        tool: None,
+        q_weights: &[],
+    },
+    // Smithy's Hammer: the first metal tool (paginae/craft/shammer,
+    // ad "shammer"; gfx/invobjs/hammer-smithys ships). A wrought-iron
+    // bar + a branch handle; the anvil-era recipes will tool-gate on
+    // it through the session-46 plumbing later.
+    Recipe {
+        id: "shammer",
+        name: "Smithy's Hammer",
+        inputs: &[
+            ("gfx/invobjs/bar-wroughtiron", 1),
+            ("gfx/invobjs/branch", 1),
+        ],
+        outputs: &[("gfx/invobjs/hammer-smithys", 1)],
+        pagina: "paginae/craft/shammer",
+        softcap_attr: "str",
+        tool: None,
+        q_weights: &[1, 1],
+    },
 ];
 
 /// Raw -> roasted meat mapping for the `roast` recipe (paginae/craft/roastmeat,
@@ -849,6 +882,50 @@ Peapod=STR:0.1 PER:0.9
         }
         assert_eq!(smelt_result("Stone"), None);
         assert_eq!(smelt_result("Beef"), None);
+    }
+
+    /// Session 66 refinement tier (on top of the ore -> bar smelting
+    /// leg): the shipped bloom2wrought pagina refines a cast-iron bar
+    /// into wrought iron, and the shammer pagina turns a wrought-iron
+    /// bar + branch into the smithy's hammer. Both paginae and both
+    /// output items ship with the pack (skip the filesystem pins when
+    /// the pack is absent - the quiver-test pattern).
+    #[test]
+    fn wrought_iron_and_hammer_recipes_are_wired() {
+        let refine = RECIPES
+            .iter()
+            .find(|r| r.id == "wroughtiron")
+            .expect("the wroughtiron recipe must be registered");
+        assert_eq!(
+            refine.inputs,
+            &[("gfx/invobjs/bar-castiron", 1)],
+            "cast iron is the refinement input"
+        );
+        assert_eq!(refine.outputs, &[("gfx/invobjs/bar-wroughtiron", 1)]);
+        assert_eq!(refine.pagina, "paginae/craft/bloom2wrought");
+        assert_eq!(refine.softcap_attr, "str");
+
+        let hammer = RECIPES
+            .iter()
+            .find(|r| r.id == "shammer")
+            .expect("the shammer recipe must be registered");
+        assert_eq!(
+            hammer.inputs,
+            &[
+                ("gfx/invobjs/bar-wroughtiron", 1),
+                ("gfx/invobjs/branch", 1)
+            ]
+        );
+        assert_eq!(hammer.outputs, &[("gfx/invobjs/hammer-smithys", 1)]);
+        assert_eq!(hammer.pagina, "paginae/craft/shammer");
+
+        let pack = std::path::Path::new("../../gameres");
+        if pack.is_dir() {
+            assert!(pack.join("paginae/craft/bloom2wrought.res").exists());
+            assert!(pack.join("paginae/craft/shammer.res").exists());
+            assert!(pack.join("gfx/invobjs/bar-wroughtiron.res").exists());
+            assert!(pack.join("gfx/invobjs/hammer-smithys.res").exists());
+        }
     }
 
     /// Session 36: the three new recipes resolve, carry RoB-verified

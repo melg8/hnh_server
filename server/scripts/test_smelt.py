@@ -264,6 +264,29 @@ def smelt(c, plan, mc, ore_res):
     return want_label
 
 
+def refine_to_wrought_iron(c, bar_label):
+    """Session 66 refinement leg: a cast-iron bar refines into wrought
+    iron through the shipped bloom2wrought pagina (real make widget).
+    Only runs when the smelter produced cast iron (the iron-ore leg);
+    copper/tin bars stop at the smelting leg."""
+    if bar_label != "Bar of Cast Iron":
+        print("refinement skipped (%s is not iron)" % bar_label)
+        return
+    c.menu_act("craft", "wroughtiron")
+    ok = c.wait_for(lambda: any(n == "make" for n in c.widgets.values()), 8)
+    assert ok, "no make widget for wroughtiron"
+    make_wid = max(w for w, n in c.widgets.items() if n == "make")
+    c.pump(0.3)
+    c.wdgmsg(make_wid, "make", bytes([1]) + (0).to_bytes(4, "little") + bytes([0]))
+    ok = c.wait_for(
+        lambda: c.find_item_by_res("gfx/invobjs/bar-wroughtiron") is not None, 8
+    )
+    assert ok, "wrought-iron bar never reached the inventory (items=%s)" % (
+        [(i["res"], i["tt"]) for i in c.item_info.values()],
+    )
+    print("WROUGHT IRON: OK")
+
+
 def main():
     username = sys.argv[1] if len(sys.argv) > 1 else "smelt"
     server_proc = ensure_server()
@@ -273,6 +296,7 @@ def main():
         ore_res = mine_one_ore(c)
         plan, mc = build_smelter(c)
         label = smelt(c, plan, mc, ore_res)
+        refine_to_wrought_iron(c, label)
         c.sock.close()
         print("SMELT: OK (ore pick, smelter build, %s smelted)" % label)
     finally:
