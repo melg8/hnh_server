@@ -891,7 +891,8 @@ Peapod=STR:0.1 PER:0.9
             !crate::resources::RES_DIR.get().is_some()
                 || crate::resources::served(&own)
                 || crate::game::drop_world_alias(base).is_some(),
-            "{}: no world shape and no alias", ALLOY_OUTPUT.0
+            "{}: no world shape and no alias",
+            ALLOY_OUTPUT.0
         );
     }
 

@@ -37,7 +37,12 @@ impl Game {
         };
         // Announce new RESIDs from freshly spawned content, then spawn.
         if let Some(out) = self.sessions.get_mut(&sid) {
-            let pktid = (self.world.tick & 0x3FFFFFFF) as i32;
+            // Unique per grid payload: clients reassemble fragments by
+            // pktid, and the 3x3 bootstrap sends several MAPREQs in one
+            // tick - a tick-derived id would interleave those grids'
+            // fragments into undecodable streams.
+            self.mapdata_seq = self.mapdata_seq.wrapping_add(1);
+            let pktid = (self.mapdata_seq & 0x3FFF_FFFF) as i32;
             let frags = hnh_proto::fragment_payload(MSG_MAPDATA, pktid, &payload, 1200);
             for f in frags {
                 out.send_raw(f);

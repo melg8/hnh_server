@@ -34,6 +34,8 @@ import struct
 import subprocess
 import sys
 import time
+import zlib
+from collections import deque
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BIN = os.path.join(REPO, "server", "target", "release", "hnh-server")
@@ -49,6 +51,14 @@ RMSG_SFX, RMSG_CATTR, RMSG_MUSIC, RMSG_TILES, RMSG_BUFF = 8, 9, 10, 11, 12
 OD_REM, OD_MOVE, OD_RES, OD_LINBEG, OD_LINSTEP = 0, 1, 2, 3, 4
 OD_SPEECH, OD_LAYERS, OD_DRAWOFF, OD_LUMIN, OD_AVATAR = 5, 6, 7, 8, 9
 OD_FOLLOW, OD_HOMING, OD_OVERLAY, OD_HEALTH, OD_BUDDY, OD_END = 10, 11, 12, 14, 15, 255
+# Impassable tile ids (mirror state::tile_speed_pct: deep water, water,
+# cave, mountain). Everything else accepts a LinMove.
+IMPASSABLE_TILES = frozenset((0, 1, 25, 26))
+# Grid geometry (mirror Grid::idx and the mapdata wire format).
+GRID_SPAN = 1100  # subtile span of one 100x100-tile grid
+TILE_SPAN = 11    # subtile span of one tile
+TILE_COUNT = 100  # tiles per grid axis
+TILE_BYTES = TILE_COUNT * TILE_COUNT
 SESSERR_AUTH, SESSERR_BUSY, SESSERR_CONN, SESSERR_PVER, SESSERR_EXPR = 1, 2, 3, 4, 5
 PVER = 2
 LIST_END, LIST_INT, LIST_STR, LIST_COORD, LIST_COLOR = 0, 1, 2, 3, 6
@@ -295,6 +305,13 @@ class WireClient:
         self.request_chr = request_chr
         self.send_objacks = send_objacks
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # The world-entry burst (9 MAPDATA grids + several hundred gob
+        # spawns + the reliable RMSG stream) easily overflows the
+        # default ~200 KB receive buffer, and the kernel then DROPS
+        # whole grids (nondeterministic 4-of-9 receptions before this
+        # fix). 4 MB absorbs the burst; the drain rate is not limiting.
+        self.sock.setsockopt(
+            socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
         self.sock.settimeout(0.25)
         self.server = ("127.0.0.1", GAME_PORT)
         self.tseq = 0
@@ -325,6 +342,10 @@ class WireClient:
         self.cattr_at_chr = None  # snapshot when the `chr` widget arrives
         self.paginae_atk = set()
         self.mapdata_datagrams = 0
+        # Reassembled MAPDATA grids: (gx, gy) -> 10_000 tile bytes,
+        # row-major y*100+x (mirror of Grid::idx on the server).
+        self.tiles = {}
+        self._mapfrag = {}  # pktid -> {off: chunk} until complete
         self.objdata_datagrams = 0
         self.objacks = {}  # gobid -> last frame seen (SWorker mirror)
         self.last_ack = 0.0
@@ -415,12 +436,178 @@ class WireClient:
             self.pump(step)
         return False
 
+    # ---- tile map + navigation --------------------------------------------
+    # The probes used to walk BLIND (click toward the target, hope the
+    # straight line is clear). The server only accepts LinMove clicks
+    # whose full segment is walkable (state::path_clear), so ridge-blocked
+    # clicks move nothing and the old probes stalled in place. The tile
+    # grid each client already streams (MSG_MAPDATA) is the fix: parse it
+    # once, path-find over it, and click only lines the server will take.
+
+    def _on_mapdata(self, data):
+        """Reassemble fragmented MSG_MAPDATA datagrams into grid payloads,
+        then store each grid's 10_000 tile bytes (row-major y*100+x,
+        mirroring Grid::idx server-side).
+
+        Datagram: int32 pktid, uint16 off, uint16 total, chunk bytes.
+        Payload: int32 gx, int32 gy, NUL-terminated mnm, (u8 pidx, u8 fl)*
+        terminated by 255, then one zlib blob (tiles + plots)."""
+        pktid, off, total = struct.unpack_from("<iHH", data, 1)
+        fr = self._mapfrag.setdefault(pktid, {})
+        fr[off] = data[9:]
+        if sum(len(c) for c in fr.values()) < total:
+            return
+        payload = b"".join(fr[k] for k in sorted(fr))
+        self._mapfrag.pop(pktid, None)
+        gx, gy = struct.unpack_from("<ii", payload, 0)
+        o = payload.index(0, 8) + 1  # skip the NUL-terminated mnm string
+        while payload[o] != 255:  # plot-flag table
+            o += 2
+        o += 1
+        raw = zlib.decompress(payload[o:])
+        self.tiles[(gx, gy)] = raw[:TILE_BYTES]
+
+    def tile_at(self, x, y):
+        """Tile id at subtile coords, or None outside the streamed grids.
+        Python floor division matches Rust div_euclid for positive
+        divisors, so negative world coords resolve identically."""
+        gc = (x // GRID_SPAN, y // GRID_SPAN)
+        tiles = self.tiles.get(gc)
+        if tiles is None:
+            return None
+        ix = (x // TILE_SPAN) % TILE_COUNT
+        iy = (y // TILE_SPAN) % TILE_COUNT
+        return tiles[iy * TILE_COUNT + ix]
+
+    def walkable(self, x, y):
+        return self.tile_at(x, y) not in (None, *IMPASSABLE_TILES)
+
+    def _tile_walkable(self, t):
+        """Walkability of the tile CONTAINING tile-corner subtile coords,
+        sampled at the tile center (deposit corners sit ON impassable
+        mountain tiles; their centers decide the path)."""
+        return self.walkable(t[0] * TILE_SPAN + 5, t[1] * TILE_SPAN + 5)
+
+    def line_clear(self, x1, y1, x2, y2):
+        """Client mirror of state::path_clear: sample every tile along
+        the segment (one sample per tile of Manhattan distance)."""
+        dist = max(abs(x2 - x1) + abs(y2 - y1), 1)
+        steps = min(max(dist // TILE_SPAN, 1), 1000)
+        for i in range(steps + 1):
+            x = x1 + (x2 - x1) * i // steps
+            y = y1 + (y2 - y1) * i // steps
+            if not self.walkable(x, y):
+                return False
+        return True
+
+    def find_tile_path(self, start_sub, goal_sub):
+        """BFS a walkable tile path from `start_sub` to `goal_sub` (subtile
+        coords). When the goal tile itself is impassable (ore deposits sit
+        on mountain tiles), the path targets the nearest walkable 4-neighbor
+        instead. Returns tile-center subtile waypoints, or None when no
+        path exists within the streamed grids."""
+        st = (start_sub[0] // TILE_SPAN, start_sub[1] // TILE_SPAN)
+        gl = (goal_sub[0] // TILE_SPAN, goal_sub[1] // TILE_SPAN)
+        if not self._tile_walkable(gl):
+            side = [
+                (gl[0] + 1, gl[1]), (gl[0] - 1, gl[1]),
+                (gl[0], gl[1] + 1), (gl[0], gl[1] - 1),
+            ]
+            gl = next((t for t in side if self._tile_walkable(t)), None)
+            if gl is None:
+                return None
+        if st == gl:
+            return [gl]
+        prev = {st: None}
+        q = deque([st])
+        dirs = ((1, 0), (-1, 0), (0, 1), (0, -1),
+                (1, 1), (1, -1), (-1, 1), (-1, -1))
+        while q:
+            cur = q.popleft()
+            if cur == gl:
+                break
+            for d in dirs:
+                nb = (cur[0] + d[0], cur[1] + d[1])
+                if nb in prev or not self._tile_walkable(nb):
+                    continue
+                prev[nb] = cur
+                q.append(nb)
+        if gl not in prev:
+            return None
+        path = []
+        cur = gl
+        while cur is not None:
+            path.append(cur)
+            cur = prev[cur]
+        path.reverse()
+        return [(t[0] * TILE_SPAN + 5, t[1] * TILE_SPAN + 5) for t in path]
+
+    def nav_walk(self, target, stop=60, max_clicks=400, log=None):
+        """Walk to `target` (subtile coords) over the streamed tile map:
+        BFS a tile path, then click SHORT segments along it (about five
+        waypoints per click). Short clicks survive minor client/server
+        sampling differences in the straight-line check; the farthest-
+        line-clear variant got whole clicks rejected on long diagonal
+        runs. Returns True when within `stop` subtiles of the target."""
+        for n in range(max_clicks):
+            pos = self.gobs[self.player_gob]["pos"]
+            dx, dy = target[0] - pos[0], target[1] - pos[1]
+            if abs(dx) + abs(dy) <= stop:
+                return True
+            path = self.find_tile_path(pos, target)
+            if not path:
+                if log:
+                    log("nav: no tile path %s -> %s" % (pos, target))
+                return False
+            # Click the farthest of the next few waypoints whose whole
+            # segment passes the local line check (client mirror of
+            # state::path_clear); fall back to the very next waypoint.
+            far = None
+            for w in path[:6]:
+                if self.line_clear(pos[0], pos[1], w[0], w[1]):
+                    far = w
+            if far is None:
+                far = path[0]
+            self.click_ground(far[0], far[1])
+            d = abs(far[0] - pos[0]) + abs(far[1] - pos[1])
+            stalled = (pos, far)
+            self.pump(min(1.2 + d / 50.0, 3.0))
+            if n % 25 == 0 and log:
+                now = self.gobs[self.player_gob]["pos"]
+                log("nav %d: %s -> %s (click %s)" % (n, pos, now, far))
+            after = self.gobs[self.player_gob]["pos"]
+            if after == pos:
+                # Click rejected: one retry through a pure 4-neighbor
+                # sidestep, then keep going (the BFS re-plan usually
+                # picks a different next hop anyway).
+                nxt = path[0]
+                side = [
+                    (nxt[0] + 11, nxt[1]), (nxt[0] - 11, nxt[1]),
+                    (nxt[0], nxt[1] + 11), (nxt[0], nxt[1] - 11),
+                ]
+                side = [s for s in side if self.line_clear(
+                    pos[0], pos[1], s[0], s[1])]
+                if side:
+                    self.click_ground(*side[0])
+                    self.pump(1.5)
+                else:
+                    self.stalls = getattr(self, "stalls", 0) + 1
+                    if self.stalls >= 6:
+                        if log:
+                            log("nav: stalled at %s (%s)" % (pos, stalled))
+                        return False
+                    continue
+            self.stalls = 0
+        pos = self.gobs[self.player_gob]["pos"]
+        return abs(target[0] - pos[0]) + abs(target[1] - pos[1]) <= stop
+
     # ---- protocol handlers -------------------------------------------------
     def on_datagram(self, data):
         if data[0] == MSG_ACK:
             return
         if data[0] == MSG_MAPDATA:
             self.mapdata_datagrams += 1
+            self._on_mapdata(data)
             return
         if data[0] == MSG_OBJDATA:
             self.objdata_datagrams += 1
@@ -499,6 +686,10 @@ class WireClient:
                     "res": self.resids.get(args[0]),
                     "ql": args[1] if isinstance(args[1], int) else None,
                     "tt": args[3] if isinstance(args[3], str) else "",
+                    # Stack count (arg 4): probes assert merged-stack
+                    # totals (the bronze charge must land count = 2).
+                    # Older servers may omit the arg; default 1.
+                    "count": args[4] if len(args) >= 5 and isinstance(args[4], int) else 1,
                 }
             if name == "chr":
                 self.cattr_at_chr = set(self.cattr_names)

@@ -214,6 +214,13 @@ The client reassembles fragments with `Defrag`, discards incomplete groups
 after 10000 ms, and when complete parses the assembled buffer as a fresh
 Message (`MCache.mapdata2`, src/haven/MCache.java lines 397-515):
 
+Implementation note (verified, session 67): the `pktid` group id must be
+unique per grid transfer - the server keeps a monotonic `mapdata_seq`
+counter. Deriving it from the tick was a real bug: the 3x3 bootstrap sends
+several `MSG_MAPREQ`s that land in the SAME tick, so their fragments shared
+one `pktid` and reassembly interleaved the grids into garbage (both the Java
+client's `Defrag` and the probe harness reject the mixed streams).
+
 ```
 coord   gc                  grid being delivered
 string  mmname              minimap resource name, "" = none

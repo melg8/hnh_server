@@ -241,6 +241,11 @@ pub struct Game {
     /// Sequence for one-shot FX overlay ids (masked to 15 bits; the wire
     /// id shifts left once for the persist flag, session 21 bite FX).
     overlay_seq: u32,
+    /// Monotonic id for MSG_MAPDATA fragment groups. NEVER reuse the
+    /// tick here: several MAPREQs land in the SAME tick (the 3x3
+    /// bootstrap), and clients reassemble fragments by pktid, so a
+    /// shared pktid mixes the grids' fragments into garbage streams.
+    mapdata_seq: u32,
     /// Grids already populated with objects/animals.
     populated: HashSet<(i32, i32)>,
     /// Character persistence store (loaded snapshots + live updates).
@@ -693,6 +698,7 @@ impl Game {
             saturated,
             next_sid: 1,
             overlay_seq: 0,
+            mapdata_seq: 0,
             populated: HashSet::new(),
             save,
             pending_joins: HashMap::new(),

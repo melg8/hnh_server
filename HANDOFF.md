@@ -232,7 +232,8 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2, 62=3, 63=4, 64=1, 65=5, 66=3. All six
+53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2, 62=3, 63=4, 64=1, 65=5,
+66=3, 67=4. All six
 types have been served - pick freely, but avoid serving the same type as
 the previous session.
 
@@ -488,3 +489,78 @@ NEXT (handoff):
 COMMITS: wave 1 = d91dcb0 (parallel writer); wave 2 = the refinement
 tier + probe fix + docs + handoff (the second writer); wave 3 = the
 alloyer + fmt (a third writer under the same session number).
+
+## 2026-10-08 - Session 67 (type 4: test coverage)
+
+GOAL: the live bronze-chain wire probe (test_smelt.py) - session 66
+built the crucible but only unit-tested it.
+
+DONE (committed across this session):
+- GitNexus deployed (318e215): index 10.6k symbols / 39k edges,
+  AGENTS.md/CLAUDE.md sections, .claude/skills, .gitnexus gitignored;
+  `gitnexus detect-changes` verified live.
+- Bronze world-shape fix (80f12e0): bar-bronze rides the
+  gfx/terobjs/items/bar-copper alias in DROP_WORLD_ALIASES (game.rs);
+  craft.rs alloy_charge_pins pins the world shape, closing the hole
+  the bug slipped through.
+- hnhlib item_info now carries "count" (args[4], default 1) so stack
+  merges (grant_pickup) are assertable.
+- test_smelt.py rewritten: mine_until (kind accumulation across
+  deposits) -> build_station (sdt-change tracking, not fixed values)
+  -> smelt (per ore kind) -> gather_topup (boulder/tree picks) ->
+  alloy (two bronze drops, count=2 assert).
+
+VERIFIED FINDINGS (the "verify, don't assume" core of this session):
+- MOVEMENT: the server accepts a ground click ONLY when the whole
+  straight segment is walkable (state::path_clear samples one point
+  per tile of Manhattan distance; LinMove, no detours). Ridge-blocked
+  clicks move NOTHING, silently - the old probes stalled in place
+  for minutes. Documented in map-and-terrain.md.
+- SERVER BUG (fixed): MSG_MAPDATA pktid was world.tick-derived; the
+  3x3 bootstrap MAPREQs land in the SAME tick, so their fragments
+  shared one pktid and reassembly interleaved grids into garbage
+  (the Java client's Defrag hits the same corruption). Fix: a
+  monotonic mapdata_seq counter (game.rs, stream.rs). Documented in
+  network-protocol.md.
+- RCVBUF: the world-entry burst (9 grids + several hundred gob
+  spawns) overflowed the default ~200 KB SO_RCVBUF; the kernel
+  dropped whole grids nondeterministically (4-of-9 receptions).
+  hnhlib now sets a 4 MB receive buffer.
+- NAVIGATION LAYER (hnhlib): MSG_MAPDATA reassembly + zlib + per-grid
+  tile bytes (row-major y*100+x), tile_at/walkable/line_clear (the
+  path_clear mirror), find_tile_path (BFS over streamed tiles,
+  8-neighbor, impassable goals retarget a walkable 4-neighbor), and
+  nav_walk (short-segment clicking along the BFS path with stall
+  retry). All future probes navigate instead of blind-clicking.
+
+PROBE STATE (not yet SMELT: OK): copper mining is STABLE (two
+deposits picked clean of copper: (264,264) and (121,-1100), the
+northern one reached via a 1900-subtile BFS walk). Tin is NOT yet
+mined: the three north-western deposits are ridge-isolated (BFS: no
+tile path at all), the southern pair (-143,429) / (-572,286) has BFS
+paths but nav_walk oscillates near the south-west rim (bot walks,
+then re-plans back; suspect click-on-nearby-gob interception or a
+client/server line-sampling mismatch on long diagonals - the
+short-segment clicking already fixed the worst of it). Next session:
+finish the tin leg, then the smelter/crucible phases are already
+written and waiting.
+
+VERIFIED: fmt + clippy -D warnings clean; cargo test --workspace
+307 green after the mapdata fix (11 proto + 280 unit + 6 wire + 10
+world).
+
+NEXT (handoff):
+- Finish test_smelt.py: tin deposit reach (debug the nav oscillation
+  - try clicking pure tile centers away from gobs, or widen the
+  sidestep retry), then SMELT: OK end-to-end (smelter + crucible
+  phases are written).
+- hnhlib nav_walk polish: the farthest-line-clear variant got whole
+  clicks rejected on long diagonals (client/server integer sampling
+  differ by one tile on negative deltas); short segments fixed it -
+  keep that shape.
+- Type-5 candidates: mvbat_fanout_us; entry-burst wmax (283 ms).
+- Carried: GL e2e + Windows smoke; multi-machine cluster profile; CI
+  push when the token gets the workflow scope.
+
+COMMITS: 318e215 (gitnexus), 80f12e0 (bronze shape), + this session's
+mapdata pktid fix, rcvbuf, nav harness, probe rewrite, docs.
