@@ -159,7 +159,7 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 
 1. **CI**: `.github/workflows/rust.yml` (fmt, clippy -D warnings, cargo
    test --workspace on push/PR) could not be pushed - the PAT lacks the
-   `workflow` scope (session 50; retried in 53/55/56/57, see those
+   `workflow` scope (session 50; retried in 53/55/56/57/61, see those
    entries). The full file content is preserved in the archive
    (session-50 addendum). Retry the push every session; a green local
    run stays mandatory.
@@ -176,8 +176,12 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    further single-index work is justified here. Guest pose
    finalizers (the one profiled cluster excess) were already fixed
    this session (see S59).
-3. **Probe migration**: move the five legacy self-contained probes onto
-   hnhlib.py (mechanical; recipe in server/scripts/README.md).
+3. **Probe migration**: CLOSED (session 61): all five legacy
+   self-contained scripts (probe_animals, probe_direction,
+   test_farming, test_party_chat, dump_paginae) either subclass
+   WireClient now or are gone; test_build no longer re-exports the
+   harness names. Three stale probe contracts the migration surfaced
+   were also fixed (see S61).
 4. **Recipe breadth**: MOSTLY CLOSED (session 58): 35 recipes total;
    the stone/bone tools, farm headwear, fishing gear, linen tier and
    the leather tier (via the tanhide/string fork pages) now craft.
@@ -205,8 +209,8 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3. All six types have
-been served - pick freely, but avoid serving the same type as the
+53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2. All six types
+have been served - pick freely, but avoid serving the same type as the
 previous session.
 
 ## Session index (one line each; full entries in the archive)
@@ -266,83 +270,11 @@ previous session.
 - S58 (type 3): recipe breadth batch - 19 recipes (35 total), static paginae scanner (scan_paginae.py), fork pages string/tanhide unlock the leather tier, test_newcraft.py wire probe.
 - S59 (type 5): multi-node scaling profile (profile_multinode.sh) - pair-cap confirmed per node, guest GC cleared by measurement, guest pose finalizers moved to the packed patched batch (p95 10.9 ms -> 16 us).
 - S60 (type 3): world gathering - trees yield branch picks (TREE_HARVESTS = 5, then a decorative Stump), boulders yield stone picks (BOULDER_STONES = 5, then gone); the dead 'wood x10' drop and the clickable-stump bug are gone; shared pick legs for local + relay paths; test_gather.py wire probe + crafting-and-building.md "World gathering" section.
+- S61 (type 2): probe corpus consolidated on hnhlib - the five legacy self-contained scripts migrated/deleted, test_build re-exports removed; three stale probe contracts surfaced and fixed (chatbot walk-away distance, direction art-ring offset, equipbot item-wid staleness, station/drop cursor return); dead dump_paginae removed.
 
 ---
 
-## 2026-10-08 - Session 59 (type 5: performance)
-
-SESSION TYPE ROTATION LOG: 55=2, 56=4, 57=5, 58=3, 59=5. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: the two carried profiling questions (HANDOFF gaps #2 and #7) -
-the session-57 fan-out work said "only a multi-node profile can
-justify more here". This session produced that profile and fixed what
-the data pointed at.
-
-PROFILE FIRST (new harness, no production changes initially):
-
-- server/scripts/profile_multinode.sh: MODE=single|cluster BOTS=<per
-  node> boots the baseline or a 2-node cluster with BOTH nodes loaded
-  (--saturated --perf), settles, then prints per-node percentiles for
-  tick/phase/mvbat/guests over a 60 s window. TERM/INT trap tears the
-  nodes down - the first runs proved a bare EXIT trap does not run
-  when bash dies from a signal, and orphaned nodes poison the next
-  run's ports.
-- Run A (single 600 bots): tick p50 68 ms, mvbat_fanout p50 12.4 ms,
-  guests 0 - the pair-bound fan-out baseline at this population.
-- Run B (cluster 2x300): PAIR-CAP CONFIRMED. mvbat_fanout p50 fell
-  to 3.9/7.4 ms per node at the same total population; sessions=300
-  per node, guests=646/984 (players in foreign cells + roaming
-  animals both mirror). phase_cluster (subs + abroad + GC) p50
-  73-98 us, p95 <= 314 us. Node tick stayed ~60 ms because both
-  processes share this box's 2 cores - the pair savings are real
-  but scheduler-masked locally.
-- Run C (cluster 2x500 on one 2-core box): BOTH NODES STARVE - mean
-  ticks 170-210 ms, p95 300-360 ms, perf reports skip. The cluster
-  path carries work the single node does not: guest mirroring puts
-  ~250 movers in front of ~500 sessions per node (bots spawn
-  clustered, so most pairs survive the cell filter), and the fan-out
-  runs twice (mvbat_fanout + guests_fanout at 90-130 ms each). The
-  honest verdict: 1k clustered needs nodes on separate machines or
-  more cores; on one 2-core box the single-node 1k (30-60 ms band)
-  remains the better shape.
-
-CUT (the one profiled cluster excess):
-
-- guest pose finalizers: tick_guests encoded one OD_LAYERS block PER
-  (session, guest) pair - intern lookups + layer allocations per
-  pair; the 2x500 profile measured guests_pose_us at 22-52 ms (vs
-  0.5 ms at 2x300). queue_guest_pose now encodes ONCE per guest with
-  global-index placeholders (Patch::Many) and pushes into the packed
-  start batch, so broadcast_batch resolves per-session wire ids,
-  first-announces unseen resources, filters visibility and records
-  the block in unacked - the session-44 local-pose machinery. The
-  ingest pose-flip path rides it too. Two process notes: the pose
-  block is now retransmittable (fin=true, matching local poses),
-  and it ships at tick end instead of immediately (<= 100 ms lag,
-  same as local start/FX blocks).
-- Verified against the same 2x300 profile: guests_pose_us p50
-  528-608 us -> 10-11 us, p95 6.9-10.9 ms -> 14-16 us; phase_guests
-  p95 11.9/5.9 -> 6.1/2.1 ms; everything else in its old band.
-
-VERIFICATION:
-
-- 290 cargo tests green (11 proto + 266 unit incl. the new
-  guest_pose_finalizer_fans_out_patched_layers wire pin + 4 wire +
-  9 world); fmt + clippy -D warnings clean.
-- Release binary: WORLD ENTRY: OK + CATTR ORDER: OK + EAT FLOW: OK.
-- profile_multinode.sh re-run after the cut (see numbers above).
-
-COMMITS: e10b144 (pose cut + test) + 73fe043 (profile harness +
-README) + this handoff entry.
-
-NEXT (handoff):
-- The 10k path's next honest step is a MULTI-MACHINE cluster profile;
-  single-box cluster runs now have a recorded ceiling. If a bigger
-  dev box appears, rerun profile_multinode.sh with BOTS=1000+.
-- Carried: world gathering (bough/stone picking - type 3), feeding
-  lift, five-probe hnhlib.py migration, GL e2e + Windows smoke (no
-  display host), CI push when the token gets the scope.
+---
 
 ## 2026-10-08 - Session 60 (type 3: new functionality)
 
@@ -424,3 +356,98 @@ NEXT (handoff):
   test_newcraft.py are the templates), GL e2e + Windows smoke (no
   display host), multi-machine cluster profile, CI push when the
   token gets the scope.
+
+## 2026-10-08 - Session 61 (type 2: refactoring / technical debt)
+
+SESSION TYPE ROTATION LOG: 57=5, 58=3, 59=5, 60=3, 61=2. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the carried gap #3 - migrate the five legacy self-contained
+probes onto the shared hnhlib harness and retire the test_build
+re-export layer. The migration's job was to be PURE (verdict logic
+byte-for-byte), and it was - which is exactly what made the three
+STALE probe contracts it surfaced visible as failures this session.
+
+MIGRATION (scripts/):
+- hnhlib.WireClient absorbed the duplicated shared contracts the
+  legacy clients each re-implemented: Area Chat (chat_id/chat_lines),
+  char sheet (chr_id/exp_seen), cattr compiled values (attrs), party
+  roster (pv_id), DSTWDG bookkeeping (destroyed set + sm cleanup),
+  OD_BUDDY names (buddy_names), the flower-menu sm_args map, LIST_COLOR
+  arg decoding. ensure_server gained env_extra/save_path parameters
+  (scenario clocks, per-run saves) - the default behavior is
+  unchanged.
+- probe_animals, probe_direction: subclass WireClient with their own
+  parse_objdata pre-pass for the pose-level event logs they verdict on
+  (first spawn LAYERS per gob, walking streams, overlays); the base
+  class keeps the gob-state tracking.
+- test_farming: FarmClient is now a 20-line WireClient subclass (tile
+  helpers + request_chr=False to keep the historical wire shape); the
+  fast-crop server boot rides ensure_server(env_extra, save_path).
+- test_party_chat: PartyClient = WireClient + party record hook +
+  client-side LINBEG/LINSTEP interpolation (see the stale-contract
+  fix below). parse_party stays party-domain.
+- test_build: the 60-name re-export block is gone (the file keeps
+  BuildClient + its own CLI); probe_melee/probe_pvp/test_equip import
+  from hnhlib directly, probe_station aliases hnhlib as tb (its own
+  parser is carried - a separate, larger migration), probe_plow takes
+  le32 from hnhlib.
+- dump_paginae.py DELETED: it speaks the pre-session-2 TCP game
+  protocol ("hlauhunk" to port 1870, now UDP-only) and dies with
+  ConnectionRefused against any server since the UDP switch -
+  verified, not assumed. README: legacy section removed, the
+  "Adding a probe" recipe documents the on_objdata pre-pass pattern
+  and every shared contract WireClient already tracks.
+
+STALE CONTRACTS FIXED (each proven pre-existing by running the
+pre-migration script from git before touching the verdict):
+- test_party_chat chatbot walked C to a LINBEG DESTINATION and judged
+  distance by it - but the server has been reporting the ON-PATH
+  interpolated position since the session-20 movement fidelity fix
+  (game/interact.rs "never the destination ahead of time"), so the
+  out-of-range client was still inside the 500-subtile chat radius
+  when the marker fired. The probe now interpolates LINSTEP progress
+  client-side and walks C beyond radius+margin before chatting.
+- probe_direction expected the movement-octant digit, but session 22
+  introduced the art-ring offset (art_dir = (octant + 7) & 7,
+  unit-pinned); the probe now expects the art digit and prints both.
+- test_equip equipbot resolved the branch item ONCE by resource name;
+  after the unequip round trip the refresh_inventory recreate lagged
+  DSTWDG on the wire and the resolved wid was the dying cursor copy -
+  the epry drop then ran with an empty hand. equip_item now re-resolves
+  and retries the take/drop round trip until the `set` confirms.
+- probe_station + probe_drop: the kit's stone stack grew to 6 (bow
+  chain, session 36) while the plan demand is 2 - the remainder rode
+  the drag cursor and blocked the branch take (the session-51 cursor
+  return contract, applied to test_build but never to these two).
+  Both now return the cursor after each sink.
+- probe_plow: PlowProbe.mapreq(gc) shadowed WireClient.mapreq(gx, gy)
+  and crashed on the shared mapview bind; renamed to mapreq_grid.
+
+VERIFICATION (every line is a fresh run this session):
+- 293 cargo tests green (11 proto + 269 unit + 4 wire + 9 world);
+  fmt + clippy -D warnings clean (no Rust changes this session).
+- Probe battery, single node: WORLD ENTRY: OK, CATTR ORDER: OK,
+  FARMING FLOW: OK, SKILL GATE: OK, CHAT FLOW: OK, PARTY FLOW: OK,
+  DIRECTION WIRE: OK, ANIMALS WIRE: OK (330 layered animals, 115
+  walking streams, bite overlays), BUILD FLOW: OK, STATION FLOW: OK,
+  EQUIP FLOW: OK, EQUIP PERSIST: OK (server restart + slot-5
+  restore), MELEE WIRE: OK, PVP WIRE: OK (arrow 75 dmg, HP 1/4).
+- Probe battery, 2-node cluster (mesh 18790/18791): STATION RELAY:
+  OK (fuel+input+light+output through the guest path), DROP TRANSFER:
+  OK (output drop crossed the boundary and was picked up LOCALLY on
+  node 0), PLOW RELAY: OK (TileMutation through the authority node),
+  GUEST WALK: OK (four legs across peer-owned cells).
+- One chatbot run failed on the sender echo (single UDP wdgmsg loss -
+  the python probes have no client-side retransmit; the wire.rs tier
+  does). Re-run green; recording as known test-harness flake.
+
+COMMITS: scripts consolidation + probe fixes + docs + this handoff.
+
+NEXT (handoff):
+- probe_station's StationProbeClient still carries its own transport
+  parser (aliased as tb); moving it onto WireClient is the remaining
+  mechanical step when a session wants another type-2 item.
+- Carried: feeding lift, metal chain groundwork, five-probe follow-ups
+  none, GL e2e + Windows smoke (no display host), multi-machine
+  cluster profile, CI push when the token gets the scope.

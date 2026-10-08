@@ -3891,3 +3891,78 @@ NEXT (handoff):
   smoke (carried), five-probe hnhlib.py migration (test_newcraft.py is
   the template now), CI push when the token gets the scope.
 
+## 2026-10-08 - Session 59 (type 5: performance)
+
+SESSION TYPE ROTATION LOG: 55=2, 56=4, 57=5, 58=3, 59=5. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the two carried profiling questions (HANDOFF gaps #2 and #7) -
+the session-57 fan-out work said "only a multi-node profile can
+justify more here". This session produced that profile and fixed what
+the data pointed at.
+
+PROFILE FIRST (new harness, no production changes initially):
+
+- server/scripts/profile_multinode.sh: MODE=single|cluster BOTS=<per
+  node> boots the baseline or a 2-node cluster with BOTH nodes loaded
+  (--saturated --perf), settles, then prints per-node percentiles for
+  tick/phase/mvbat/guests over a 60 s window. TERM/INT trap tears the
+  nodes down - the first runs proved a bare EXIT trap does not run
+  when bash dies from a signal, and orphaned nodes poison the next
+  run's ports.
+- Run A (single 600 bots): tick p50 68 ms, mvbat_fanout p50 12.4 ms,
+  guests 0 - the pair-bound fan-out baseline at this population.
+- Run B (cluster 2x300): PAIR-CAP CONFIRMED. mvbat_fanout p50 fell
+  to 3.9/7.4 ms per node at the same total population; sessions=300
+  per node, guests=646/984 (players in foreign cells + roaming
+  animals both mirror). phase_cluster (subs + abroad + GC) p50
+  73-98 us, p95 <= 314 us. Node tick stayed ~60 ms because both
+  processes share this box's 2 cores - the pair savings are real
+  but scheduler-masked locally.
+- Run C (cluster 2x500 on one 2-core box): BOTH NODES STARVE - mean
+  ticks 170-210 ms, p95 300-360 ms, perf reports skip. The cluster
+  path carries work the single node does not: guest mirroring puts
+  ~250 movers in front of ~500 sessions per node (bots spawn
+  clustered, so most pairs survive the cell filter), and the fan-out
+  runs twice (mvbat_fanout + guests_fanout at 90-130 ms each). The
+  honest verdict: 1k clustered needs nodes on separate machines or
+  more cores; on one 2-core box the single-node 1k (30-60 ms band)
+  remains the better shape.
+
+CUT (the one profiled cluster excess):
+
+- guest pose finalizers: tick_guests encoded one OD_LAYERS block PER
+  (session, guest) pair - intern lookups + layer allocations per
+  pair; the 2x500 profile measured guests_pose_us at 22-52 ms (vs
+  0.5 ms at 2x300). queue_guest_pose now encodes ONCE per guest with
+  global-index placeholders (Patch::Many) and pushes into the packed
+  start batch, so broadcast_batch resolves per-session wire ids,
+  first-announces unseen resources, filters visibility and records
+  the block in unacked - the session-44 local-pose machinery. The
+  ingest pose-flip path rides it too. Two process notes: the pose
+  block is now retransmittable (fin=true, matching local poses),
+  and it ships at tick end instead of immediately (<= 100 ms lag,
+  same as local start/FX blocks).
+- Verified against the same 2x300 profile: guests_pose_us p50
+  528-608 us -> 10-11 us, p95 6.9-10.9 ms -> 14-16 us; phase_guests
+  p95 11.9/5.9 -> 6.1/2.1 ms; everything else in its old band.
+
+VERIFICATION:
+
+- 290 cargo tests green (11 proto + 266 unit incl. the new
+  guest_pose_finalizer_fans_out_patched_layers wire pin + 4 wire +
+  9 world); fmt + clippy -D warnings clean.
+- Release binary: WORLD ENTRY: OK + CATTR ORDER: OK + EAT FLOW: OK.
+- profile_multinode.sh re-run after the cut (see numbers above).
+
+COMMITS: e10b144 (pose cut + test) + 73fe043 (profile harness +
+README) + this handoff entry.
+
+NEXT (handoff):
+- The 10k path's next honest step is a MULTI-MACHINE cluster profile;
+  single-box cluster runs now have a recorded ceiling. If a bigger
+  dev box appears, rerun profile_multinode.sh with BOTS=1000+.
+- Carried: world gathering (bough/stone picking - type 3), feeding
+  lift, five-probe hnhlib.py migration, GL e2e + Windows smoke (no
+  display host), CI push when the token gets the scope.
+
