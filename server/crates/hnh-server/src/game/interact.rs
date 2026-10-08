@@ -609,6 +609,13 @@ impl Game {
                 for &i in &order[g.off as usize..(g.off + g.len) as usize] {
                     perf.fanout_pairs += 1;
                     let (id, frame, fin) = batch.block_info(i);
+                    // Bitset fast path: one aligned word load rejects the
+                    // whole pair without hashing into the scattered set;
+                    // bit-set pairs re-check the authoritative set (a
+                    // stale bit costs one probe, never a wrong send).
+                    if !out.vis_bit_probe(id) {
+                        continue;
+                    }
                     if !out.visible.contains(&id) {
                         continue;
                     }

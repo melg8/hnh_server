@@ -1774,6 +1774,9 @@ impl Game {
         if !restage && !out.visible.insert(id) {
             return None;
         }
+        if !restage {
+            out.vis_bit_insert(crate::state::split_gob_id(id).0);
+        }
         let mut m = MessageBuf::new();
         m.uint8(MSG_OBJDATA)
             .uint8(0)

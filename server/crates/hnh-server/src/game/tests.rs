@@ -8021,3 +8021,55 @@ async fn trough_transfer_respects_the_capacity_cap() {
     assert_eq!(carried.ql_sum, 300, "the history is untouched (S48 rule)");
     assert_eq!(carried.avg_ql(), 10);
 }
+
+/// The visible bitset mirror must agree with the authoritative set at
+/// every point of the spawn/retract lifecycle (S68): the fan-out fast
+/// path only re-checks bit-set pairs, so a desync would either skip
+/// real viewers (probe false, set contains) or waste probes. Direct
+/// method contract first, then the live-path invariant after ticks.
+#[tokio::test]
+async fn visible_bitset_mirror_tracks_the_set() {
+    let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut g = Game::new(
+        42,
+        cmd_rx,
+        net_rx,
+        false,
+        std::env::temp_dir().join("hnh-bitset-unit.json"),
+    );
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (raw_tx, _raw) = tokio::sync::mpsc::channel(512);
+    g.session_connected(1, "acct".to_owned(), tx, raw_tx);
+    let out = g.sessions.get_mut(&1).unwrap();
+    // Low slots and one high slot (forces the mirror to grow).
+    for id in [1, 2, 0x0005_0003, 0x0002_0003] {
+        out.visible.insert(id);
+        out.vis_bit_insert(crate::state::split_gob_id(id).0);
+    }
+    for id in [1, 2, 0x0005_0003, 0x0002_0003] {
+        assert!(out.vis_bit_probe(id), "bit set for {id:#x}");
+        assert!(out.visible.contains(&id));
+    }
+    // Slot collision across generations: (slot 3, gen 5) removed must
+    // clear the bit even though (slot 3, gen 2) shares the slot word.
+    out.visible.remove(&0x0005_0003);
+    out.vis_bit_remove(crate::state::split_gob_id(0x0005_0003).0);
+    assert!(!out.vis_bit_probe(0x0005_0003));
+    // Removing a slot beyond the mirror length is a no-op, not a panic.
+    out.vis_bit_remove(0xFFFF);
+    // The live path: after entering a world and ticking, every visible
+    // gob id must have its bit set (spawn inserts keep the mirror warm).
+    let (mut g, _rx, _raw2) = entered_game("s68bitset");
+    for _ in 0..5 {
+        g.tick();
+    }
+    let out = g.sessions.get(&1).unwrap();
+    assert!(!out.visible.is_empty(), "the view scanned something");
+    for &id in out.visible.iter() {
+        assert!(
+            out.vis_bit_probe(id),
+            "mirror missing visible id {id:#010x}"
+        );
+    }
+}

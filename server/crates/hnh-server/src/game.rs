@@ -1204,6 +1204,8 @@ impl Game {
             vis_cache: None,
             vis_cache_pos: None,
             last_retract_tick: 0,
+            visible_bits: Vec::new(),
+            ack_lag_ema_ms: 0,
         };
         // Character selection UI (session-lifecycle.md 3.1).
         let w_bg = out.new_wid("img");

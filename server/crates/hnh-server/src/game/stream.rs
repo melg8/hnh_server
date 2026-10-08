@@ -237,6 +237,7 @@ impl Game {
         if !out.visible.insert(id) {
             return;
         }
+        out.vis_bit_insert(split_gob_id(id).0);
         let res_name = self
             .world
             .res
@@ -296,6 +297,7 @@ impl Game {
             return;
         };
         if out.visible.remove(&id) {
+            out.vis_bit_remove(split_gob_id(id).0);
             let frame = self
                 .world
                 .gobs
@@ -751,15 +753,35 @@ impl Game {
         let Some(out) = self.sessions.get_mut(&sid) else {
             return;
         };
+        let now = Instant::now();
         for (id, frame) in acks {
             // Track the confirmed high-water mark for the retransmit
             // sweep's in-order gate (the client echoes its max decoded
             // frame, so a stale smaller ack never rolls this back).
             let acked = out.gob_acked.entry(id).or_insert(None);
-            if frame > acked.unwrap_or(0) {
+            let newly_confirmed = frame > acked.unwrap_or(0);
+            if newly_confirmed {
                 *acked = Some(frame);
             }
             if let Some(per_gob) = out.unacked.get_mut(&id) {
+                // Ack-lag sample (session 68): the newest block the ack
+                // confirms measures how long THIS peer takes to confirm a
+                // send - the retransmit sweep raises its first-retry delay
+                // to twice the running average so batched acks never make
+                // in-flight blocks look lost.
+                if newly_confirmed {
+                    if let Some((_, block)) = per_gob.range(..=frame).next_back() {
+                        let sample = now
+                            .duration_since(block.last_sent)
+                            .as_millis()
+                            .min(u32::MAX as u128) as u32;
+                        out.ack_lag_ema_ms = if out.ack_lag_ema_ms == 0 {
+                            sample
+                        } else {
+                            (out.ack_lag_ema_ms / 2) + (sample / 2)
+                        };
+                    }
+                }
                 per_gob.retain(|f, _| *f > frame);
                 if per_gob.is_empty() {
                     out.unacked.remove(&id);
@@ -795,6 +817,7 @@ impl Game {
         let mut resent_n = 0usize;
         let mut full_n = 0usize;
         let mut busy_sessions = 0usize;
+        let mut expired_any = false;
         for out in self.sessions.values_mut() {
             if out.unacked.is_empty() {
                 continue;
@@ -810,7 +833,15 @@ impl Game {
             busy_sessions += 1;
             let raw = out.raw.clone();
             let acked = &out.gob_acked;
+            // Ack-lag adaptive RTO (session 68): floor the first-retry
+            // delay at twice this peer's mean ack lag (capped). Read
+            // before the table borrow; 0 keeps the legacy schedule.
+            let first_retry = out
+                .ack_lag_ema_ms
+                .saturating_mul(2)
+                .min(crate::state::ACK_LAG_RTO_CAP_MS) as u64;
             let mut queue_full = false;
+            let mut expired_n = 0usize;
             for (id, per) in out.unacked.iter_mut() {
                 let acked = acked.get(id).copied().flatten();
                 // Ordered walk: `blocked` latches while the lowest
@@ -828,9 +859,17 @@ impl Game {
                         // drops it; block the rest of the gob so no
                         // later frame escapes through the hole.
                         blocked = true;
+                        expired_n += 1;
                         continue;
                     }
-                    if now.duration_since(block.last_sent) < block.delay() {
+                    let schedule = block
+                        .delay()
+                        .max(Duration::from_millis(if block.tries == 0 {
+                            first_retry
+                        } else {
+                            0
+                        }));
+                    if now.duration_since(block.last_sent) < schedule {
                         blocked = true;
                         continue;
                     }
@@ -852,6 +891,9 @@ impl Game {
                     }
                 }
             }
+            if expired_n > 0 {
+                expired_any = true;
+            }
             if queue_full {
                 out.retx_throttle_until = now + Duration::from_millis(RETRANS_THROTTLE_MS);
             }
@@ -868,16 +910,16 @@ impl Game {
             );
         }
         // Retire expired blocks (the ordered walk cannot mutate the
-        // map structure mid-iteration). Skipped entirely when nothing
-        // is pending: the per-sweep attribution showed the walk itself
-        // is the only measurable cost of this pass at 1000 sessions.
+        // map structure mid-iteration). Runs only when the walk SAW an
+        // expired block (expired_n): the second full pass is otherwise
+        // a redundant O(pending) walk on the tick thread.
         let p = &mut self.world.perf;
         p.retx_sweep_us = sweep_started.elapsed().as_micros() as u64;
         p.retx_pending = pending_n as u64;
         p.retx_resent = resent_n as u64;
         p.retx_queue_full = full_n as u64;
         p.retx_busy_sessions = busy_sessions as u64;
-        if pending_n > 0 {
+        if expired_any {
             for out in self.sessions.values_mut() {
                 if out.unacked.is_empty() {
                     continue;

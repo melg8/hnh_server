@@ -53,6 +53,12 @@ pub(crate) const RETRANS_THROTTLE_MS: u64 = 1_000;
 const RETRANS_CRIT_MAX_TRIES: u8 = 9;
 const RETRANS_PLAIN_MAX_TRIES: u8 = 5;
 
+/// Upper bound for the ack-lag adaptive first-retry delay (session 68):
+/// `2 * ack_lag_ema_ms` is floored onto the legacy schedule, capped here
+/// so a pathologically slow acker still gets retried inside its
+/// try-count window; RETRANS_MAX_AGE_MS stays the absolute ceiling.
+pub(crate) const ACK_LAG_RTO_CAP_MS: u32 = 4_000;
+
 /// One recorded OBJDATA block awaiting its OBJACK.
 #[derive(Debug)]
 pub struct UnackedBlock {
@@ -1073,6 +1079,27 @@ pub struct SessionOut {
     /// Gobs currently streamed to this client. Keys are server-allocated
     /// gob ids -> fxhash id hasher (hot per-candidate membership checks).
     pub visible: crate::fxhash::FxHashSet<GobId>,
+    /// Slot-index bitset mirror of `visible` (fan-out fast path): bit
+    /// `slot` set iff some visible gob occupies that slot. Gob ids pack
+    /// the slot into the low 16 bits and a live gob owns its slot
+    /// exclusively, so the mirror is EXACT as long as it is updated at
+    /// the same three sites that mutate `visible` (spawn, retract,
+    /// guest spawn) - asserted by the state tests. The fan-out pair loop
+    /// probes one aligned word here (~1 L1 load) instead of hashing into
+    /// the scattered set; the set stays authoritative and re-checks every
+    /// bit-set pair, so a stale bit can only cost one probe, never a
+    /// wrong send. Empty until the first insert grows it.
+    pub visible_bits: Vec<u64>,
+    /// Exponential moving average of the peer's ack lag in milliseconds
+    /// (sampled when an OBJACK newly confirms a pending block's frame:
+    /// `now - last_sent` of the highest newly-acked block). The retransmit
+    /// sweep raises a session's first-retry delay to twice this average
+    /// (capped): a client that acks in ~200 ms batches (the load-bot
+    /// cohort mirrors the real client's batched echo) must not see its
+    /// blocks retried at the 80 ms schedule first - the measured sweep
+    /// resent 73K not-yet-lost blocks per pass because the schedule
+    /// expired before the ack landed. 0 = no sample yet (legacy delays).
+    pub ack_lag_ema_ms: u32,
     /// Unacked OBJDATA blocks per gob, ordered by frame (BTreeMap: the
     /// retransmit sweep walks frames ASCENDING so resent datagrams keep
     /// the wire order a spawn -> move -> retract sequence had on the
@@ -1163,6 +1190,38 @@ pub struct SessionOut {
 }
 
 impl SessionOut {
+    /// Set the visible bit for `slot`, growing the mirror as needed.
+    /// Called only from the three sites that insert into `visible`.
+    #[inline]
+    pub fn vis_bit_insert(&mut self, slot: usize) {
+        let word = slot / 64;
+        if word >= self.visible_bits.len() {
+            self.visible_bits.resize(word + 1, 0);
+        }
+        self.visible_bits[word] |= 1u64 << (slot % 64);
+    }
+
+    /// Clear the visible bit for `slot` (retract path). A slot beyond the
+    /// current mirror length was never set - nothing to do.
+    #[inline]
+    pub fn vis_bit_remove(&mut self, slot: usize) {
+        let word = slot / 64;
+        if let Some(w) = self.visible_bits.get_mut(word) {
+            *w &= !(1u64 << (slot % 64));
+        }
+    }
+
+    /// Fan-out fast path: whether the slot's bit is set. `false` means
+    /// the gob id is DEFINITELY not visible; `true` still requires the
+    /// exact `visible.contains` confirmation (the set is authoritative).
+    #[inline]
+    pub fn vis_bit_probe(&self, id: GobId) -> bool {
+        let slot = (id & 0xFFFF) as usize;
+        self.visible_bits
+            .get(slot / 64)
+            .is_some_and(|w| w & (1u64 << (slot % 64)) != 0)
+    }
+
     /// Widget id of the character sheet window, if created.
     pub fn chr_window(&self) -> Option<u16> {
         self.widgets
