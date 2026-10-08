@@ -281,6 +281,13 @@ pub struct Game {
     /// `(id, frame, step, cx, cy)` collected by the scan pass and encoded
     /// by the encode pass (taken/restored).
     mv_progress_scratch: Vec<(GobId, u32, i32, i32, i32)>,
+    /// Retransmit sweep round-robin scratch (session 68 budgeted sweep):
+    /// session-id ring reused per sweep (taken/restored; was an implicit
+    /// fixed HashMap iteration order that let the budget starve the tail).
+    retx_scratch: Vec<SessionId>,
+    /// Ring start for the NEXT sweep: advances by the number of sessions
+    /// seen, so budget-starved sessions go first on the next pass.
+    retx_cursor: usize,
     /// Scratch block encoder for tick_movement (taken/restored; was a
     /// fresh 256 B `MessageBuf::new()` + finish + drop per encoded block
     /// - the last per-mover allocator churn on the 10 Hz hot path).
@@ -709,6 +716,8 @@ impl Game {
             fan_scratch: Vec::new(),
             mv_finished_scratch: Vec::new(),
             mv_progress_scratch: Vec::new(),
+            retx_scratch: Vec::new(),
+            retx_cursor: 0,
             mv_encode_scratch: MessageBuf::new(),
             combat_ix: CombatIndex::default(),
             lp_ms_per_lp: {

@@ -59,6 +59,20 @@ const RETRANS_PLAIN_MAX_TRIES: u8 = 5;
 /// try-count window; RETRANS_MAX_AGE_MS stays the absolute ceiling.
 pub(crate) const ACK_LAG_RTO_CAP_MS: u32 = 4_000;
 
+/// Global per-sweep retransmission budget (session 68). The entry-burst
+/// measurement put 44-73K `bytes.clone()` + `try_send` calls into ONE
+/// sweep pass (85-107 ms of the 100 ms tick budget): a clone is ~1 us of
+/// allocator work, so the budget is what actually caps the sweep's
+/// worst case, not the table walk. Retransmissions deferred by the
+/// budget are picked up by the next sweep (one per 3 ticks) inside the
+/// 10 s age ceiling; real peers ack well inside the window, load bots
+/// retire through RETRANS_MAX_AGE_MS either way.
+pub(crate) const RETRANS_SWEEP_BUDGET: usize = 8_192;
+/// Minimum per-session share of the sweep budget: a session with a
+/// handful of pending blocks drains them in one pass even when a large
+/// cohort shares the ring (the global budget still caps the sum).
+pub(crate) const RETRANS_SESSION_SHARE_MIN: usize = 64;
+
 /// One recorded OBJDATA block awaiting its OBJACK.
 #[derive(Debug)]
 pub struct UnackedBlock {

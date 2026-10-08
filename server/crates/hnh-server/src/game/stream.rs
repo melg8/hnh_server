@@ -800,6 +800,12 @@ impl Game {
     /// pass: in the steady state the table is near-empty (the client
     /// acks within <= 320 ms), so the sweep costs one map walk.
     ///
+    /// Session 68 budget: the pass is capped at RETRANS_SWEEP_BUDGET
+    /// resends, consumed in round-robin session order (ring + cursor),
+    /// so a 1000-peer entry burst pays at most the budget's clone+send
+    /// work per sweep and defers the rest to later sweeps instead of
+    /// stalling the tick. Deferred blocks stay inside the 10 s age
+    /// ceiling; real peers ack well inside it.
     /// In-order guarantee: frames ascend (BTreeMap) and the raw socket
     /// is FIFO, so a sweep sends lost datagrams in their original wire
     /// order. The walk latches `blocked` while the LOWEST unconfirmed
@@ -818,7 +824,47 @@ impl Game {
         let mut full_n = 0usize;
         let mut busy_sessions = 0usize;
         let mut expired_any = false;
-        for out in self.sessions.values_mut() {
+        // Session 68 budget: caps the clone+try_send work of ONE pass
+        // (the unbudgeted sweep measured 44-73K resends = 85-107 ms of
+        // the 100 ms tick budget at the 1000-bot entry burst).
+        let mut budget = RETRANS_SWEEP_BUDGET;
+
+        // Budgeted round-robin (session 68): the walk starts at the
+        // cursor and the cursor advances by the ring slots SEEN, so the
+        // sessions the budget starved in this sweep go first on the
+        // next one (one sweep per 3 ticks). The ring is SORTED by
+        // SessionId: the sessions map iterates in randomized order, and
+        // an unsorted ring would make the cursor point at a different
+        // session every sweep (no fairness at all). The scratch ring is
+        // taken/restored - no per-sweep allocation; the sort is
+        // O(n log n) on an almost-hot u32 slice, noise at the 2K-peer
+        // scale against the budgeted clone work.
+        let mut order = std::mem::take(&mut self.retx_scratch);
+        order.clear();
+        order.extend(self.sessions.keys().copied());
+        order.sort_unstable();
+        let ring = order.len();
+        if ring == 0 {
+            self.retx_scratch = order;
+            let p = &mut self.world.perf;
+            p.retx_sweep_us = sweep_started.elapsed().as_micros() as u64;
+            p.retx_pending = 0;
+            p.retx_resent = 0;
+            p.retx_queue_full = 0;
+            p.retx_busy_sessions = 0;
+            return;
+        }
+        let start = self.retx_cursor % ring;
+        let mut seen = 0usize;
+        for k in 0..ring {
+            if budget == 0 {
+                break;
+            }
+            let sid = order[(start + k) % ring];
+            seen += 1;
+            let Some(out) = self.sessions.get_mut(&sid) else {
+                continue;
+            };
             if out.unacked.is_empty() {
                 continue;
             }
@@ -840,9 +886,16 @@ impl Game {
                 .ack_lag_ema_ms
                 .saturating_mul(2)
                 .min(crate::state::ACK_LAG_RTO_CAP_MS) as u64;
+            // Fair share of the REMAINING budget (session 68): every
+            // live session is guaranteed RETRANS_SESSION_SHARE_MIN
+            // sends; the global budget caps the sum and the cursor
+            // evens the rest out across sweeps.
+            let sessions_left = ring - k;
+            let share = (budget / sessions_left).max(RETRANS_SESSION_SHARE_MIN);
             let mut queue_full = false;
             let mut expired_n = 0usize;
-            for (id, per) in out.unacked.iter_mut() {
+            let mut sent_here = 0usize;
+            'gobs: for (id, per) in out.unacked.iter_mut() {
                 let acked = acked.get(id).copied().flatten();
                 // Ordered walk: `blocked` latches while the lowest
                 // unconfirmed frame is still inside its delay window.
@@ -873,6 +926,22 @@ impl Game {
                         blocked = true;
                         continue;
                     }
+                    // Session-full check BEFORE the clone (session 68):
+                    // the old path cloned the payload first and let
+                    // try_send throw it away - the burst measured up to
+                    // 136K wasted deep clones per pass. tokio's
+                    // capacity() counts FREE slots (it drops on send
+                    // and rises on recv), so a FULL queue reads
+                    // capacity == 0; an empty queue reads
+                    // max_capacity. (The first cut had this inverted -
+                    // it refused every resend while the queue was idle
+                    // and starved the wire test's retract echo.)
+                    if raw.capacity() == 0 {
+                        queue_full = true;
+                        blocked = true;
+                        full_n += 1;
+                        continue;
+                    }
                     // A full raw queue (a burst fan-out to a slow
                     // session) must NOT burn the block's attempts: the
                     // next sweep retries while the queue drains. It also
@@ -884,6 +953,15 @@ impl Game {
                         block.last_sent = now;
                         block.tries += 1;
                         resent_n += 1;
+                        sent_here += 1;
+                        if sent_here >= share {
+                            // Session share spent: defer the rest of
+                            // this gob (and the session) to the next
+                            // sweep - breaking mid-gob never reorders
+                            // the wire, later frames are just NOT sent
+                            // yet.
+                            break 'gobs;
+                        }
                     } else {
                         queue_full = true;
                         blocked = true;
@@ -891,6 +969,7 @@ impl Game {
                     }
                 }
             }
+            budget = budget.saturating_sub(sent_here);
             if expired_n > 0 {
                 expired_any = true;
             }
@@ -898,6 +977,8 @@ impl Game {
                 out.retx_throttle_until = now + Duration::from_millis(RETRANS_THROTTLE_MS);
             }
         }
+        self.retx_scratch = order;
+        self.retx_cursor = (start + seen) % ring;
         // Structured observability (obs-structured-fields): fires only
         // when there was retransmit work - silent in the healthy
         // steady state where the table drains within ~320 ms.
