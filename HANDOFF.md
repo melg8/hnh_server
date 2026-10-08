@@ -134,10 +134,10 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
   on ephemeral ports, speaks the real protocol: auth, bootstrap,
   REQUIRED_CATTR set, MAPDATA, movement LINBEG/LINSTEP, build flow).
   Needs no gameres, no python. fmt + clippy -D warnings clean.
-  Session 63: 300 tests (11 proto + 274 unit + 6 wire + 9 world) - the
-  wire tier grew to 6: trough lift (in the gate) and the gathering
-  walking scenario (#[ignore], run with `cargo test --test wire --
-  --ignored`).
+  Session 64: 301 tests (11 proto + 274 unit + 7 wire [6 in the gate
+  + 1 #[ignore]d] + 9 world) - the wire tier gained
+  lost_static_spawn_wave_is_retransmitted (drop-window loss
+  simulation with a deterministic held-objack proof).
 - Python scenario probes (server/scripts/): WORLD ENTRY, CATTR ORDER,
   MOVE, DIRECTION, ANIMALS, MELEE/PVP, STATION, BUILD FLOW, FARMING,
   EQUIP, PARTY/CHAT, NEWCRAFT, GATHER on the shared hnhlib.py harness
@@ -211,25 +211,21 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    p95 <= 314 us with 646-984 guests per node at 2x300 - two orders
    below anything actionable. Do not revisit without a multi-node
    profile that shows phase_cluster in the milliseconds.
-8. **Gathering wire test stability**: OPEN (session 63). The
-   walking-scenario test
-   (world_gathering_picks_yield_drops_exhaust_and_land_in_inventory)
-   is #[ignore]d in the default suite: even solo it races the statics
-   stream - raw OBJDATA spawn frames are lost under load (the
-   session-56 finding; a lost spawn is unrecoverable - the client
-   never re-requests statics) and the 2x-VIEW retract sweep clears
-   streamed candidates mid-test. A durable fix is a server-side
-   re-stream mechanism for statics (a MAPREQ-like re-request or an
-   OBJACK-triggered resend) - a type-1/type-5 session item, not a
-   test-side hack. The trough lift wire test IS in the default gate
-   (stable across runs).
+8. **Gathering wire test stability**: RESOLVED server-side (session
+   64), re-scoped. The session-56 "lost spawn is unrecoverable"
+   finding is fixed by the OBJACK-driven retransmission sweep (see the
+   S64 entry and `lost_static_spawn_wave_is_retransmitted` in the
+   gate). The walking scenario STAYS #[ignore]d for a new, documented
+   reason: 40-90 s of wall-clock-bound walk hops starve under two
+   concurrent boots on the 2-core sandbox. Run explicitly: `cargo
+   test --test wire -- --ignored`.
 
 ## Session type rotation log (consolidated)
 
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2, 62=3, 63=4. All six
+53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2, 62=3, 63=4, 64=1. All six
 types have been served - pick freely, but avoid serving the same type as
 the previous session.
 
@@ -293,86 +289,13 @@ the previous session.
 - S61 (type 2): probe corpus consolidated on hnhlib - the five legacy self-contained scripts migrated/deleted, test_build re-exports removed; three stale probe contracts surfaced and fixed (chatbot walk-away distance, direction art-ring offset, equipbot item-wid staleness, station/drop cursor return); dead dump_paginae removed.
 - S62 (type 3): Food Trough lift mechanic - lift menu / carry / place-back / fodder transfer "like a liquid"; carried store persists (save v7 field) and rides cross-node migration (CharData boxed); test_feeding.py wire probe + 5 new unit pins; livestock doc session-62 section.
 - S63 (type 4): wire tier 4 -> 6 - trough lift contract IN the default gate; gathering walking scenario (#[ignore], explicit run); harness: sm menus, chat lines, click_gob/flower_choice, candidate scans, 2-slot concurrency governor, OD_REM decode fix; movement contract retargeted to the clicked point.
+- S64 (type 1): the missing OBJACK retransmission half built - unacked blocks now BTreeMap<frame, UnackedBlock> + per-gob acked high-water mark (Option: frame 0 is real); in-order ~300 ms sweep resends lost spawn/retract/re-render (critical) and finalizer/hp (self-healing) blocks and retires exhausted ones; OD_REM rides max-seen-frame+1 and supersedes the gob history; probe lost_static_spawn_wave_is_retransmitted in the gate; gathering #[ignore] re-labeled (walk length, not spawn loss).
 
 ---
 
 ---
 
 ---
-
-## 2026-10-08 - Session 62 (type 3: new functionality)
-
-SESSION TYPE ROTATION LOG: 58=3, 59=5, 60=3, 61=2, 62=3. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: the carried gap #5 - the Food Trough lift mechanic
-(animals-and-husbandry.md "Feeding: troughs and grazing": a lift-able
-object, and "lift-and-right-click on another trough transfers fodder
-like a liquid"). Session 48 had explicitly scoped this out ("no lift
-handling anywhere in this server yet").
-
-THE CUT:
-- state.rs: Player.carried_trough (the lifted trough's fodder store
-  rides the player; one carried object at a time) + SessionOut
-  .trough_menu (the pending Lift flower menu, the station_menu
-  pattern).
-- building.rs: clicking a placed trough opens a one-petal "Lift"
-  flower menu (trough_click/open_trough_menu); choosing it retracts
-  the gob for every viewer (the Drop-pickup removal path), frees the
-  tile and moves the store onto the player ("You lift the trough (N
-  fodder units)."). A map click while carrying takes precedence over
-  the build ghost in on_map_place and places the trough back down at
-  a tile validated EXACTLY like a build commit (5-tile reach,
-  walkable terrain, no crop/plan/structure occupancy; "You place the
-  trough (N fodder units)."). Clicking a placed trough WHILE
-  carrying transfers the fodder "like a liquid": moved = min(carried,
-  cap - dest); the moved units carry the SOURCE's running average so
-  the destination mixes by the doc's arithmetic (q10*100 + q12*50 ->
-  q10); the source keeps its FULL quality history per the session-48
-  rule ("consumption drains units but NOT the quality history" - the
-  unit pin caught the first draft subtracting it), so an emptied
-  trough keeps its average ("Transferred N fodder units.").
-- persist.rs: SavedTrough + SavedPlayer.carried_trough (v7,
-  additive, bincode-safe serde default - older saves load with
-  nothing carried). game.rs restores the store before any
-  interaction with the fresh player row.
-- nodes.rs: NodeMsg::CharData now boxes its SavedPlayer snapshot -
-  the new field pushed the variant over the clippy
-  large-enum-variant threshold; Box<T> serializes as T, the mesh
-  wire format is unchanged.
-- The trough owned by a PEER node offers no Lift petal to a guest
-  (the click stays a validated no-op, like a stump pick): cross-node
-  lift/transfer relays are future work, recorded in the doc's Open
-  questions together with the carried-trough avatar render.
-
-VERIFICATION (every line a fresh run this session):
-- 298 cargo tests green (11 proto + 274 unit incl. 5 new pins:
-  trough_lift_retracts_the_gob_and_carries_the_fodder,
-  trough_place_back_restores_the_store,
-  trough_transfer_moves_fodder_like_a_liquid,
-  trough_transfer_respects_the_capacity_cap,
-  roundtrip_preserves_a_carried_trough; + 4 wire + 9 world);
-  fmt + clippy -D warnings clean.
-- server/scripts/test_feeding.py (new probe on the hnhlib harness):
-  builds two troughs through the REAL build pagina path, loads
-  fodder one unit per itemact (wheat, then carrot seeds), lifts
-  trough 1 (gob retracted + carry line), places it back down (new
-  gob + place line), lifts trough 2 and transfers its 2 units into
-  trough 1 by clicking it while carrying - FEEDING FLOW: OK end to
-  end. Probe notes: the kit carries 5 wheat + 5 carrot seeds (both
-  fodder); the trough demand is branch x4 (one sink), the cursor
-  return contract applies after every sink/load.
-- Smoke on the touched paths: WORLD ENTRY: OK, CATTR ORDER: OK,
-  BUILD FLOW: OK, STATION FLOW: OK.
-
-COMMITS: trough lift mechanic + probe + docs + this handoff.
-
-NEXT (handoff):
-- Type-3 candidates: metal chain groundwork (ore gathering + smelter
-  numbers), flower-menu pick verbs, per-animal breed stat rows.
-- Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
-  (no display host), multi-machine cluster profile, CI push when the
-  token gets the scope.
 
 ## 2026-10-08 - Session 63 (type 4: test coverage / test pyramid)
 
@@ -457,3 +380,113 @@ NEXT (handoff):
 - Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
   (no display host), multi-machine cluster profile, CI push when the
   token gets the scope.
+## 2026-10-08 - Session 64 (type 1: architecture review)
+
+SESSION TYPE ROTATION LOG: 60=3, 61=2, 62=3, 63=4, 64=1. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the retransmission architecture promised by the wire contract
+but never built. Reading stream.rs / net.rs against Session.java
+exposed the largest architectural defect of the raw UDP path: the
+`unacked` table was WRITE-ONLY. Spawns, movement finalizers, hp ticks
+and fx blocks were all recorded for "OBJACK retransmission", on_objack
+only cleaned it - and NOT ONE LINE anywhere ever resent a recorded
+block. Raw OBJDATA was fire-and-forget UDP wearing a reliability
+costume. That is the root cause of gap #8 ("a lost spawn is
+unrecoverable - the client never re-requests statics"), of the
+session-56 flake family, and of the wire-test #[ignore] the last
+sessions carried.
+
+DESIGN (per-session, OBJACK-driven, in-order):
+
+- `SessionOut.unacked` became a per-gob `BTreeMap<frame,
+  UnackedBlock>` with `UnackedBlock { bytes, last_sent, tries,
+  critical }`. The ordered map IS the in-order guarantee: the sweep
+  walks frames ascending, so resent datagrams keep the wire order a
+  spawn -> move -> retract sequence had on the socket; a resent stale
+  frame must never overtake a newer one (an out-of-order OD_REM would
+  phantom-delete a fresh spawn client-side).
+- `SessionOut.gob_acked: GobId -> Option<u32>` - the client's acked
+  high-water mark (it echoes its max decoded frame). The Option is
+  load-bearing: frame 0 is a REAL wire frame (an untouched static's
+  spawn) and the first implementation gated `frame <= acked(=0)`
+  against it - the wire probe caught statics never retransmitting.
+- `stream::retransmit_unacked()` runs every 3rd tick (~300 ms) as a
+  rare-event pass: block delay = 250 ms fast window (5 attempts for
+  critical, 3 for self-healing), then 1 s slow (4 / 2), then retire.
+  Critical = spawn, retract, full re-render (build transitions, crop
+  stages, guest kind changes) - blocks the client cannot recover any
+  other way. Self-healing = movement finalizers, hp ticks - the next
+  tick's frame supersedes a lost one. Retirement keeps sessions that
+  never ack (load bots, dead peers) from accumulating retransmit
+  state - the measured OOM shape from the 1000-session scale.
+- A failed `try_send` (raw queue full under burst fan-out) does NOT
+  burn an attempt: the next sweep retries while the queue drains.
+- `on_objack` merges the ack high-water mark (max) and retains frames
+  > acked - the old code was correct here, just incomplete.
+
+RETRACT-FRAME FIX (caught by the full-suite trough-lift contract the
+same session): an OD_REM must ride max(server frame, acked mark,
+highest pending frame) + 1. The first implementation retracted at the
+gob's current frame - for a killed gob that is a frame the client's
+ack already covered, so the gate silently skipped the removal forever
+and the client rendered a phantom. Second fix, same session: a
+retract SUPERSEDES all pending blocks of the gob (a spawn resent
+after OD_REM would resurrect a phantom).
+
+CLIENT CONTRACT (verified against src/haven/Session.java): the
+SWorker repeats its batched MSG_OBJACK every 200 ms while an entry is
+under ~120 ms idle; a repeat OBJDATA frame merely updates objacks and
+OC state (getgob is idempotent), so duplicate blocks are safe; a
+block that stays unacked is unrecoverable client-side - hence the
+whole mechanism.
+
+WIRE PROBE (`lost_static_spawn_wave_is_retransmitted`, IN the gate,
+~1.7 s): boots the real binary, arms a 1.2 s inbound-OBJDATA drop
+window right after world entry (the whole statics burst plus the
+first fast retransmits land inside it), then demands (a) a live
+in-view static arriving - only the sweep can deliver it - and (b) the
+deterministic proof: OBJACKs held, a duplicate (id, frame) MUST
+appear on the wire. The harness gained drop_objdata_until /
+dropped_objdata / hold_objacks / saw_retransmitted_spawn and a
+seen-frames ledger; ServerGuard honors HNH_KEEP_WORKDIR=1 to preserve
+a failed run's server log.
+
+TEST TIER NOTE: the gathering walking scenario stays #[ignore]d, now
+for a DOCUMENTED non-loss reason (40-90 s of wall-clock-bound walk
+hops starve under two concurrent boots on the 2-core sandbox;
+observed once in the full parallel suite). Gap #8 is
+server-resolved and re-scoped; network-protocol.md "Server
+implementation notes" gained the retransmission regime (frames,
+schedule, the removal-frame rule).
+
+VERIFIED (fresh runs):
+- cargo fmt --all -- --check clean; clippy --all-targets
+  -D warnings clean.
+- cargo test --workspace: 301 green (11 proto + 274 unit + 6 wire in
+  the gate + 1 ignored + 9 world).
+- lost_static_spawn_wave: 3/3 consecutive green runs (~1.7 s each);
+  trough-lift and the movement contract re-verified against the
+  retract-frame change.
+- Perf sanity (release, 300 bots, saturated world): steady-state tick
+  7-12 ms, mean 28 ms, per-window max 69 ms only during the bot-entry
+  burst - the 100 ms budget holds with the sweep live.
+
+PROCESS NOTE: a `git reset --hard` while reverting the CI-push retry
+wiped this session's uncommitted tree mid-session; everything was
+re-applied from the session's own edit scripts and re-verified (the
+full-suite green above is POST-restore). Commit early - uncommitted
+work is unrecoverable work.
+
+COMMITS: retransmission core + wire probe + harness loss simulation
+(one change set), docs + handoff (second).
+
+NEXT (handoff):
+- Type-3 candidates: metal chain groundwork (ore + smelter), flower
+  pick verbs, per-animal breed stat rows.
+- Type-5 candidate: profile the retransmit sweep at the 1000-bot
+  scale (it is O(pending) per ~300 ms; expect near-zero in the
+  steady state - verify, do not assume).
+- Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
+  (no display host), multi-machine cluster profile, CI push when the
+  token gets the workflow scope.

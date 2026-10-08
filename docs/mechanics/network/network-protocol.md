@@ -710,6 +710,27 @@ connection attempt and closes the socket (src/haven/Session.java lines
   pacing (200 ms bundle cadence, ~120 ms linger) if it wants to keep
   UDP traffic low, but it must ACCEPT objacks arriving at any time and
   bundled in any quantity.
+- OBJDATA retransmission regime (session 64): raw OBJDATA rides lossy
+  UDP and the client NEVER re-requests gob state, so the server must
+  recover losses itself. Keep the last 4 unconfirmed (gob, frame)
+  blocks per session, ordered by frame, and on a ~300 ms sweep resend
+  every block whose delay elapsed, IN FRAME ORDER (the raw socket is
+  FIFO: a resent stale frame must never overtake a newer one - an
+  out-of-order OD_REM phantom-deletes a fresh spawn). Gate each block
+  on the client's acked high-water mark (an OBJACK for frame N retires
+  everything <= N) and schedule attempts as 5x250 ms fast then 4x1 s
+  slow for CRITICAL blocks - spawn, OD_REM, full re-renders - versus
+  3x250 ms + 2x1 s for self-healing ones (movement finalizers, hp
+  ticks). Retire exhausted blocks instead of keeping them (sessions
+  that never ack - load bots, dead peers - would otherwise accumulate
+  retransmit state; the measured OOM shape from the 1000-session
+  scale). A removal op must carry frame = max(every frame the client
+  saw for that gob, highest pending frame) + 1: a removal at a frame
+  the ack already covers would be silently skipped by the gate and
+  the client would render a phantom gob forever. Wire probe:
+  `lost_static_spawn_wave_is_retransmitted` in wire.rs drops a 1.2 s
+  OBJDATA window at world entry and demands recovery through the
+  sweep.
 - Keep every datagram under the path MTU anyway; the legacy server kept
   map fragments and objdata bundles small enough for typical MTUs. The
   client's 65536-byte read buffer is not an invitation to send huge

@@ -4142,3 +4142,76 @@ NEXT (handoff):
   none, GL e2e + Windows smoke (no display host), multi-machine
   cluster profile, CI push when the token gets the scope.
 
+## 2026-10-08 - Session 62 (type 3: new functionality)
+
+SESSION TYPE ROTATION LOG: 58=3, 59=5, 60=3, 61=2, 62=3. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the carried gap #5 - the Food Trough lift mechanic
+(animals-and-husbandry.md "Feeding: troughs and grazing": a lift-able
+object, and "lift-and-right-click on another trough transfers fodder
+like a liquid"). Session 48 had explicitly scoped this out ("no lift
+handling anywhere in this server yet").
+
+THE CUT:
+- state.rs: Player.carried_trough (the lifted trough's fodder store
+  rides the player; one carried object at a time) + SessionOut
+  .trough_menu (the pending Lift flower menu, the station_menu
+  pattern).
+- building.rs: clicking a placed trough opens a one-petal "Lift"
+  flower menu (trough_click/open_trough_menu); choosing it retracts
+  the gob for every viewer (the Drop-pickup removal path), frees the
+  tile and moves the store onto the player ("You lift the trough (N
+  fodder units)."). A map click while carrying takes precedence over
+  the build ghost in on_map_place and places the trough back down at
+  a tile validated EXACTLY like a build commit (5-tile reach,
+  walkable terrain, no crop/plan/structure occupancy; "You place the
+  trough (N fodder units)."). Clicking a placed trough WHILE
+  carrying transfers the fodder "like a liquid": moved = min(carried,
+  cap - dest); the moved units carry the SOURCE's running average so
+  the destination mixes by the doc's arithmetic (q10*100 + q12*50 ->
+  q10); the source keeps its FULL quality history per the session-48
+  rule ("consumption drains units but NOT the quality history" - the
+  unit pin caught the first draft subtracting it), so an emptied
+  trough keeps its average ("Transferred N fodder units.").
+- persist.rs: SavedTrough + SavedPlayer.carried_trough (v7,
+  additive, bincode-safe serde default - older saves load with
+  nothing carried). game.rs restores the store before any
+  interaction with the fresh player row.
+- nodes.rs: NodeMsg::CharData now boxes its SavedPlayer snapshot -
+  the new field pushed the variant over the clippy
+  large-enum-variant threshold; Box<T> serializes as T, the mesh
+  wire format is unchanged.
+- The trough owned by a PEER node offers no Lift petal to a guest
+  (the click stays a validated no-op, like a stump pick): cross-node
+  lift/transfer relays are future work, recorded in the doc's Open
+  questions together with the carried-trough avatar render.
+
+VERIFICATION (every line a fresh run this session):
+- 298 cargo tests green (11 proto + 274 unit incl. 5 new pins:
+  trough_lift_retracts_the_gob_and_carries_the_fodder,
+  trough_place_back_restores_the_store,
+  trough_transfer_moves_fodder_like_a_liquid,
+  trough_transfer_respects_the_capacity_cap,
+  roundtrip_preserves_a_carried_trough; + 4 wire + 9 world);
+  fmt + clippy -D warnings clean.
+- server/scripts/test_feeding.py (new probe on the hnhlib harness):
+  builds two troughs through the REAL build pagina path, loads
+  fodder one unit per itemact (wheat, then carrot seeds), lifts
+  trough 1 (gob retracted + carry line), places it back down (new
+  gob + place line), lifts trough 2 and transfers its 2 units into
+  trough 1 by clicking it while carrying - FEEDING FLOW: OK end to
+  end. Probe notes: the kit carries 5 wheat + 5 carrot seeds (both
+  fodder); the trough demand is branch x4 (one sink), the cursor
+  return contract applies after every sink/load.
+- Smoke on the touched paths: WORLD ENTRY: OK, CATTR ORDER: OK,
+  BUILD FLOW: OK, STATION FLOW: OK.
+
+COMMITS: trough lift mechanic + probe + docs + this handoff.
+
+NEXT (handoff):
+- Type-3 candidates: metal chain groundwork (ore gathering + smelter
+  numbers), flower-menu pick verbs, per-animal breed stat rows.
+- Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
+  (no display host), multi-machine cluster profile, CI push when the
+  token gets the scope.
