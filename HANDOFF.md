@@ -446,7 +446,35 @@ the local duplicate work was discarded at reset and re-based as the
 smaller refinement wave. Lesson: re-check origin/master right before
 pushing ANY session-shaped work - the repo has parallel writers.
 
+WAVE 3 (a second rebased writer under the same session number): the
+Alloying Crucible completes the bronze leg:
+
+- StationKind::Alloyer + the BUILDABLES entry (gfx/terobjs/alloyer,
+  stone x4 + branch x4 demand, branch fuel, 30-tick jobs).
+- StationState.aux: the crucible splits the bronze charge across the
+  input (Bar of Copper) and aux (Bar of Tin) slots; the Light act is
+  refused until BOTH slots are loaded. The local menu path, the relay
+  light/item paths, and the StationView readiness snapshot (has_input
+  keys on both slots for the crucible) agree.
+- Output: ALLOY_OUT_COUNT = 2 Bar of Bronze per charge. The legacy
+  Ring of Brodgar charge (2 copper + 1 tin -> 3 bronze) is a 1:1
+  metal-to-bronze MASS balance; the two-slot policy realizes the same
+  balance as 1+1 -> 2 (craft.rs documents the derivation).
+- Persistence: the additive SavedStructure.aux field round-trips the
+  tin charge; the restore re-validates the label against
+  ALLOY_INPUT_TIN.
+- The trough build test resolves its spec via buildable_by_ad now
+  (the alloyer insertion shifted the positional registry indices -
+  the second latent-index bug the positional style caused).
+- Verified: fmt + clippy -D warnings clean; cargo test --workspace
+  307 green (11 proto + 280 unit + 6 wire + 10 world).
+
 NEXT (handoff):
+- Bronze live probe (first candidate): test_smelt.py needs a
+  crucible phase - the starter kit (stone x6 + branch x10) covers
+  the smelter OR the crucible, so the probe must boulder-pick stone
+  (BOULDER_STONES x5) before building the second station, then load
+  copper+tin and catch the TWO bronze drops.
 - Type-3 candidates: kiln + brick chain (restores the legacy
   smelter/oven demands), anvil + smithy's-hammer tool-gated recipes,
   flower pick verbs, per-animal breed stat rows.
@@ -458,4 +486,5 @@ NEXT (handoff):
   when the token gets the workflow scope.
 
 COMMITS: wave 1 = d91dcb0 (parallel writer); wave 2 = the refinement
-tier + probe fix + docs + handoff (this session's two commits).
+tier + probe fix + docs + handoff (the second writer); wave 3 = the
+alloyer + fmt (a third writer under the same session number).
