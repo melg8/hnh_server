@@ -879,6 +879,20 @@ Peapod=STR:0.1 PER:0.9
                 ALLOY_OUTPUT.0
             );
         }
+        // Session 67: the world-shape render path is part of the charge
+        // contract too. The 2009 pack ships no bronze bar sprite; the
+        // output drop MUST resolve through the alias table instead of
+        // falling back to the branch shape (the smelt_map pins enforce
+        // the same rule for smelter outputs; the crucible was exempt -
+        // a gap the bronze probe walk caught).
+        let base = ALLOY_OUTPUT.0.rsplit('/').next().unwrap_or(ALLOY_OUTPUT.0);
+        let own = format!("gfx/terobjs/items/{base}");
+        assert!(
+            !crate::resources::RES_DIR.get().is_some()
+                || crate::resources::served(&own)
+                || crate::game::drop_world_alias(base).is_some(),
+            "{}: no world shape and no alias", ALLOY_OUTPUT.0
+        );
     }
 
     #[test]

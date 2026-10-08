@@ -3490,8 +3490,8 @@ pub fn unix_ms() -> u64 {
 /// shape beats an invisible one); the pickup still restores the original
 /// invobj via Kind::Drop::inv_res_idx.
 /// World-shape aliases for inventory items the 2009 pack renders only in
-/// a sibling metal's shape: the pack ships no tin / cast-iron world
-/// sprites, but the nugget and bar families are visually interchangeable
+/// a sibling metal's shape: the pack ships no tin / cast-iron / bronze
+/// world sprites, but the nugget and bar families are visually interchangeable
 /// (same size and silhouette across metals). Checked after the item's own
 /// shape and before the branch fallback.
 const DROP_WORLD_ALIASES: &[(&str, &str)] = &[
@@ -3499,6 +3499,11 @@ const DROP_WORLD_ALIASES: &[(&str, &str)] = &[
     ("bar-tin", "gfx/terobjs/items/bar-copper"),
     ("bar-castiron", "gfx/terobjs/items/bar-iron"),
     ("nugget-castiron", "gfx/terobjs/items/nugget-iron"),
+    // The 2009 pack ships no bronze bar sprite either; bronze is a
+    // copper alloy and renders through the copper silhouette (session
+    // 67: before this alias the crucible's output drops fell back to
+    // the branch shape, making the wire probe's drop scan impossible).
+    ("bar-bronze", "gfx/terobjs/items/bar-copper"),
 ];
 
 /// Crate-visible lookup for tests and callers that need to know whether
