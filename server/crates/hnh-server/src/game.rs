@@ -815,6 +815,15 @@ impl Game {
                     // the first ramp-up spike).
                     if us > self.world.perf.window_max_tick_us {
                         self.world.perf.window_max_tick_us = us;
+                        // wmax attribution: freeze this tick's phase and
+                        // sub-phase counters so the report names the
+                        // spike's owner, not the steady state.
+                        let p = &mut self.world.perf;
+                        p.wmax_phase_us = p.phase_us;
+                        p.wmax_mvbat_scan_us = p.mvbat_scan_us;
+                        p.wmax_mvbat_encode_us = p.mvbat_encode_us;
+                        p.wmax_mvbat_fanout_us = p.mvbat_fanout_us;
+                        p.wmax_retx_sweep_us = p.retx_sweep_us;
                     }
                     last_glob += 1;
                     if last_glob >= TICK_HZ * 5 {
@@ -1123,6 +1132,10 @@ impl Game {
             ix_cand_n = self.world.perf.ix_cand_n,
             move_blocks = self.world.perf.move_blocks,
             move_cells = self.world.perf.move_cells,
+            fanout_pairs = self.world.perf.fanout_pairs,
+            fanout_hits = self.world.perf.fanout_hits,
+            fanout_fin = self.world.perf.fanout_fin,
+            fanout_msgs = self.world.perf.fanout_msgs,
             start_blocks = self.world.perf.start_blocks,
             fx_batch_n = self.world.perf.fx_batch_n,
             retx_sweep_us = self.world.perf.retx_sweep_us,
@@ -1132,6 +1145,8 @@ impl Game {
             retx_busy_sessions = self.world.perf.retx_busy_sessions,
             grid_gens = self.world.grids.gen_count,
             grid_hits = self.world.grids.hit_count,
+            wmax_mvbat_fanout_us = self.world.perf.wmax_mvbat_fanout_us,
+            wmax_retx_sweep_us = self.world.perf.wmax_retx_sweep_us,
             "perf"
         );
         // The window maximum has been delivered to this window's report;
@@ -2502,6 +2517,10 @@ impl Game {
         self.world.perf.mvbat_fanout_us = 0;
         self.world.perf.mvbat_movers = 0;
         self.world.perf.ix_cand_n = 0;
+        self.world.perf.fanout_pairs = 0;
+        self.world.perf.fanout_hits = 0;
+        self.world.perf.fanout_fin = 0;
+        self.world.perf.fanout_msgs = 0;
         // Cluster character migrations: re-broadcast unanswered queries on
         // a fixed cadence (a link still negotiating buffers the retry and
         // answers once the mesh converges); past the deadline, enter with

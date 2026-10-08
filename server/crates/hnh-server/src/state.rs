@@ -1429,6 +1429,23 @@ pub struct Perf {
     /// count (the fan-out probe width). Zero with no movers.
     pub move_blocks: u64,
     pub move_cells: u64,
+    /// Last-tick fan-out pair attribution (both batches): (session, block)
+    /// pairs the dense cell walk probed, pairs that passed the visible
+    /// filter (bytes appended), finalizer `record_unacked` calls (the
+    /// per-pair block copy), and raw datagrams sent. Decides where the
+    /// pair cost lives: probe count vs hit count vs finalizer copies.
+    pub fanout_pairs: u64,
+    pub fanout_hits: u64,
+    pub fanout_fin: u64,
+    pub fanout_msgs: u64,
+    /// Phase snapshot taken when a tick set the current window maximum
+    /// (`window_max_tick_us`): answers "which phase owns the spike"
+    /// without a second profiling run. Reset with the window.
+    pub wmax_phase_us: [u128; 9],
+    pub wmax_mvbat_scan_us: u64,
+    pub wmax_mvbat_encode_us: u64,
+    pub wmax_mvbat_fanout_us: u64,
+    pub wmax_retx_sweep_us: u64,
     /// Last-tick packed start/FX batch (session 44): LINBEG starts + FX
     /// overlays encoded once and fanned out at tick end. Block count (mv
     /// + fx attribution: `fx_batch_n` counts the FX subset).

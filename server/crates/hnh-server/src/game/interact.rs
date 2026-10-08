@@ -562,6 +562,10 @@ impl Game {
         self.world.perf.move_blocks += batch.len() as u64;
         self.world.perf.move_cells += batch.cell_count() as u64;
         let t_fan = Instant::now();
+        // Pair-attribution counters (field-disjoint with the sessions
+        // borrow below): pairs probed, visible hits, finalizer records,
+        // datagrams sent - the numbers that decide the next fan-out cut.
+        let perf = &mut self.world.perf;
         // Session anchor positions (avatar gob slot -> SoA position).
         // Taken/restored scratch: this runs twice per tick at most (the
         // movement batch mid-tick, the start/FX batch at tick end) and
@@ -603,10 +607,12 @@ impl Game {
                     continue;
                 }
                 for &i in &order[g.off as usize..(g.off + g.len) as usize] {
+                    perf.fanout_pairs += 1;
                     let (id, frame, fin) = batch.block_info(i);
                     if !out.visible.contains(&id) {
                         continue;
                     }
+                    perf.fanout_hits += 1;
                     let bytes = batch.block_bytes(i);
                     // One MSG_OBJDATA type byte opens the datagram; the
                     // blocks inside are headerless ([fl][id][frame][ops])
@@ -637,12 +643,14 @@ impl Game {
                             }
                             m.bytes(&patched);
                             if fin {
+                                perf.fanout_fin += 1;
                                 Self::record_unacked(out, id, frame, patched, false);
                             }
                         }
                         None => {
                             m.bytes(bytes);
                             if fin {
+                                perf.fanout_fin += 1;
                                 Self::record_unacked(out, id, frame, bytes.to_vec(), false);
                             }
                         }
@@ -650,6 +658,7 @@ impl Game {
                 }
             }
             if let Some(m) = m {
+                perf.fanout_msgs += 1;
                 out.send_raw(m.finish());
             }
         }
