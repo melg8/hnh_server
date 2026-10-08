@@ -136,7 +136,9 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
   Needs no gameres, no python. fmt + clippy -D warnings clean.
 - Python scenario probes (server/scripts/): WORLD ENTRY, CATTR ORDER,
   MOVE, DIRECTION, ANIMALS, MELEE/PVP, STATION, BUILD FLOW, FARMING,
-  EQUIP, PARTY/CHAT on the shared hnhlib.py harness.
+  EQUIP, PARTY/CHAT, NEWCRAFT, GATHER on the shared hnhlib.py harness
+  (test_gather.py, session 60: branch pick off a seed-42 forest tree
+  + 5 stone picks draining a boulder, every drop lands in inventory).
 - Load (recorded): 1000/1000 async bot sessions in a saturated world
   (3300+ animals, live fights) at tick ~37-40 ms vs the 100 ms budget
   (session 2); 300 bots/node across the cluster (session 34); 1000
@@ -179,11 +181,13 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 4. **Recipe breadth**: MOSTLY CLOSED (session 58): 35 recipes total;
    the stone/bone tools, farm headwear, fishing gear, linen tier and
    the leather tier (via the tanhide/string fork pages) now craft.
-   Remaining dead ends: metal chain (no ore gathering/smelter numbers),
-   pottery/kiln (clay items exist, no station), wurst/sausage and
-   baking doughs (station cooking depth), flour/bread (the 2009 pack
-   has no grain item - sprout/grist only, see farm.rs), world GATHERING
-   of branch/stone (bough/stone picking - the starter kit stands in).
+   WORLD GATHERING CLOSED (session 60): trees yield branch picks and
+   boulders yield stone picks (see the crafting-and-building.md
+   "World gathering" section). Remaining dead ends: metal chain (no
+   ore gathering/smelter numbers), pottery/kiln (clay items exist, no
+   station), wurst/sausage and baking doughs (station cooking depth),
+   flour/bread (the 2009 pack has no grain item - sprout/grist only,
+   see farm.rs).
 5. **Feeding depth**: trough-to-trough fodder transfer needs the lift
    mechanic; per-animal breed stat rows (Milk Quantity / Wool Quality
    are flat constants).
@@ -201,9 +205,9 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5. All six types have been
-served - pick freely, but avoid serving the same type as the previous
-session.
+53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3. All six types have
+been served - pick freely, but avoid serving the same type as the
+previous session.
 
 ## Session index (one line each; full entries in the archive)
 
@@ -261,92 +265,9 @@ session.
 - S57 (type 5): mv-phase profile first (new mvbat_* attribution), then dense sorted cell index for the fan-out, allocation-free movement encode, per-window max-tick perf field; 1k wall time confirmed scheduler-bound on 2 cores.
 - S58 (type 3): recipe breadth batch - 19 recipes (35 total), static paginae scanner (scan_paginae.py), fork pages string/tanhide unlock the leather tier, test_newcraft.py wire probe.
 - S59 (type 5): multi-node scaling profile (profile_multinode.sh) - pair-cap confirmed per node, guest GC cleared by measurement, guest pose finalizers moved to the packed patched batch (p95 10.9 ms -> 16 us).
+- S60 (type 3): world gathering - trees yield branch picks (TREE_HARVESTS = 5, then a decorative Stump), boulders yield stone picks (BOULDER_STONES = 5, then gone); the dead 'wood x10' drop and the clickable-stump bug are gone; shared pick legs for local + relay paths; test_gather.py wire probe + crafting-and-building.md "World gathering" section.
 
 ---
-
-## 2026-10-08 - Session 58 (type 3: new functionality)
-
-SESSION TYPE ROTATION LOG: 54=1, 55=2, 56=4, 57=5, 58=3. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: the top carried type-3 item - recipe breadth. HANDOFF gap #4
-(read: "~150 shipped paginae, 16 implemented"). Scope for this session:
-decode the full shipped paginae tree, implement the largest coherent
-batch, verify on all three tiers.
-
-INVENTORY FIRST (never assume - scan):
-- server/scripts/scan_paginae.py: STATIC AButton decode of every
-  paginae/craft/*.res (165 pages) straight from lib/haven-res.jar.
-  Layer framing + the AButton layout were verified against
-  src/haven/Resource.java (Resource.load layer loop at :1304,
-  AButton(byte[]) at :1023) and reproduce the documented rustroot
-  decode byte for byte. Result: ~140 leaf recipes with ad ids, parent
-  categories, prereq codes; 19 were implemented (S36/S45/S46 batches).
-- Cross-checked ingredient/output resources against gfx/invobjs and
-  the ECONOMY (state.rs loot rows, farm.rs yields, starter kit): the
-  pack is rich but most metal/pottery inputs have no source yet.
-
-THE BATCH (19 new recipes, 35 total) - commits 5d06095:
-- Stone/bone tools: saw (branch 2 + stone 1), bonesaw, pickaxe (pagina
-  paxe.res carries ad ["craft","pickaxe"]), scythe.
-- Farm headwear: straw hat (straw from the wheat early harvest),
-  pumpkin hat, sprucecap.
-- Woodwork: kuksa - the first recipe that CONSUMES a crafted tool
-  (saw), deepening the S46 tool plumbing.
-- Fishing gear: fishing pole, bone hook (fishing itself stays future
-  work; the gear pages ship).
-- Linen tier: toga (linencloth x4), cylinder hat (x3), gauze (x1).
-- Fork pages: the pack has NO page whose ad is ["craft","string"] or
-  ["craft","tanhide"], yet String/Leather are real invobjs the shipped
-  pages consume. res/compiled/paginae/craft/{string,tanhide}.res are
-  composed by server/scripts/make_fork_paginae.py (donor image layer
-  from the invobj icon + a new AButton layer; layout verified by the
-  same scanner; the res framing bug - a double length header - was
-  caught by exactly that cross-check). string: flax fibres x2 -> string
-  (flax/hemp early harvest). tanhide: hide-raw-cow x2 -> leather, the
-  hand-tier stand-in for the unimplemented tanning tub - unlocks the
-  shipped lboots/lpants/lcloak/waterflask pages.
-- Starter kit: branch 6->10, stone 4->6 so the stone-tool batch is
-  craftable without world gathering (bough/stone picking recorded as a
-  new gap; gathering-with-nothing-to-hit was NOT invented here).
-
-TEST PYRAMID (all three tiers, AGENTS.md rule):
-- Unit (+4): leather_chain_tans_and_consumes (tanhide -> leather ->
-  lboots with the full quality math: hides q40 -> leather q25 -> boots
-  q15 through the [2,1] type weights and the sewing softcap),
-  string_spins_from_flax_fibres, saw_crafts_from_starter_and_unlocks_
-  bucket (the S46 saw-gap loop closes), recipe_registry_is_consistent.
-- Wire: build_flow... de-hardcoded - the stone remainder expectation
-  now derives from the actual starter count (starter - demand), so kit
-  bumps cannot break it again; 4/4 wire green.
-- Live wire probe server/scripts/test_newcraft.py ON hnhlib.py (the
-  migration exemplar): act("craft","saw") -> make widget -> pop ->
-  make 0 -> saw item; bucket with the CRAFTED saw; fork paginae served
-  by res_http with a valid signature. NEWCRAFT: OK on the release
-  binary; WORLD ENTRY/CRAFT/EAT base probes green.
-
-VERIFICATION: 289 cargo tests green (11 proto + 265 unit + 4 wire +
-9 world); fmt + clippy -D warnings clean; release binary probes green.
-
-INCIDENT (recorded): the routine CI-workflow retry was run BEFORE the
-main commit with a dirty tree; the push was rejected (PAT still lacks
-the `workflow` scope) and the follow-up `git reset --hard` wiped the
-uncommitted tracked-file edits (untracked scripts survived). Restored
-byte-identically from the session transcript and re-verified (289
-green + NEWCRAFT: OK re-run) BEFORE committing. Rule for future
-sessions: commit the session's work FIRST, run the CI retry LAST.
-CI workflow push retried once per the session-53 rule: REJECTED again
-(no `workflow` scope).
-
-COMMITS: 5d06095 (recipe breadth batch) + this handoff entry.
-
-NEXT (handoff):
-- World GATHERING (bough/stone picking from trees/rocks) - the natural
-  next type-3 item; makes the starter-kit stand-in unnecessary and
-  feeds the metal chain.
-- Feeding lift (trough-to-trough fodder transfer), GL e2e + Windows
-  smoke (carried), five-probe hnhlib.py migration (test_newcraft.py is
-  the template now), CI push when the token gets the scope.
 
 ## 2026-10-08 - Session 59 (type 5: performance)
 
@@ -422,3 +343,84 @@ NEXT (handoff):
 - Carried: world gathering (bough/stone picking - type 3), feeding
   lift, five-probe hnhlib.py migration, GL e2e + Windows smoke (no
   display host), CI push when the token gets the scope.
+
+## 2026-10-08 - Session 60 (type 3: new functionality)
+
+SESSION TYPE ROTATION LOG: 56=4, 57=5, 58=3, 59=5, 60=3. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the carried type-3 item - world GATHERING (HANDOFF gap #4's
+"bough/stone picking", the starter-kit stand-in). INVENTORY FIRST:
+the repo already had statics (populate_grid spawns trees/bumlings
+deterministically from JavaRandom per tile) and a click-harvest
+(interact.rs + relay game.rs), but the session-59 state had four
+fidelity defects, verified before cutting:
+1. The tree pick dropped 10x gfx/invobjs/wood - and `wood` is used by
+   ZERO recipes; the whole craft chain consumes gfx/invobjs/branch.
+   Gathering could not feed crafting.
+2. A boulder died on the FIRST click and dropped 10 stones.
+3. The exhausted-tree stump spawned as Kind::Stone - clicking a stump
+   yielded 10 stones.
+4. The local path (game/interact.rs) and the relay path (game.rs
+   relay_chop/relay_mine) duplicated the harvest logic by hand.
+
+THE CUT (commit a63af90):
+- Kind::Stone -> Kind::Boulder { left } with BOULDER_STONES = 5: one
+  stone per pick, the boulder is removed when drained. New Kind::Stump:
+  the exhausted-tree remnant is decorative and yields nothing. Both
+  counts are state.rs constants (server policy; the wiki gives no
+  numbers - recorded in the docs' Open questions).
+- Trees drop ONE branch per pick; TREE_HARVESTS = 5 picks then leave
+  the stump. Flat GATHER_QL = 10 matches the starter kit, so gathered
+  materials craft identically. LP grants carried (5 branch / 3 stone).
+- Shared pick legs harvest_tree/harvest_boulder (game/interact.rs)
+  serve BOTH the local click and the cross-node relay; the duplicates
+  in game.rs are deleted. Every pick re-publishes the harvest state to
+  subscriber nodes (guest copies re-render; the old local path never
+  published a frame bump).
+- Guest views: boulders stay StaticClass::Stone (relay Mine); stumps
+  map to StaticClass::Structure (no relay act), so a guest stump click
+  is a validated no-op instead of a mine.
+- docs/mechanics/crafting/crafting-and-building.md: new "World
+  gathering" section (legacy baseline + every policy constant + the
+  verification story) and an Open questions entry for the unknown
+  legacy numbers.
+
+VERIFICATION:
+- 294 cargo tests green (11 proto + 270 unit incl. the three new pins:
+  relay_mine_boulder_yields_one_stone_per_pick, stump_pick_yields_
+  nothing, relay_chop_exhaustion_leaves_a_structure_class_stump; the
+  chop test now asserts the BRANCH drop resource; + 4 wire + 9 world).
+  fmt + clippy -D warnings clean.
+- Release binary probes: WORLD ENTRY: OK, CATTR ORDER: OK, NEWCRAFT:
+  OK (saw/bucket/fork paginae), EAT FLOW: OK, STATION FLOW: OK, and
+  the new GATHER: OK - server/scripts/test_gather.py (hnhlib harness)
+  walks to the seed-42 forest (the fresh spawn on the open grass has
+  25+ boulders in view but ZERO trees; the nearest forest is grid
+  (0,-1), ~90 tiles north - the probe documents this layout), picks a
+  branch, then drains a boulder: 5 stone drops, every one picked up
+  into the inventory, boulder retracted at the end.
+- Probe craft notes for future sessions: fresh chars spawn around tile
+  (50,50) but SAVED chars resume wherever they stopped, and drops only
+  stream inside VIEW_RADIUS = 300 subtiles - so the probe walks within
+  ~220 subtiles of the object before clicking (approach()), exactly
+  what the real client's walk-to-target does. The res_http index is
+  built at startup: regenerate gameres/ BEFORE booting the server or
+  fork paginae 404.
+
+Real-client e2e: NOT run this session (no display host in this
+sandbox; deploy-agent-env.sh provisioning started but not waited out -
+same carried state as sessions 58/59). The wire probe exercises the
+same spawn/drop/pickup contracts the GL client consumes, and the drop
+resources (gfx/terobjs/items/branch, .../stone) are the pack's own
+neg-layer shapes validated in session 26.
+
+COMMITS: a63af90 (world gathering) + this handoff entry.
+
+NEXT (handoff):
+- Type-3 candidates: feeding lift (trough-to-trough transfer), metal
+  chain groundwork (ore gathering), flower-menu for the pick verbs.
+- Carried: five-probe hnhlib.py migration (test_gather.py and
+  test_newcraft.py are the templates), GL e2e + Windows smoke (no
+  display host), multi-machine cluster profile, CI push when the
+  token gets the scope.

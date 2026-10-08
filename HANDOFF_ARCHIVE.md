@@ -3807,3 +3807,87 @@ NEXT (handoff):
 - Mechanical carried: five-probe hnhlib.py migration, recipe breadth
   (type 3), feeding lift, GL e2e + Windows smoke (no display host).
 
+## 2026-10-08 - Session 58 (type 3: new functionality)
+
+SESSION TYPE ROTATION LOG: 54=1, 55=2, 56=4, 57=5, 58=3. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the top carried type-3 item - recipe breadth. HANDOFF gap #4
+(read: "~150 shipped paginae, 16 implemented"). Scope for this session:
+decode the full shipped paginae tree, implement the largest coherent
+batch, verify on all three tiers.
+
+INVENTORY FIRST (never assume - scan):
+- server/scripts/scan_paginae.py: STATIC AButton decode of every
+  paginae/craft/*.res (165 pages) straight from lib/haven-res.jar.
+  Layer framing + the AButton layout were verified against
+  src/haven/Resource.java (Resource.load layer loop at :1304,
+  AButton(byte[]) at :1023) and reproduce the documented rustroot
+  decode byte for byte. Result: ~140 leaf recipes with ad ids, parent
+  categories, prereq codes; 19 were implemented (S36/S45/S46 batches).
+- Cross-checked ingredient/output resources against gfx/invobjs and
+  the ECONOMY (state.rs loot rows, farm.rs yields, starter kit): the
+  pack is rich but most metal/pottery inputs have no source yet.
+
+THE BATCH (19 new recipes, 35 total) - commits 5d06095:
+- Stone/bone tools: saw (branch 2 + stone 1), bonesaw, pickaxe (pagina
+  paxe.res carries ad ["craft","pickaxe"]), scythe.
+- Farm headwear: straw hat (straw from the wheat early harvest),
+  pumpkin hat, sprucecap.
+- Woodwork: kuksa - the first recipe that CONSUMES a crafted tool
+  (saw), deepening the S46 tool plumbing.
+- Fishing gear: fishing pole, bone hook (fishing itself stays future
+  work; the gear pages ship).
+- Linen tier: toga (linencloth x4), cylinder hat (x3), gauze (x1).
+- Fork pages: the pack has NO page whose ad is ["craft","string"] or
+  ["craft","tanhide"], yet String/Leather are real invobjs the shipped
+  pages consume. res/compiled/paginae/craft/{string,tanhide}.res are
+  composed by server/scripts/make_fork_paginae.py (donor image layer
+  from the invobj icon + a new AButton layer; layout verified by the
+  same scanner; the res framing bug - a double length header - was
+  caught by exactly that cross-check). string: flax fibres x2 -> string
+  (flax/hemp early harvest). tanhide: hide-raw-cow x2 -> leather, the
+  hand-tier stand-in for the unimplemented tanning tub - unlocks the
+  shipped lboots/lpants/lcloak/waterflask pages.
+- Starter kit: branch 6->10, stone 4->6 so the stone-tool batch is
+  craftable without world gathering (bough/stone picking recorded as a
+  new gap; gathering-with-nothing-to-hit was NOT invented here).
+
+TEST PYRAMID (all three tiers, AGENTS.md rule):
+- Unit (+4): leather_chain_tans_and_consumes (tanhide -> leather ->
+  lboots with the full quality math: hides q40 -> leather q25 -> boots
+  q15 through the [2,1] type weights and the sewing softcap),
+  string_spins_from_flax_fibres, saw_crafts_from_starter_and_unlocks_
+  bucket (the S46 saw-gap loop closes), recipe_registry_is_consistent.
+- Wire: build_flow... de-hardcoded - the stone remainder expectation
+  now derives from the actual starter count (starter - demand), so kit
+  bumps cannot break it again; 4/4 wire green.
+- Live wire probe server/scripts/test_newcraft.py ON hnhlib.py (the
+  migration exemplar): act("craft","saw") -> make widget -> pop ->
+  make 0 -> saw item; bucket with the CRAFTED saw; fork paginae served
+  by res_http with a valid signature. NEWCRAFT: OK on the release
+  binary; WORLD ENTRY/CRAFT/EAT base probes green.
+
+VERIFICATION: 289 cargo tests green (11 proto + 265 unit + 4 wire +
+9 world); fmt + clippy -D warnings clean; release binary probes green.
+
+INCIDENT (recorded): the routine CI-workflow retry was run BEFORE the
+main commit with a dirty tree; the push was rejected (PAT still lacks
+the `workflow` scope) and the follow-up `git reset --hard` wiped the
+uncommitted tracked-file edits (untracked scripts survived). Restored
+byte-identically from the session transcript and re-verified (289
+green + NEWCRAFT: OK re-run) BEFORE committing. Rule for future
+sessions: commit the session's work FIRST, run the CI retry LAST.
+CI workflow push retried once per the session-53 rule: REJECTED again
+(no `workflow` scope).
+
+COMMITS: 5d06095 (recipe breadth batch) + this handoff entry.
+
+NEXT (handoff):
+- World GATHERING (bough/stone picking from trees/rocks) - the natural
+  next type-3 item; makes the starter-kit stand-in unnecessary and
+  feeds the metal chain.
+- Feeding lift (trough-to-trough fodder transfer), GL e2e + Windows
+  smoke (carried), five-probe hnhlib.py migration (test_newcraft.py is
+  the template now), CI push when the token gets the scope.
+
