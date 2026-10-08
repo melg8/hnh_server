@@ -583,6 +583,37 @@ required; Legacy:Hunting). Rules:
   the per-field serde defaults (verified: a v6 file loads under the
   v7 binary).
 
+## Server implementation notes (this repo, session 62: the lift mechanic)
+
+- Lift (docs "Food Trough: a 2x1 lift-able object"): clicking a placed
+  Food Trough opens a one-petal flower menu ("Lift"); choosing it
+  retracts the gob for every viewer, frees the tile, and the fodder
+  store (units + the running quality history) rides the player as
+  `Player.carried_trough`. One carried object at a time; the trough
+  re-enters the world by a plain map click (the mapview `place` path)
+  at a tile that passes the same reach / terrain / occupancy
+  validations a build commit runs.
+- Trough-to-trough transfer (docs "lift-and-right-click on another
+  trough transfers fodder like a liquid"): clicking a placed trough
+  while carrying moves `min(carried, cap - dest)` units into it; the
+  moved units carry the SOURCE's running average, so the destination's
+  quality mixes by the same arithmetic the load path uses
+  (q10*100 + q12*50 -> q10). The source keeps its full quality history
+  (the session-48 rule "consumption drains units but NOT the quality
+  history") - an emptied trough keeps its average.
+- Persistence: `carried_trough` is a per-character save field (v7,
+  additive, bincode-safe `default`); a lifted trough with its fodder
+  survives restarts and cross-node character migration (CharData now
+  boxes the snapshot row). The system lines "You lift the trough (N
+  fodder units)." / "You place the trough (N fodder units)." /
+  "Transferred N fodder units." name every outcome on the wire.
+- Scope notes: the trough's 2x1 footprint stays out of scope (the gob
+  occupies its tile like any structure); a trough owned by a PEER node
+  offers no Lift petal to a guest (the click is a validated no-op) -
+  cross-node lift/transfer relays are future work, and the carried
+  trough's avatar render (the legacy carry pose) is client-side art
+  the server does not stream yet.
+
 ## Open questions (animals)
 
 - Taming state (post session-47): the "battle intensity == 0",
@@ -596,8 +627,9 @@ required; Legacy:Hunting). Rules:
   Quality per animal) are flat server-policy constants (10 / 5);
   breeding/gestation is out of scope until animals carry per-animal
   stat rows. The Food Trough and starvation ARE implemented (session
-  48); still open: the doc's 2x1 footprint + trough-to-trough fodder
-  transfer (no lift mechanic exists), the doc's fodder items with no
+  48); the lift mechanic and trough-to-trough fodder transfer are
+  IMPLEMENTED (session 62); still open: the doc's 2x1 footprint, the
+  cross-node lift/transfer relays, the doc's fodder items with no
   2009-pack resources (blueberries, chantrelles, bloated bolete,
   peapod, beetroot/leaves, giant pumpkin), and linking the milk/wool
   product quality to the consumed fodder average (GRAZE_PRODUCT_QL

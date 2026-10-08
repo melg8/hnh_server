@@ -702,6 +702,12 @@ pub struct Player {
     /// Active ranged aim (bow equipped; see archery.rs). Mutually
     /// exclusive with `fight_target`.
     pub aim: Option<crate::archery::RangedAim>,
+    /// The Food Trough this player lifted (animals-and-husbandry.md
+    /// "Feeding: troughs and grazing"): a lifted trough leaves the world
+    /// with its fodder store intact and rides the player until a map
+    /// click places it back down or a click on another trough transfers
+    /// the fodder "like a liquid". Persisted per character.
+    pub carried_trough: Option<TroughState>,
 }
 
 /// Live combat bars for one animal engaged with a player.
@@ -971,6 +977,10 @@ pub struct SessionOut {
     /// station (the act was picked from the piggybacked snapshot and is
     /// relayed to the authority, which re-validates it).
     pub station_menu: Option<(u16, GobId, Option<crate::nodes::StationAct>)>,
+    /// Pending Food Trough flower menu (session 62): (sm widget id, the
+    /// clicked trough gob). The Lift choice is resolved against the
+    /// authority state at apply time, like the station menu.
+    pub trough_menu: Option<(u16, GobId)>,
     /// Item stack currently held on the cursor (take -> itemact flow).
     pub cursor: Option<InvStack>,
     /// Widget id of the drag Item widget following the mouse (the

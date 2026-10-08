@@ -770,6 +770,16 @@ impl Game {
             self.apply_station_choice(sid, wid, choice);
             return;
         }
+        // Food Trough Lift menus (session 62).
+        let trough_menu = self
+            .sessions
+            .get(&sid)
+            .and_then(|o| o.trough_menu)
+            .map(|(w, _)| w);
+        if trough_menu == Some(wid) {
+            self.apply_trough_choice(sid, wid, choice);
+            return;
+        }
         let pending = self
             .sessions
             .get(&sid)

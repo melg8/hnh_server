@@ -1146,6 +1146,7 @@ impl Game {
             pending_plow: false,
             pending_build: None,
             station_menu: None,
+            trough_menu: None,
             cursor: None,
             cursor_wid: None,
             grids_seen: HashSet::new(),
@@ -1582,7 +1583,16 @@ impl Game {
             fight_target: None,
             atk_cd: 0,
             aim: None,
+            carried_trough: None,
         });
+        // A lifted Food Trough (session 62) rides the character across
+        // sessions: restore the fodder store before anything else can
+        // interact with the fresh player row.
+        if let Some(saved) = self.save.players.get(&key) {
+            if let Some(t) = saved.carried_trough {
+                self.world.players[player_idx].carried_trough = Some(t.into());
+            }
+        }
         self.world.by_session.insert(sid, player_idx);
 
         // Starter kit for fresh characters (server policy; legacy gave

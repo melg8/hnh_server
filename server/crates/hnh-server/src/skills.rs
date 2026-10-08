@@ -386,6 +386,7 @@ mod tests {
             inv: Vec::new(),
             inv_labels: Vec::new(),
             skills: owned.iter().map(|s| s.to_string()).collect(),
+            carried_trough: None,
         };
         let restore = |saved: &SavedPlayer| -> HashSet<&'static str> {
             // Names in the save were validated at purchase time; an

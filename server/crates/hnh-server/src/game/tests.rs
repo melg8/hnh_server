@@ -2668,6 +2668,7 @@ fn snapshot(key: &str, pos: (i32, i32)) -> crate::persist::SavedPlayer {
         skills: Vec::new(),
         equip: Vec::new(),
         criminal_until_ms: None,
+        carried_trough: None,
     }
 }
 
@@ -2775,7 +2776,7 @@ async fn chardata_adopts_the_snapshot_and_enters_the_world() {
         to: 1,
         from: 0,
         name: key.clone(),
-        snap: snapshot(&key, (777, -777)),
+        snap: Box::new(snapshot(&key, (777, -777))),
     });
     let pidx = *g.world.by_session.get(&1).expect("entered via migration");
     let pgob = g.world.players[pidx].gob;
@@ -7797,4 +7798,170 @@ async fn trough_and_feeding_persistence_roundtrip() {
     assert_eq!(restored.units, 42);
     assert_eq!(restored.avg_ql(), 9, "the quality history survives");
     assert!(trough_spec < crate::build::BUILDABLES.len() as u8);
+}
+
+// ------------------------------------------------------------------
+// Food Trough lift / place / fodder transfer (session 62;
+// animals-and-husbandry.md "Feeding: troughs and grazing": a lift-able
+// trough, and "lift-and-right-click on another trough transfers fodder
+// like a liquid").
+// ------------------------------------------------------------------
+
+/// Click helper: a gob click exactly the shape MapView.wdgmsg("click")
+/// sends (c0, mc, button, modflags, gobid, gobrc).
+fn click_gob_args(gob: GobId, pos: (i32, i32)) -> Vec<hnh_proto::ListArg> {
+    vec![
+        hnh_proto::ListArg::Coord(0, 0),
+        hnh_proto::ListArg::Coord(pos.0, pos.1),
+        hnh_proto::ListArg::Int(1),
+        hnh_proto::ListArg::Int(0),
+        hnh_proto::ListArg::Int(gob),
+        hnh_proto::ListArg::Coord(pos.0, pos.1),
+    ]
+}
+
+/// Lift flow: click a placed trough -> the Lift flower menu opens ->
+/// choosing it retracts the gob, frees its tile, and the fodder store
+/// rides the player.
+#[tokio::test]
+async fn trough_lift_retracts_the_gob_and_carries_the_fodder() {
+    let (mut g, _rx, _raw) = entered_game("s62troughlift");
+    let gob = built_trough(&mut g, 12, 144, 12);
+    let pos = {
+        let slot = g.world.gobs.get(gob).unwrap();
+        g.world.gobs.pos[slot]
+    };
+
+    g.on_map_click(1, &click_gob_args(gob, pos));
+    let sm = g.sessions.get(&1).unwrap().trough_menu;
+    assert!(sm.is_some(), "the Lift flower menu must open");
+
+    g.on_flower_choice(1, sm.unwrap().0, 0);
+    assert!(
+        g.world.gobs.get(gob).is_none(),
+        "the lifted trough leaves the world"
+    );
+    assert!(!g.world.troughs.contains_key(&gob));
+    // The tile is free for a later placement.
+    let tile = (pos.0.div_euclid(11), pos.1.div_euclid(11));
+    assert!(!g.world.structure_at.contains_key(&tile));
+    let carried = g.world.players[0]
+        .carried_trough
+        .expect("the fodder store rides the player");
+    assert_eq!(carried.units, 12);
+    assert_eq!(
+        carried.avg_ql(),
+        12,
+        "the quality history survives the lift"
+    );
+}
+
+/// Place-back: a map click while carrying re-enters the trough on the
+/// clicked tile (in reach, walkable, unoccupied) with the exact fodder
+/// state it lifted with.
+#[tokio::test]
+async fn trough_place_back_restores_the_store() {
+    let (mut g, _rx, _raw) = entered_game("s62troughplace");
+    let gob = built_trough(&mut g, 7, 56, 7);
+    let pos = {
+        let slot = g.world.gobs.get(gob).unwrap();
+        g.world.gobs.pos[slot]
+    };
+    g.on_map_click(1, &click_gob_args(gob, pos));
+    g.on_flower_choice(1, g.sessions.get(&1).unwrap().trough_menu.unwrap().0, 0);
+    assert!(g.world.players[0].carried_trough.is_some());
+
+    // One tile east of the player: in reach by construction.
+    let pslot = g.world.gobs.get(pgob_of(&g)).unwrap();
+    let (px, py) = g.world.gobs.pos[pslot];
+    force_tile(&mut g, (px + 33, py), hnh_world::gen::tile::GRASS);
+    let tile = ((px + 33).div_euclid(11), py.div_euclid(11));
+    let (mx, my) = (tile.0 * 11 + 5, tile.1 * 11 + 5);
+    g.on_map_place(
+        1,
+        &[
+            hnh_proto::ListArg::Coord(mx, my),
+            hnh_proto::ListArg::Int(1),
+            hnh_proto::ListArg::Int(0),
+        ],
+    );
+    assert!(
+        g.world.players[0].carried_trough.is_none(),
+        "the carry ends on placement"
+    );
+    let new_gob = g
+        .world
+        .structure_at
+        .get(&tile)
+        .copied()
+        .expect("occupancy registered");
+    let restored = g.world.troughs.get(&new_gob).expect("the store reopens");
+    assert_eq!(restored.units, 7);
+    assert_eq!(restored.ql_sum, 56);
+    assert_eq!(restored.ql_seen, 7);
+    assert!(
+        g.world.gobs.get(new_gob).is_some(),
+        "a new trough gob stands on the tile"
+    );
+    assert_ne!(new_gob, gob, "the lifted gob id was consumed");
+}
+
+/// Transfer: clicking a placed trough while carrying moves the fodder
+/// "like a liquid" - units up to the destination capacity, the moved
+/// units carrying the source's running average. The source keeps the
+/// remainder; its average is invariant under the move.
+#[tokio::test]
+async fn trough_transfer_moves_fodder_like_a_liquid() {
+    let (mut g, _rx, _raw) = entered_game("s62troughtransfer");
+    // The carried source: 50 units at average q12 (ql_sum 600 / seen 50).
+    g.world.players[0].carried_trough = Some(crate::state::TroughState {
+        units: 50,
+        ql_sum: 600,
+        ql_seen: 50,
+    });
+    // The destination: 100 units at average q10 (ql_sum 1000 / seen 100).
+    let dest = built_trough(&mut g, 100, 1000, 100);
+    let pos = {
+        let slot = g.world.gobs.get(dest).unwrap();
+        g.world.gobs.pos[slot]
+    };
+
+    g.on_map_click(1, &click_gob_args(dest, pos));
+    // No menu while carrying: the transfer applies immediately.
+    assert!(g.sessions.get(&1).unwrap().trough_menu.is_none());
+    let dest_state = g.world.troughs.get(&dest).unwrap();
+    assert_eq!(dest_state.units, 150, "50 of the carried 50 units moved");
+    assert_eq!(dest_state.ql_seen, 150);
+    assert_eq!(dest_state.ql_sum, 1600, "q10*100 + q12*50");
+    assert_eq!(dest_state.avg_ql(), 10, "1600/150 floors to q10");
+    let carried = g.world.players[0].carried_trough.unwrap();
+    assert_eq!(carried.units, 0, "everything fit: nothing carried");
+    assert_eq!(carried.avg_ql(), 12, "an emptied source keeps its average");
+    assert_eq!(carried.ql_seen, 50, "the history is NOT drained (S48 rule)");
+    assert_eq!(carried.ql_sum, 600);
+}
+
+/// Capacity: a full destination takes nothing and says so; a partial
+/// fit moves what fits and keeps the remainder carried.
+#[tokio::test]
+async fn trough_transfer_respects_the_capacity_cap() {
+    let (mut g, _rx, _raw) = entered_game("s62troughcap");
+    g.world.players[0].carried_trough = Some(crate::state::TroughState {
+        units: 30,
+        ql_sum: 300,
+        ql_seen: 30,
+    });
+    // The destination holds 180 of the 200-unit cap: only 20 fit.
+    let dest = built_trough(&mut g, 180, 1800, 180);
+    let pos = {
+        let slot = g.world.gobs.get(dest).unwrap();
+        g.world.gobs.pos[slot]
+    };
+    g.on_map_click(1, &click_gob_args(dest, pos));
+    let dest_state = g.world.troughs.get(&dest).unwrap();
+    assert_eq!(dest_state.units, 200, "the destination is at the cap");
+    let carried = g.world.players[0].carried_trough.unwrap();
+    assert_eq!(carried.units, 10, "the remainder stays carried");
+    assert_eq!(carried.ql_sum, 300, "the history is untouched (S48 rule)");
+    assert_eq!(carried.avg_ql(), 10);
 }

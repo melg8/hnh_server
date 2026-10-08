@@ -500,7 +500,10 @@ pub enum NodeMsg {
         to: usize,
         from: usize,
         name: String,
-        snap: crate::persist::SavedPlayer,
+        // Boxed: SavedPlayer is a large row and this variant would
+        // otherwise dominate the NodeMsg enum's stack size (clippy
+        // large-enum-variant). Bincode serializes Box<T> as T.
+        snap: Box<crate::persist::SavedPlayer>,
     },
     /// Unicast confirmation that the CharData snapshot was adopted. The
     /// holder drops its copy only on receipt.

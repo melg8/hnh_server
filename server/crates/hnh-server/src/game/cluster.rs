@@ -504,7 +504,7 @@ impl Game {
                         to: from,
                         from: me,
                         name,
-                        snap,
+                        snap: Box::new(snap),
                     },
                 );
             }
@@ -537,7 +537,7 @@ impl Game {
                 };
                 self.pending_joins.remove(&sid);
                 info!(sid, %name, pos = ?snap.pos, "char migration received: entering world");
-                self.save.players.insert(name.clone(), snap);
+                self.save.players.insert(name.clone(), *snap);
                 // Confirm adoption so the holder drops its copy.
                 self.cluster_mesh().send(from, NodeMsg::CharAck { name });
                 self.enter_world_inner(sid, chosen, false);

@@ -335,6 +335,12 @@ impl Game {
             }
             Kind::Structure { spec } => {
                 let buildable = &crate::build::BUILDABLES[spec as usize];
+                if buildable.id == "trough" {
+                    // Food Trough (session 62): carrying -> the fodder
+                    // transfer, otherwise the Lift flower menu.
+                    self.trough_click(sid, target);
+                    return;
+                }
                 self.system_line(sid, &format!("A fine {} stands here.", buildable.id));
             }
             Kind::Player { .. } => {

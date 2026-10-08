@@ -63,11 +63,222 @@ impl Game {
             return;
         }
         let Some((mx, my)) = mc else { return };
+        // A lifted Food Trough (session 62) takes precedence over the
+        // build ghost: a map click while carrying places the trough on
+        // the clicked tile (docs "lift-and-right-click"; the legacy
+        // client drives placement through the same mapview place path).
+        if self.world.player(sid).map(|p| p.carried_trough.is_some()) == Some(true) {
+            self.place_carried_trough(sid, (mx, my));
+            return;
+        }
         let Some(spec) = self.sessions.get(&sid).and_then(|o| o.pending_build) else {
             debug!(sid, "place without armed build: ignoring");
             return;
         };
         self.commit_build(sid, spec, (mx, my));
+    }
+
+    /// Click on a Food Trough (Kind::Structure with the trough spec,
+    /// session 62): carrying a trough transfers its fodder "like a
+    /// liquid" into the clicked one; otherwise the Lift flower menu
+    /// opens. Guest troughs (another node's authority) stay out of
+    /// scope - the click is a validated no-op there, like a stump pick.
+    pub(super) fn trough_click(&mut self, sid: SessionId, target: GobId) {
+        if !self.world.troughs.contains_key(&target) {
+            return;
+        }
+        if self.world.player(sid).map(|p| p.carried_trough.is_some()) == Some(true) {
+            self.transfer_trough_fodder(sid, target);
+        } else {
+            self.open_trough_menu(sid, target);
+        }
+    }
+
+    /// Open the Lift flower menu on a placed Food Trough.
+    fn open_trough_menu(&mut self, sid: SessionId, target: GobId) {
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        // One flower menu at a time per session (the shared rule).
+        if let Some((old, _)) = out.trough_menu {
+            out.send(wdg::dst_wdg(old));
+            out.trough_menu = None;
+        }
+        if let Some((old, _, _)) = out.station_menu {
+            out.send(wdg::dst_wdg(old));
+            out.station_menu = None;
+        }
+        let w = out.new_wid("sm");
+        out.send(wdg::new_wdg(
+            w,
+            "sm",
+            -1,
+            -1,
+            0,
+            &[ListVal::S("Lift".to_owned())],
+        ));
+        out.trough_menu = Some((w, target));
+    }
+
+    /// Lift choice on a trough menu: the trough leaves the world (the
+    /// gob is retracted for every viewer) and its fodder store rides
+    /// the player. One carried object at a time.
+    pub(super) fn apply_trough_choice(&mut self, sid: SessionId, wid: u16, choice: i32) {
+        let pending = self
+            .sessions
+            .get(&sid)
+            .and_then(|o| o.trough_menu)
+            .filter(|(w, _)| *w == wid);
+        let Some((_, gob)) = pending else {
+            return;
+        };
+        let Some(out) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        out.trough_menu = None;
+        out.send(wdg::dst_wdg(wid));
+        if choice != 0 {
+            out.send(wdg::wdgmsg(wid, "cancel", &[]));
+            return;
+        }
+        let Some(pidx) = self.world.by_session.get(&sid).copied() else {
+            return;
+        };
+        if self.world.players[pidx].carried_trough.is_some() {
+            self.system_line(sid, "You are already carrying something.");
+            return;
+        }
+        let Some(state) = self.world.troughs.remove(&gob) else {
+            return;
+        };
+        // Retract for every viewer (the Drop-pickup removal path) and
+        // free the tile so a later placement can reuse it.
+        if let Some(slot) = self.world.gobs.get(gob) {
+            let pos = self.world.gobs.pos[slot];
+            let tile = (pos.0.div_euclid(11), pos.1.div_euclid(11));
+            self.world.structure_at.remove(&tile);
+        }
+        self.world.gobs.kill(gob);
+        self.broadcast_retract(gob);
+        let units = state.units;
+        self.world.players[pidx].carried_trough = Some(state);
+        self.system_line(
+            sid,
+            &format!("You lift the trough ({} fodder units).", units),
+        );
+        info!(sid, gob, units, "trough lifted");
+    }
+
+    /// Map-click placement of a carried Food Trough: the same tile
+    /// validations as a build commit (reach, walkable terrain, no crop
+    /// / plan / structure on the tile), then the trough re-enters the
+    /// world with the fodder store it left with.
+    fn place_carried_trough(&mut self, sid: SessionId, (mx, my): (i32, i32)) {
+        let Some(pidx) = self.world.by_session.get(&sid).copied() else {
+            return;
+        };
+        let Some(spec) = crate::build::BUILDABLES
+            .iter()
+            .position(|b| b.id == "trough")
+        else {
+            return;
+        };
+        let buildable = &crate::build::BUILDABLES[spec];
+        let tile = Self::tile_coord(mx, my);
+        // Reach: identical 5-tile policy to a build commit.
+        let in_reach = self
+            .world
+            .player(sid)
+            .and_then(|p| self.world.gobs.get(p.gob))
+            .map(|slot| {
+                let (px, py) = self.world.gobs.pos[slot];
+                let (ptx, pty) = (px.div_euclid(11), py.div_euclid(11));
+                (ptx - tile.0).abs() <= 5 && (pty - tile.1).abs() <= 5
+            })
+            .unwrap_or(false);
+        if !in_reach {
+            self.system_line(sid, "Too far away to place that there.");
+            return;
+        }
+        // Terrain + occupancy: passable and free of crops/plans/structures.
+        let gc = (tile.0.div_euclid(100), tile.1.div_euclid(100));
+        let (lx, ly) = (
+            tile.0.rem_euclid(100) as usize,
+            tile.1.rem_euclid(100) as usize,
+        );
+        let t = self.world.grids.grid(gc).tile(lx, ly);
+        if crate::state::tile_speed(t).is_none()
+            || self.world.crop_at.contains_key(&tile)
+            || self.world.plan_at.contains_key(&tile)
+            || self.world.structure_at.contains_key(&tile)
+        {
+            self.system_line(sid, "You cannot place the trough there.");
+            return;
+        }
+        let Some(carried) = self.world.players[pidx].carried_trough.take() else {
+            return;
+        };
+        let res_idx = self.world.res.intern(buildable.res);
+        let pos = (tile.0 * 11 + 5, tile.1 * 11 + 5);
+        let gob = self.world.gobs.spawn(
+            Kind::Structure { spec: spec as u8 },
+            pos,
+            res_idx,
+            buildable.hp,
+            0,
+        );
+        self.world.troughs.insert(gob, carried);
+        self.world.structure_at.insert(tile, gob);
+        self.broadcast_spawn(gob);
+        self.system_line(
+            sid,
+            &format!("You place the trough ({} fodder units).", carried.units),
+        );
+        info!(sid, gob, units = carried.units, ?tile, "trough placed");
+    }
+
+    /// Transfer the carried fodder into a clicked placed trough "like a
+    /// liquid" (docs animals-and-husbandry.md "Feeding: troughs and
+    /// grazing"): units move up to the destination's capacity; the
+    /// quality average mixes by the same running-average arithmetic the
+    /// load path uses (the moved units carry the source's average).
+    fn transfer_trough_fodder(&mut self, sid: SessionId, target: GobId) {
+        let Some(pidx) = self.world.by_session.get(&sid).copied() else {
+            return;
+        };
+        let Some(dest) = self.world.troughs.get_mut(&target) else {
+            return;
+        };
+        let Some(carried) = self.world.players[pidx].carried_trough else {
+            return;
+        };
+        let free = crate::state::TROUGH_CAP_UNITS - dest.units;
+        let moved = carried.units.min(free);
+        if moved == 0 {
+            self.system_line(sid, "The trough is full.");
+            return;
+        }
+        // The moved units leave the source at the source's average. The
+        // source keeps its FULL quality history (the session-48 rule
+        // "consumption drains units but NOT the quality history" - a
+        // transfer consumes the source's units), so its average is
+        // invariant under the move and an emptied trough keeps its q.
+        let src_avg = carried
+            .ql_sum
+            .checked_div(carried.ql_seen)
+            .unwrap_or(10) // an empty store rides at the grazing baseline
+            .min(255) as u8;
+        dest.units += moved;
+        dest.ql_seen += moved as u64;
+        dest.ql_sum += u64::from(src_avg) * moved as u64;
+        let remaining = carried.units - moved;
+        self.world.players[pidx].carried_trough = Some(TroughState {
+            units: remaining,
+            ql_sum: carried.ql_sum,
+            ql_seen: carried.ql_seen,
+        });
+        self.system_line(sid, &format!("Transferred {} fodder units.", moved));
+        info!(sid, target, moved, remaining, "trough fodder transferred");
     }
 
     /// Validate a placement commit and spawn the construction plan gob.

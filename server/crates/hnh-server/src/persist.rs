@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::Player;
+use crate::state::{Player, TroughState};
 
 /// Full save key of a character: `<account>:<charname>`, with `:`
 /// stripped from the account so the separator stays unambiguous.
@@ -58,6 +58,41 @@ pub struct SavedPlayer {
     /// saves -> clean record). None while the record is clean.
     #[serde(default)]
     pub criminal_until_ms: Option<u64>,
+    /// The lifted Food Trough's fodder store (v7, additive; absent in
+    /// older saves -> nothing carried). Persisted so a lifted trough
+    /// with its fodder survives restarts with the character.
+    #[serde(default)]
+    pub carried_trough: Option<SavedTrough>,
+}
+
+/// A carried (lifted) Food Trough's fodder store (session 62). The
+/// placement is NOT carried - a placed-back trough picks up the tile
+/// it lands on; only the fodder state rides the character.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct SavedTrough {
+    pub units: u32,
+    pub ql_sum: u64,
+    pub ql_seen: u64,
+}
+
+impl From<TroughState> for SavedTrough {
+    fn from(t: TroughState) -> Self {
+        SavedTrough {
+            units: t.units,
+            ql_sum: t.ql_sum,
+            ql_seen: t.ql_seen,
+        }
+    }
+}
+
+impl From<SavedTrough> for TroughState {
+    fn from(t: SavedTrough) -> Self {
+        TroughState {
+            units: t.units,
+            ql_sum: t.ql_sum,
+            ql_seen: t.ql_seen,
+        }
+    }
 }
 
 /// Top-level save container. Bump VERSION on incompatible changes.
@@ -318,6 +353,7 @@ impl SaveStore {
                 skills: p.skills.iter().map(|s| s.to_string()).collect(),
                 equip: equip_named,
                 criminal_until_ms: p.criminal_until_ms,
+                carried_trough: p.carried_trough.map(SavedTrough::from),
             },
         );
     }
@@ -380,6 +416,7 @@ mod tests {
                 fight_target: None,
                 atk_cd: 0,
                 aim: None,
+                carried_trough: None,
             },
             (123, -456),
             vec![("gfx/invobjs/stone".to_owned(), 3, 7)],
@@ -398,6 +435,63 @@ mod tests {
         assert_eq!(p.lp, 12);
         assert_eq!(p.inv[0].0, "gfx/invobjs/stone");
         assert_eq!(p.inv_labels.len(), 1);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A lifted Food Trough (session 62) rides the character through
+    /// the save round trip: the fodder store (units + quality history)
+    /// must come back byte-identical.
+    #[test]
+    fn roundtrip_preserves_a_carried_trough() {
+        let dir = std::env::temp_dir().join(format!("hnh-trough-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.json");
+
+        let mut store = SaveStore::load(&path, 42);
+        store.snapshot(
+            &Player {
+                account: "carrier".to_owned(),
+                name: "carrier".to_owned(),
+                gob: 1,
+                equip: Vec::new(),
+                session: 1,
+                hp: 100,
+                energy: 100,
+                stamina: 100,
+                lp: 0,
+                criminal_until_ms: None,
+                lp_carry_ms: 0,
+                gait: 1,
+                skills: std::collections::HashSet::new(),
+                attrs: HashMap::new(),
+                inv: Vec::new(),
+                fep: crate::craft::FepState::default(),
+                fight_target: None,
+                atk_cd: 0,
+                aim: None,
+                carried_trough: Some(crate::state::TroughState {
+                    units: 37,
+                    ql_sum: 555,
+                    ql_seen: 45,
+                }),
+            },
+            (10, 20),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        store.flush(42).unwrap();
+
+        let reloaded = SaveStore::load(&path, 42);
+        let p = reloaded
+            .players
+            .get(&save_key("carrier", "carrier"))
+            .expect("the carrying character persisted");
+        let t = p.carried_trough.expect("the carried trough persisted");
+        assert_eq!(t.units, 37);
+        assert_eq!(t.ql_sum, 555);
+        assert_eq!(t.ql_seen, 45);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -436,6 +530,7 @@ mod tests {
                 fight_target: None,
                 atk_cd: 0,
                 aim: None,
+                carried_trough: None,
             },
             (0, 0),
             Vec::new(),
