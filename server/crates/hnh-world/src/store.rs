@@ -43,6 +43,16 @@ impl GridStore {
         self.gen.seed
     }
 
+    /// Pure-terrain sample at an absolute tile (no grid allocation, no
+    /// override replay). Used by worldgen-time placement rules (ore
+    /// deposits sample their neighbors before spawning); terraforming
+    /// overrides intentionally do NOT participate - placement decisions
+    /// must be a pure function of the seed so every node and every
+    /// restart agrees on what the world contains.
+    pub fn terrain_at(&self, tx: i32, ty: i32) -> u8 {
+        self.gen.tile_at(tx, ty)
+    }
+
     /// Get-or-generate a grid. Generation is deterministic, so any node
     /// produces identical bytes for the same key (grid-shard ready).
     /// Tile overrides (terraforming state) are re-applied on top.

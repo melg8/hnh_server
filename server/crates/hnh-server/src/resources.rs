@@ -6,8 +6,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Served resource directory (gameres/), set once at startup; the file
-/// version reader needs it to inspect actual .res headers.
-static RES_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+/// version reader needs it to inspect actual .res headers. Crate-visible
+/// so tests can detect whether a pack was locatable (never required).
+pub(crate) static RES_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 static VER_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, u16>>> =
     std::sync::OnceLock::new();
 

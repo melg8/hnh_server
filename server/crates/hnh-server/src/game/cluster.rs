@@ -421,10 +421,10 @@ impl Game {
                     | crate::nodes::StationResult::Extinguished
                     | crate::nodes::StationResult::Stale => {}
                     crate::nodes::StationResult::NeedsFuel => {
-                        self.system_line(sid, "The oven needs fuel first.");
+                        self.system_line(sid, "The station needs fuel first.");
                     }
                     crate::nodes::StationResult::NeedsInput => {
-                        self.system_line(sid, "The oven needs an input before lighting.");
+                        self.system_line(sid, "The station needs an input before lighting.");
                     }
                 }
             }
@@ -448,20 +448,20 @@ impl Game {
                 match result {
                     StationItemResult::FuelAdded => {
                         self.consume_cursor_unit(sid);
-                        self.system_line(sid, "Fuel added to the oven.");
+                        self.system_line(sid, "Fuel added to the station.");
                     }
                     StationItemResult::InputLoaded => {
                         self.consume_cursor_unit(sid);
-                        self.system_line(sid, "Input loaded; right-click the oven to light it.");
+                        self.system_line(sid, "Input loaded; right-click the station to light it.");
                     }
                     StationItemResult::BusyLit => {
                         self.system_line(sid, "The fire is burning; wait for it to finish.");
                     }
                     StationItemResult::InputFull => {
-                        self.system_line(sid, "The oven already holds an input.");
+                        self.system_line(sid, "The station already holds an input.");
                     }
                     StationItemResult::NotProcessable => {
-                        self.system_line(sid, "The oven cannot process that.");
+                        self.system_line(sid, "The station cannot process that.");
                     }
                     StationItemResult::Gone => {}
                 }
@@ -669,6 +669,18 @@ impl Game {
                 drop: None,
             },
             Kind::Boulder { .. } => GuestKind::Static {
+                res_name: self.static_res_name(slot),
+                class: crate::nodes::StaticClass::Stone,
+                crop: None,
+                station: None,
+                stage: None,
+                drop: None,
+            },
+            // Ore deposits relay Mine acts exactly like boulders (the
+            // Stone class tag is the clickable-static contract; the
+            // authority re-validates against its own Kind and picks the
+            // ore-harvest leg).
+            Kind::OreDeposit { .. } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Stone,
                 crop: None,

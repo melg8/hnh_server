@@ -185,6 +185,39 @@ impl WorldGen {
         tile::GRASS
     }
 
+    /// Nearest tile satisfying `pred` within a square ring scan around
+    /// (cx, cy). Scans expanding square rings (Chebyshev radius 0, 1, 2,
+    /// ...) up to `max_radius` and returns the first hit with its radius.
+    /// Search aid for world-design assertions and dev tooling: it answers
+    /// "how far is X from spawn on this seed" without booting a server.
+    pub fn find_tile(
+        &self,
+        cx: i32,
+        cy: i32,
+        max_radius: i32,
+        pred: impl Fn(u8) -> bool,
+    ) -> Option<((i32, i32), i32)> {
+        if pred(self.tile_at(cx, cy)) {
+            return Some(((cx, cy), 0));
+        }
+        for r in 1..=max_radius {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    // Ring cells only: the inner square was scanned by the
+                    // previous iterations.
+                    if dx.abs() != r && dy.abs() != r {
+                        continue;
+                    }
+                    let (x, y) = (cx + dx, cy + dy);
+                    if pred(self.tile_at(x, y)) {
+                        return Some(((x, y), r));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Generate one 100x100 grid from absolute grid coordinate.
     pub fn gen_grid(&self, gx: i32, gy: i32) -> Grid {
         let mut tiles = Box::new([0u8; 10_000]);
@@ -236,5 +269,33 @@ mod tests {
         let w = WorldGen::new(42);
         let _ = w.tile_at(-1, -1);
         let _ = w.tile_at(-101, 199);
+    }
+
+    /// World-design assertion behind the metal chain: rocky terrain
+    /// (mountain or cave tiles - the ore-bearing ground) must exist within
+    /// walking range of the spawn area on the dev seed, or ore deposits
+    /// would be unreachable and the smelter chain unplayable. Prints the
+    /// measured distance for world-design review.
+    #[test]
+    fn rocky_terrain_is_reachable_from_spawn() {
+        let w = WorldGen::new(42);
+        let rocky = |t: u8| t == tile::MOUNTAIN || t == tile::CAVE;
+        let ((x, y), r) = w
+            .find_tile(50, 50, 400, rocky)
+            .expect("no rocky terrain within 400 tiles of spawn on seed 42");
+        assert!(r <= 250, "rocky terrain too far from spawn: {r} tiles");
+        println!("nearest rocky tile on seed 42: ({x}, {y}), {r} tiles from (50, 50)");
+        // Belt size report: rocky-tile count in the 61x61 window around the
+        // nearest hit. Drives the ore-deposit spawn roll (a sparse belt
+        // needs a higher per-tile roll to stay playable).
+        let mut belt = 0usize;
+        for ty in y - 30..=y + 30 {
+            for tx in x - 30..=x + 30 {
+                if rocky(w.tile_at(tx, ty)) {
+                    belt += 1;
+                }
+            }
+        }
+        println!("rocky tiles in the 61x61 belt window: {belt}");
     }
 }

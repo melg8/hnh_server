@@ -2963,7 +2963,7 @@ impl Game {
             return;
         };
         // Fuel deliveries load while lit too (local path order: fuel
-        // check first, then the lit/input gates for the roast slot).
+        // check first, then the lit/input gates for the input slot).
         if station_spec.fuel.contains(&stack.res.as_str()) {
             let st = self
                 .world
@@ -2986,7 +2986,17 @@ impl Game {
             self.answer_station_item(player, StationItemResult::InputFull);
             return;
         }
-        if crate::craft::roast_result(leak_static(stack.label.as_str())).is_none() {
+        // Station input dispatch mirrors station_itemact: the oven roasts
+        // meat labels, the smelter melts ore labels (session 66).
+        let accepts = match station_spec.kind {
+            crate::build::StationKind::Oven => {
+                crate::craft::roast_result(leak_static(stack.label.as_str())).is_some()
+            }
+            crate::build::StationKind::Smelter => {
+                crate::craft::smelt_result(leak_static(stack.label.as_str())).is_some()
+            }
+        };
+        if !accepts {
             self.answer_station_item(player, StationItemResult::NotProcessable);
             return;
         }
@@ -3044,6 +3054,9 @@ impl Game {
                 }
                 (Kind::Boulder { .. }, StaticAct::Mine) => {
                     Some((vec![None], self.harvest_boulder(target, tslot)))
+                }
+                (Kind::OreDeposit { .. }, StaticAct::Mine) => {
+                    Some((vec![None], self.harvest_ore_deposit(target, tslot)))
                 }
                 (Kind::Crop { .. }, StaticAct::HarvestCrop) => Some((
                     self.relay_crop_harvest(target, tslot)
@@ -3421,11 +3434,35 @@ pub fn unix_ms() -> u64 {
 /// generic branch shape keeps the drop VISIBLE (a wrong-but-visible
 /// shape beats an invisible one); the pickup still restores the original
 /// invobj via Kind::Drop::inv_res_idx.
+/// World-shape aliases for inventory items the 2009 pack renders only in
+/// a sibling metal's shape: the pack ships no tin / cast-iron world
+/// sprites, but the nugget and bar families are visually interchangeable
+/// (same size and silhouette across metals). Checked after the item's own
+/// shape and before the branch fallback.
+const DROP_WORLD_ALIASES: &[(&str, &str)] = &[
+    ("nugget-tin", "gfx/terobjs/items/nugget-copper"),
+    ("bar-tin", "gfx/terobjs/items/bar-copper"),
+    ("bar-castiron", "gfx/terobjs/items/bar-iron"),
+    ("nugget-castiron", "gfx/terobjs/items/nugget-iron"),
+];
+
+/// Crate-visible lookup for tests and callers that need to know whether
+/// an inventory item resolves its world shape through the alias table
+/// (craft.rs tests pin the smelter outputs to own-shape-or-alias).
+pub(crate) fn drop_world_alias(base: &str) -> Option<&'static str> {
+    DROP_WORLD_ALIASES
+        .iter()
+        .find(|(b, _)| *b == base)
+        .map(|(_, world)| *world)
+}
+
 fn drop_world_res(inv_res_name: &str) -> &'static str {
     let base = inv_res_name.rsplit('/').next().unwrap_or(inv_res_name);
     let ter = format!("gfx/terobjs/items/{base}");
     if crate::resources::served(&ter) {
         leak_static(&ter)
+    } else if let Some(world) = drop_world_alias(base) {
+        world
     } else {
         "gfx/terobjs/items/branch"
     }

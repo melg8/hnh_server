@@ -605,7 +605,7 @@ impl Game {
                 };
             }
             self.refresh_inventory(sid);
-            self.system_line(sid, "Fuel added to the oven.");
+            self.system_line(sid, "Fuel added to the station.");
             // Cluster: the readiness snapshot (fuel) rides the next
             // GuestUpdate (session 33).
             self.publish(gob, GuestEv::Update);
@@ -617,13 +617,20 @@ impl Game {
             return;
         }
         if station.input.is_some() {
-            self.system_line(sid, "The oven already holds an input.");
+            self.system_line(sid, "The station already holds an input.");
             return;
         }
-        // Roast input: any raw meat label in craft::ROAST_MAP (the same
-        // chain as the hand-craft roast recipe).
-        if crate::craft::roast_result(cursor.label).is_none() {
-            self.system_line(sid, "The oven cannot process that.");
+        // Station input dispatch: the oven roasts any raw meat label in
+        // craft::ROAST_MAP; the smelter melts any ore label in
+        // craft::SMELT_MAP (session 66 metal chain).
+        let accepts = match station_spec.kind {
+            crate::build::StationKind::Oven => crate::craft::roast_result(cursor.label).is_some(),
+            crate::build::StationKind::Smelter => {
+                crate::craft::smelt_result(cursor.label).is_some()
+            }
+        };
+        if !accepts {
+            self.system_line(sid, "The station cannot process that.");
             return;
         }
         let station = self
@@ -641,7 +648,7 @@ impl Game {
             };
         }
         self.refresh_inventory(sid);
-        self.system_line(sid, "Input loaded; right-click the oven to light it.");
+        self.system_line(sid, "Input loaded; right-click the station to light it.");
         // Cluster: the readiness snapshot (has_input) rides the next
         // GuestUpdate (session 33).
         self.publish(gob, GuestEv::Update);
@@ -774,11 +781,11 @@ impl Game {
             return;
         }
         if station.fuel < crate::build::FUEL_PER_JOB {
-            self.system_line(sid, "The oven needs fuel first.");
+            self.system_line(sid, "The station needs fuel first.");
             return;
         }
         if station.input.is_none() {
-            self.system_line(sid, "The oven needs an input before lighting.");
+            self.system_line(sid, "The station needs an input before lighting.");
             return;
         }
         let station = self
@@ -810,11 +817,14 @@ impl Game {
 
     /// Per-tick station pass: advance lit jobs, burn fuel, and emit the
     /// output drop beside the station with the station quality formula.
+    /// The output (resource + label) follows the station kind: the oven
+    /// roasts into the meat resource, the smelter melts ore into the
+    /// mapped bar resource (session 66).
     pub(super) fn tick_stations(&mut self) {
         if self.world.stations.is_empty() {
             return;
         }
-        let mut finished: Vec<(GobId, &'static str, u8, String)> = Vec::new();
+        let mut finished: Vec<(GobId, &'static str, &'static str, u8)> = Vec::new();
         let mut unlit: Vec<GobId> = Vec::new();
         for (gob, station) in self.world.stations.iter_mut() {
             if !station.lit {
@@ -840,36 +850,50 @@ impl Game {
                 station.fuel_ql_sum = station.fuel_ql_sum.saturating_sub(avg);
                 station.fuel_seen = station.fuel_seen.saturating_sub(1);
             }
-            let Some((_, q_item, label)) = station.input.take() else {
+            let Some((res_idx, q_item, label)) = station.input.take() else {
                 continue;
             };
-            let output_label = crate::craft::roast_result(label).unwrap_or(label);
             let ql =
                 crate::build::station_output_ql(q_item, station.quality, station.fuel_quality());
-            finished.push((*gob, output_label, ql, label.to_owned()));
+            match spec.kind {
+                crate::build::StationKind::Oven => {
+                    let output_label = crate::craft::roast_result(label).unwrap_or(label);
+                    finished.push((*gob, "gfx/invobjs/meat", output_label, ql));
+                }
+                crate::build::StationKind::Smelter => match crate::craft::smelt_result(label) {
+                    Some((res, output_label)) => finished.push((*gob, res, output_label, ql)),
+                    // Unreachable through the itemact gates (the input is
+                    // only accepted when the kind map matches); re-emit the
+                    // input unchanged rather than silently destroying it.
+                    None => {
+                        let input_res = self.world.res.name(res_idx).unwrap_or("gfx/invobjs/stone");
+                        finished.push((*gob, input_res, label, q_item));
+                    }
+                },
+            }
         }
         for gob in unlit {
             // Wire re-render of the extinguished state (Kind + sdt byte).
             self.set_station_lit(gob, false);
         }
-        for (gob, output_label, ql, raw_label) in finished {
+        for (gob, output_res, output_label, ql) in finished {
             let pos = match self.world.gobs.get(gob) {
                 Some(slot) => self.world.gobs.pos[slot],
                 None => continue,
             };
-            self.spawn_drop_near(pos, "gfx/invobjs/meat", ql, output_label);
+            self.spawn_drop_near(pos, output_res, ql, output_label);
             if let Some(sid) = self
                 .sessions
                 .iter()
                 .find(|(_, o)| o.visible.contains(&gob))
                 .map(|(s, _)| *s)
             {
-                self.system_line(sid, "The oven finished its work.");
+                self.system_line(sid, "The station finished its work.");
             }
             debug!(
                 gob,
                 output = output_label,
-                raw = raw_label,
+                res = output_res,
                 ql,
                 "station job done"
             );

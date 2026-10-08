@@ -126,6 +126,31 @@ impl Game {
         crate::state::STONE_PICK_LP
     }
 
+    /// One ore pick off a deposit (the mining leg of the metal chain):
+    /// an ore item drop lands next to the deposit carrying the ore's
+    /// display label (the smelter input dispatch keys on it); the
+    /// depleted deposit disappears. Returns the LP the act grants.
+    pub(super) fn harvest_ore_deposit(&mut self, target: GobId, tslot: usize) -> i32 {
+        let Kind::OreDeposit { ore, left } = self.world.gobs.kind[tslot] else {
+            return 0;
+        };
+        let pos = self.world.gobs.pos[tslot];
+        debug!(target, ore = ore.label(), left, "ore pick");
+        self.spawn_drop_near(pos, ore.item_res(), crate::state::GATHER_QL, ore.label());
+        if left > 1 {
+            self.world.gobs.kind[tslot] = Kind::OreDeposit {
+                ore,
+                left: left - 1,
+            };
+            self.world.gobs.frame[tslot] += 1;
+            self.publish(target, GuestEv::Update);
+        } else {
+            self.world.gobs.kill(target);
+            self.broadcast_retract(target);
+        }
+        crate::state::ORE_PICK_LP
+    }
+
     pub(super) fn player_interact(
         &mut self,
         sid: SessionId,
@@ -253,6 +278,14 @@ impl Game {
                 }
                 self.push_cattr(sid);
                 // Refresh the char sheet LP balance if it is open.
+                self.push_lp_msgs(sid);
+            }
+            Kind::OreDeposit { .. } => {
+                let lp = self.harvest_ore_deposit(target, tslot);
+                if let Some(p) = self.world.player_mut(sid) {
+                    p.lp += lp;
+                }
+                self.push_cattr(sid);
                 self.push_lp_msgs(sid);
             }
             Kind::Stump => {

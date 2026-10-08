@@ -5006,7 +5006,7 @@ async fn station_ack_refusals_render_system_lines() {
     });
     let text = drain(&mut rx);
     assert!(
-        text.contains("oven needs fuel"),
+        text.contains("station needs fuel"),
         "NeedsFuel renders: {text}"
     );
     g.on_node_msg(crate::nodes::NodeMsg::StationAck {
@@ -5015,7 +5015,7 @@ async fn station_ack_refusals_render_system_lines() {
     });
     let text = drain(&mut rx);
     assert!(
-        !text.contains("oven"),
+        !text.contains("station"),
         "a successful Light stays silent (parity with the local path)"
     );
 }

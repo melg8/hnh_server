@@ -368,6 +368,10 @@ pub const TREE_HARVESTS: u8 = 5;
 /// Server policy: a boulder yields this many stones before it
 /// disappears.
 pub const BOULDER_STONES: u8 = 5;
+/// Server policy: an ore deposit yields this many ore picks before it
+/// disappears (the metal chain's mining leg; see the "World gathering"
+/// section of crafting-and-building.md).
+pub const ORE_PICKS: u8 = 4;
 /// Flat gathering quality, matched to the starter kit (branch/stone at
 /// ql 10) so world-gathered materials craft identically.
 pub const GATHER_QL: u8 = 10;
@@ -375,6 +379,51 @@ pub const GATHER_QL: u8 = 10;
 pub const TREE_PICK_LP: i32 = 5;
 /// LP granted per stone pick (existing server policy, carried).
 pub const STONE_PICK_LP: i32 = 3;
+/// LP granted per ore pick (server policy: ore is rarer terrain than
+/// stone, the pick grants proportionally more learning).
+pub const ORE_PICK_LP: i32 = 8;
+
+/// Metal-bearing ore a deposit yields (the metal chain's mining leg).
+/// The item mapping is fixed registry data: `item_res` is the inventory
+/// icon resource the pickup restores, `label` the display label the
+/// smelter input dispatch keys on (craft::SMELT_MAP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OreKind {
+    Copper,
+    Tin,
+    Iron,
+}
+
+impl OreKind {
+    /// Deterministic worldgen pick from a per-tile roll (copper the
+    /// common metal, tin the alloying partner, iron the deep-chain ore).
+    pub fn from_roll(roll: u32) -> OreKind {
+        match roll {
+            0..=4 => OreKind::Copper,
+            5..=7 => OreKind::Tin,
+            _ => OreKind::Iron,
+        }
+    }
+
+    /// Inventory icon resource restored on pickup.
+    pub fn item_res(self) -> &'static str {
+        match self {
+            OreKind::Copper => "gfx/invobjs/nugget-copper",
+            OreKind::Tin => "gfx/invobjs/nugget-tin",
+            OreKind::Iron => "gfx/invobjs/ore-iron",
+        }
+    }
+
+    /// Display label; the smelter (craft::SMELT_MAP) and the wire
+    /// probes key on these exact strings.
+    pub fn label(self) -> &'static str {
+        match self {
+            OreKind::Copper => "Copper Nugget",
+            OreKind::Tin => "Tin Nugget",
+            OreKind::Iron => "Iron Ore",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -414,6 +463,14 @@ pub enum Kind {
     /// stone; a depleted boulder disappears. See the "World gathering"
     /// section of crafting-and-building.md.
     Boulder {
+        left: u8,
+    },
+    /// Metal-bearing ore deposit on rocky terrain (the mining leg of the
+    /// metal chain): each pick yields one ore item of `ore`; a depleted
+    /// deposit disappears. Renders as the mining ore-heap sprite so
+    /// players and probes can tell deposits from plain boulders.
+    OreDeposit {
+        ore: OreKind,
         left: u8,
     },
     /// Decorative stump left where a tree's harvests ran out. Not
@@ -1457,6 +1514,10 @@ impl World {
                 let ty = gc.1 as i64 * 100 + y as i64;
                 let mut r = hnh_world::mkrandoom(tx as i32, ty as i32);
                 let roll = r.next_bounded(1000);
+                // Ore kind is rolled inside the match arm (its roll must not
+                // disturb the rolls the other terrain arms take) and carried
+                // out through this slot; None = not an ore deposit.
+                let mut ore_kind: Option<OreKind> = None;
                 let res = match t {
                     tile::CONIFER if roll < 220 => {
                         let s = r.next_bounded(3);
@@ -1487,6 +1548,32 @@ impl World {
                     }
                     tile::HEATH if roll < 6 => "gfx/terobjs/bumlings/01",
                     tile::MOOR if roll < 4 => "gfx/terobjs/bumlings/stal2",
+                    // Metal chain, mining leg: rocky terrain carries ore
+                    // deposits (the ore-heap sprite distinguishes them from
+                    // plain boulders). MOUNTAIN and CAVE tiles are
+                    // impassable, so a deposit is only placed where some
+                    // 4-neighbor is walkable - the player must be able to
+                    // stand next to it and pick (deterministic pure-terrain
+                    // check, the same seed-derived tile function the grid
+                    // itself came from). See the "World gathering" section
+                    // of crafting-and-building.md.
+                    tile::MOUNTAIN | tile::CAVE if roll < 30 => {
+                        let (atx, aty) = (tx as i32, ty as i32);
+                        let walkable_neighbor = [
+                            self.grids.terrain_at(atx + 1, aty),
+                            self.grids.terrain_at(atx - 1, aty),
+                            self.grids.terrain_at(atx, aty + 1),
+                            self.grids.terrain_at(atx, aty - 1),
+                        ]
+                        .into_iter()
+                        .any(|nt| tile_speed(nt).is_some());
+                        if !walkable_neighbor {
+                            continue;
+                        }
+                        let ore = OreKind::from_roll(r.next_bounded(10) as u32);
+                        ore_kind = Some(ore);
+                        "gfx/terobjs/mining/heap"
+                    }
                     _ => continue,
                 };
                 let res_idx = self.res.intern(res);
@@ -1503,10 +1590,16 @@ impl World {
                         continue;
                     }
                 }
-                // Trees are pickable (branches) and bumlings are boulders
-                // with a stone supply; see the "World gathering" section
-                // of crafting-and-building.md.
-                let kind = if res.contains("trees/") {
+                // Trees are pickable (branches), bumlings are boulders with
+                // a stone supply, and rocky-corner heaps are ore deposits;
+                // see the "World gathering" section of
+                // crafting-and-building.md.
+                let kind = if let Some(ore) = ore_kind {
+                    Kind::OreDeposit {
+                        ore,
+                        left: ORE_PICKS,
+                    }
+                } else if res.contains("trees/") {
                     Kind::Tree {
                         harvests: TREE_HARVESTS,
                     }
@@ -1848,5 +1941,64 @@ mod cluster_tests {
         assert_eq!(t.avg_ql(), 11, "consumption does not rewrite the history");
         assert_eq!(t.take(9), 1, "take clamps at the stored amount");
         assert_eq!(t.units, 0);
+    }
+
+    /// Session 66 (metal chain): the ore roll is a pure distribution -
+    /// copper the common metal (5/10), tin the partner (3/10), iron the
+    /// deep-chain ore (2/10).
+    #[test]
+    fn ore_roll_distribution() {
+        let mut copper = 0;
+        let mut tin = 0;
+        let mut iron = 0;
+        for roll in 0..10 {
+            match OreKind::from_roll(roll) {
+                OreKind::Copper => copper += 1,
+                OreKind::Tin => tin += 1,
+                OreKind::Iron => iron += 1,
+            }
+        }
+        assert_eq!((copper, tin, iron), (5, 3, 2), "per-tile ore mix");
+        // Every ore's label keys the smelter map and every item res is a
+        // known invobj (the full smelt side is pinned in craft.rs).
+        for (ore, res) in [
+            (OreKind::Copper, "gfx/invobjs/nugget-copper"),
+            (OreKind::Tin, "gfx/invobjs/nugget-tin"),
+            (OreKind::Iron, "gfx/invobjs/ore-iron"),
+        ] {
+            assert_eq!(ore.item_res(), res);
+            assert!(!ore.label().is_empty());
+        }
+    }
+
+    /// Session 66 (metal chain): the dev seed spawns reachable ore
+    /// deposits near the spawn area - the mining leg must be playable,
+    /// not theoretical. Populates the 3x3 grid block around the spawn
+    /// grid and counts the deposit statics.
+    #[test]
+    fn dev_seed_spawns_ore_deposits_near_spawn() {
+        let mut w = World::new(42);
+        let mut spawned = Vec::new();
+        for gy in -1..=1 {
+            for gx in -1..=1 {
+                w.populate_grid((gx, gy), None, &mut spawned);
+            }
+        }
+        let deposits: Vec<usize> = spawned
+            .iter()
+            .filter_map(|id| w.gobs.get(*id))
+            .filter(|s| matches!(w.gobs.kind[*s], Kind::OreDeposit { .. }))
+            .collect();
+        assert!(
+            !deposits.is_empty(),
+            "no ore deposits in the 3x3 spawn grid block on seed 42"
+        );
+        for s in deposits.iter().copied() {
+            let Kind::OreDeposit { ore, left } = w.gobs.kind[s] else {
+                unreachable!("filtered above");
+            };
+            assert!(!ore.label().is_empty(), "deposit carries its ore identity");
+            assert_eq!(left, ORE_PICKS, "deposits spawn with the full pick supply");
+        }
     }
 }

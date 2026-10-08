@@ -43,10 +43,27 @@ pub struct Buildable {
 
 /// Production behavior of a completed station gob.
 pub struct StationSpec {
+    /// Which station behavior the job loop and the itemact input
+    /// dispatch follow (oven roasts meat, smelter melts ore).
+    pub kind: StationKind,
     /// Items accepted as fuel by `itemact` (one unit per delivery).
     pub fuel: &'static [&'static str],
     /// Ticks (10 Hz) per production job.
     pub job_ticks: u32,
+}
+
+/// Station behavior families. The dispatch points: itemact input
+/// acceptance (station_itemact + the relay path), the job-output label
+/// mapping (craft::roast_result vs craft::smelt_result), and the output
+/// drop's resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StationKind {
+    /// Roasts raw meat (craft::ROAST_MAP); output keeps the meat
+    /// resource, only the label changes.
+    Oven,
+    /// Melts ore into metal bars (craft::SMELT_MAP); output rides the
+    /// mapped bar resource.
+    Smelter,
 }
 
 /// Station input/output policy this server: the oven roasts any raw meat
@@ -70,6 +87,7 @@ pub const BUILDABLES: &[Buildable] = &[
         hp: 1200,
         stages: 2,
         station: Some(StationSpec {
+            kind: StationKind::Oven,
             fuel: &["gfx/invobjs/branch"],
             job_ticks: 8,
         }),
@@ -80,12 +98,23 @@ pub const BUILDABLES: &[Buildable] = &[
         on_tile: true,
         place_radius: None,
         // Legacy demand: Brick x35 + Stone x10 + Bar of Hard Metal x3.
-        // Server demand keeps the same stone dominance; the smelter is a
-        // plain structure until the metal chain lands (mechanics doc).
+        // Server demand keeps the same stone dominance (session-66 note:
+        // the metal chain now lands, but the hard-metal demand would be
+        // circular - the first smelter cannot require its own product;
+        // the doc records the policy).
         demand: &[("gfx/invobjs/stone", 6), ("gfx/invobjs/branch", 4)],
         hp: 2500,
         stages: 3,
-        station: None,
+        // Session 66: the smelter is a PRODUCTION station. Fuel policy:
+        // branch (the fuel this economy produces - the charcoal/kiln leg
+        // does not exist yet, recorded in the mechanics doc). Job length:
+        // 30 ticks (3 s) - smelting is deliberately slower than the
+        // oven's 8-tick roast.
+        station: Some(StationSpec {
+            kind: StationKind::Smelter,
+            fuel: &["gfx/invobjs/branch"],
+            job_ticks: 30,
+        }),
     },
     Buildable {
         id: "trough",

@@ -641,6 +641,30 @@ pub fn roast_result(raw_label: &str) -> Option<&'static str> {
         .map(|(_, roasted)| *roasted)
 }
 
+/// Ore -> metal bar mapping for the smelter station (build.rs
+/// StationKind::Smelter). Keys are the ore display labels the server
+/// assigns to world-gathered ore (state::OreKind::label); values are
+/// (inventory resource, display label) of the smelted output.
+///
+/// Server policy (mechanics doc, "Production stations"): the legacy
+/// pack's smelted-metal set is covered by the bars the economy reaches -
+/// copper and tin smelt to their bars, iron ore smelts to cast iron (the
+/// legacy finery-forge leg that would refine cast iron into wrought iron
+/// is not built; see the doc's Open questions). Bronze alloying is an
+/// open question, not invented data.
+pub const SMELT_MAP: &[(&str, (&str, &str))] = &[
+    ("Copper Nugget", ("gfx/invobjs/bar-copper", "Bar of Copper")),
+    ("Tin Nugget", ("gfx/invobjs/bar-tin", "Bar of Tin")),
+    ("Iron Ore", ("gfx/invobjs/bar-castiron", "Bar of Cast Iron")),
+];
+
+pub fn smelt_result(raw_label: &str) -> Option<(&'static str, &'static str)> {
+    SMELT_MAP
+        .iter()
+        .find(|(raw, _)| raw.eq_ignore_ascii_case(raw_label))
+        .map(|(_, out)| *out)
+}
+
 /// FEP accumulator state per player (integer tenths per attribute; the wire
 /// `food` message carries tenths, CharWnd divides by 10 for display).
 #[derive(Debug, Default, Clone)]
@@ -778,6 +802,53 @@ Peapod=STR:0.1 PER:0.9
         assert_eq!(roast_result("beef"), Some("Roasted Beef"));
         assert_eq!(roast_result("Raw Deer Meat"), Some("Roasted Deer Meat"));
         assert_eq!(roast_result("Stone"), None);
+    }
+
+    /// Session 66 (metal chain): every smelter input the world spawns
+    /// (state::OreKind labels) resolves to a bar, and non-ore items
+    /// refuse. When the gameres pack is locatable (generated next to the
+    /// repo root; a fresh clone may not have it - the wire gate must run
+    /// without it), the bar resource AND its world-shape render path
+    /// (own terobjs shape or the game.rs alias table) are pinned too.
+    #[test]
+    fn smelt_map_covers_the_world_ore_mix() {
+        // Locate the pack once; tests never require it, so a missing
+        // pack only skips the filesystem-dependent pins.
+        if crate::resources::RES_DIR.get().is_none() {
+            let pack = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../gameres");
+            if pack.is_dir() {
+                crate::resources::init_res_dir(pack);
+            }
+        }
+        let pack_available = crate::resources::RES_DIR.get().is_some();
+        for ore in [
+            crate::state::OreKind::Copper,
+            crate::state::OreKind::Tin,
+            crate::state::OreKind::Iron,
+        ] {
+            let (res, label) =
+                smelt_result(ore.label()).unwrap_or_else(|| panic!("{} must smelt", ore.label()));
+            assert!(res.starts_with("gfx/invobjs/bar-"), "{label}: bar res");
+            if !pack_available {
+                continue;
+            }
+            assert!(
+                crate::resources::served(res),
+                "{res} must exist in the served pack"
+            );
+            // The pack ships world shapes for only some bars; every
+            // smelted output must resolve through its own shape or the
+            // alias table (never the branch fallback, which would look
+            // wrong on the ground).
+            let base = res.rsplit('/').next().unwrap_or(res);
+            let own = format!("gfx/terobjs/items/{base}");
+            assert!(
+                crate::resources::served(&own) || crate::game::drop_world_alias(base).is_some(),
+                "{res}: no world shape and no alias"
+            );
+        }
+        assert_eq!(smelt_result("Stone"), None);
+        assert_eq!(smelt_result("Beef"), None);
     }
 
     /// Session 36: the three new recipes resolve, carry RoB-verified
