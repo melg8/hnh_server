@@ -86,8 +86,13 @@ def pick_drop_into_inv(c, gid, inv_res):
 
 def walk_to_shore(c):
     """BFS-navigate to the pinned shore tile; the streamed grids and
-    the path rebuild as the player moves (the test_smelt nav pattern)."""
+    the path rebuild as the player moves (the test_smelt nav pattern).
+    The shore grid (gc 1,0) arrives in the post-entry MAPDATA burst, so
+    WAIT for it before planning: BFS only walks loaded tiles."""
     target = (SHORE_TILE[0] * 11 + 5, SHORE_TILE[1] * 11 + 5)
+    shore_gc = (SHORE_TILE[0] // 100, SHORE_TILE[1] // 100)
+    assert c.wait_for(lambda: c.tiles.get(shore_gc) is not None, 15), (
+        "the shore grid %s never streamed in" % (shore_gc,))
     assert c.nav_walk(target, stop=80, max_clicks=220), (
         "could not reach the shore at %s" % (target,)
     )
@@ -140,10 +145,15 @@ def sink_demand(c, plan, mc, resname, units):
     """Sink `units` of `resname` into the plan. Pickups merge into one
     stack, so the whole demand usually closes in a single delivery;
     the loop tolerates partial stacks anyway (each round delivers what
-    the cursor holds)."""
+    the cursor holds). Stop on the completion system line: the plan
+    converts into the station UNDER THE SAME GOB ID (complete_plan),
+    and a second delivery would feed the station's input slot."""
+    c.chat_lines.clear()
     for _ in range(units):
         if c.gobs.get(plan) is None:
             return  # plan completed and converted under us
+        if any("is finished" in t for t, _ in c.chat_lines):
+            return  # completion announcement (sink_material)
         stack = c.find_item_by_res(resname)
         assert stack is not None, "material missing: %s" % resname
         c.take_item(stack)
@@ -187,13 +197,19 @@ def build_kiln(c):
     assert plan is not None, "no free tile accepted a kiln plan"
     print("kiln plan placed: %s" % plan)
 
-    last_sdt = c.gobs[plan]["sdt"]
     sink_demand(c, plan, mc, CLAY_INV, 45)
-    ok = c.wait_for(lambda: c.gobs[plan]["sdt"] != last_sdt, 10)
-    assert ok, "kiln stage never advanced (sdt=%r)" % (c.gobs[plan]["sdt"],)
-    # Completion converts the plan into the station gob (sdt 0 = unlit).
+    # The Clay x45 demand fits ONE merged pickup stack, so the first
+    # delivery completes the plan outright: the observable completion
+    # signal is the system line (a full-demand delivery never shows an
+    # intermediate stage byte). Wait it out, then assert the gob re-
+    # rendered as a station (sdt 0 = unlit).
+    ok = c.wait_for(
+        lambda: any("The kiln is finished." in t for t, _ in c.chat_lines), 10
+    )
+    assert ok, "kiln completion never announced (lines=%r)" % (c.chat_lines[-4:],)
     ok = c.wait_for(lambda: c.gobs[plan]["sdt"] == b"\x00", 10)
-    assert ok, "kiln never completed (sdt=%r)" % (c.gobs[plan]["sdt"],)
+    assert ok, "kiln never re-rendered as a station (sdt=%r)" % (
+        c.gobs[plan]["sdt"],)
     print("kiln completed: %s" % plan)
     return plan, mc
 

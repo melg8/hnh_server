@@ -414,6 +414,12 @@ impl Game {
         self.refresh_inventory(sid);
         if complete {
             self.complete_plan(gob);
+            // Announce completion (server policy; the legacy pack only
+            // swaps the plan sprite). The in-place conversion keeps the
+            // gob id, so a client that keeps delivering to the old plan
+            // target would otherwise feed the new STATION's input slot -
+            // the line is also the deliverer's stop signal.
+            self.system_line(sid, &format!("The {} is finished.", buildable.id));
             return;
         }
         // Stage advancement: OD_RES re-send with a fresh sdt byte (the

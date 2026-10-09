@@ -315,6 +315,14 @@ Server implementation notes (this repo, session 60):
   sinks min(cursor units, remaining demand), snapshots the delivery
   quality per material type, and completion converts the plan in place
   (same gob id, Kind swap, OD_RES re-render) into a Station or Structure.
+  Completion announcement (server policy, session 70): the deliverer
+  gets the system line "The <id> is finished." - the legacy pack only
+  swaps the plan sprite, and without the line a client that keeps
+  delivering to the (still valid) gob id feeds the new STATION's input
+  slot instead of stopping. Kiln added this session (Clay x45 ->
+  StationKind::Kiln; clay -> brick firing), completing the DEVIATION
+  pair below: oven demand stays stone-based only because bricks were
+  unfired; the smelter keeps its substitute demand.
 - Structure quality = per-type delivery averages weighted by units
   (Legacy:Quality buildable rule); station output = (2*q_item +
   q_station + q_fuel)/4 with q_fuel the delivered-fuel average. Both are
