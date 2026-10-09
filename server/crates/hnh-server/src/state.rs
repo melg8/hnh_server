@@ -392,6 +392,10 @@ pub const BOULDER_STONES: u8 = 5;
 /// disappears (the metal chain's mining leg; see the "World gathering"
 /// section of crafting-and-building.md).
 pub const ORE_PICKS: u8 = 4;
+/// Server policy: a clay deposit yields this many clay picks before it
+/// disappears (the kiln chain's gathering leg; the kiln's legacy build
+/// demand is Clay x45, so a deposit must outlast a few trips).
+pub const CLAY_PICKS: u8 = 8;
 /// Flat gathering quality, matched to the starter kit (branch/stone at
 /// ql 10) so world-gathered materials craft identically.
 pub const GATHER_QL: u8 = 10;
@@ -402,6 +406,9 @@ pub const STONE_PICK_LP: i32 = 3;
 /// LP granted per ore pick (server policy: ore is rarer terrain than
 /// stone, the pick grants proportionally more learning).
 pub const ORE_PICK_LP: i32 = 8;
+/// LP granted per clay pick (server policy: the shore trip is longer
+/// than a stone walk, the pick grants a mid-tier amount of learning).
+pub const CLAY_PICK_LP: i32 = 5;
 
 /// Metal-bearing ore a deposit yields (the metal chain's mining leg).
 /// The item mapping is fixed registry data: `item_res` is the inventory
@@ -491,6 +498,15 @@ pub enum Kind {
     /// players and probes can tell deposits from plain boulders.
     OreDeposit {
         ore: OreKind,
+        left: u8,
+    },
+    /// Clay deposit on the sandy shore belt (session 69, the kiln
+    /// chain's gathering leg): each pick yields one Clay item; a
+    /// depleted deposit disappears. Renders as the same mining heap
+    /// sprite as the ore deposits (the heap family is this pack's
+    /// deposit-pile sprite set; distinguishing clay from ore needs the
+    /// pickup - server policy recorded in the mechanics doc).
+    ClayDeposit {
         left: u8,
     },
     /// Decorative stump left where a tree's harvests ran out. Not
@@ -1608,6 +1624,10 @@ impl World {
                 // disturb the rolls the other terrain arms take) and carried
                 // out through this slot; None = not an ore deposit.
                 let mut ore_kind: Option<OreKind> = None;
+                // Clay deposits carry their flag the same way (session 69
+                // kiln chain): the arm consumes no extra roll, so the
+                // other terrain arms' roll sequences stay untouched.
+                let mut clay = false;
                 let res = match t {
                     tile::CONIFER if roll < 220 => {
                         let s = r.next_bounded(3);
@@ -1664,6 +1684,20 @@ impl World {
                         ore_kind = Some(ore);
                         "gfx/terobjs/mining/heap"
                     }
+                    // Kiln chain, clay leg (session 69): the sandy shore
+                    // belt stands in for the legacy mudflats (Legacy:Clay
+                    // digs clay from the flats by the water). Sand tiles
+                    // are walkable, so the player can pick in place - no
+                    // walkable-neighbor gate is needed. The 150/1000 roll
+                    // gives a shore-heavy density (the nearest shore sits
+                    // 51 tiles from the dev-seed spawn; the kiln's Clay
+                    // x45 build demand needs several deposits per trip).
+                    // See the "World gathering" section of
+                    // crafting-and-building.md.
+                    tile::SAND if roll < 150 => {
+                        clay = true;
+                        "gfx/terobjs/mining/heap"
+                    }
                     _ => continue,
                 };
                 let res_idx = self.res.intern(res);
@@ -1681,14 +1715,16 @@ impl World {
                     }
                 }
                 // Trees are pickable (branches), bumlings are boulders with
-                // a stone supply, and rocky-corner heaps are ore deposits;
-                // see the "World gathering" section of
-                // crafting-and-building.md.
+                // a stone supply, rocky-corner heaps are ore deposits, and
+                // shore heaps are clay deposits; see the "World gathering"
+                // section of crafting-and-building.md.
                 let kind = if let Some(ore) = ore_kind {
                     Kind::OreDeposit {
                         ore,
                         left: ORE_PICKS,
                     }
+                } else if clay {
+                    Kind::ClayDeposit { left: CLAY_PICKS }
                 } else if res.contains("trees/") {
                     Kind::Tree {
                         harvests: TREE_HARVESTS,

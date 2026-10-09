@@ -68,6 +68,10 @@ pub enum StationKind {
     /// slot holds the copper bar, the aux slot the tin bar. Both slots
     /// must be loaded before the crucible lights.
     Alloyer,
+    /// Fires clay into bricks (session 69, the kiln chain; the pottery
+    /// products beyond bricks are future work). Input dispatch keys on
+    /// the Clay label (craft::KILN_MAP).
+    Kiln,
 }
 
 /// Station input/output policy this server: the oven roasts any raw meat
@@ -157,6 +161,34 @@ pub const BUILDABLES: &[Buildable] = &[
         hp: 300,
         stages: 1,
         station: None,
+    },
+    // Session 69: the kiln lands LAST in the registry on purpose -
+    // persistence stores the spec as a registry index, and appending
+    // keeps every save-file index (oven 0, smelter 1, alloyer 2, trough
+    // 3) stable across the update.
+    Buildable {
+        id: "kiln",
+        res: "gfx/terobjs/kiln",
+        on_tile: true,
+        place_radius: None,
+        // Legacy demand verified against RoB (Legacy:Kiln): Clay x45
+        // with the Pottery skill prereq (skill gating is not enforced
+        // for stations - the same policy the oven's bake prereq runs
+        // under). Clay is obtainable: shore clay deposits (state.rs,
+        // session 69). The legacy 3x3 footprint and per-tile paving are
+        // not modeled (single-tile placement is the server-wide
+        // policy, recorded in the mechanics doc).
+        demand: &[("gfx/invobjs/clay", 45)],
+        hp: 2000,
+        stages: 3,
+        // Fuel policy: branch (Legacy:Kiln: "the Kiln will need
+        // Branches or blocks of wood as fuel"). Job length matches the
+        // smelter's 30 ticks - firing is the same slow-station family.
+        station: Some(StationSpec {
+            kind: StationKind::Kiln,
+            fuel: &["gfx/invobjs/branch"],
+            job_ticks: 30,
+        }),
     },
 ];
 
@@ -340,18 +372,32 @@ mod tests {
             .expect("alloyer is a production station");
         assert_eq!(spec.kind, StationKind::Alloyer);
         assert!(spec.fuel.contains(&"gfx/invobjs/branch"));
+        // Session 69: the kiln (paginae/build/kiln, ad "kiln" decoded
+        // from the shipped resource's AButton layer).
+        let kl = &BUILDABLES[buildable_by_ad("kiln").expect("kiln registered")];
+        assert_eq!(kl.res, "gfx/terobjs/kiln");
+        let kspec = kl.station.as_ref().expect("kiln is a production station");
+        assert_eq!(kspec.kind, StationKind::Kiln);
+        assert_eq!(kl.demand, &[("gfx/invobjs/clay", 45)]);
     }
 
     #[test]
     fn demand_uses_producible_items() {
-        // Every demand line must name an item this server actually hands
-        // out (starter kit / harvests / drops): the stone and branch
-        // invobjs are the guaranteed-obtainable pair.
+        // Every demand line must name an item this server actually
+        // produces: stone and branch are the starter-kit pair, clay
+        // drops from the shore deposits (session 69), and bricks come
+        // out of the kiln (session 69).
+        const OBTAINABLE: &[&str] = &[
+            "gfx/invobjs/stone",
+            "gfx/invobjs/branch",
+            "gfx/invobjs/clay",
+            "gfx/invobjs/brick",
+        ];
         for b in BUILDABLES {
             for (res, count) in b.demand {
                 assert!(*count > 0, "{}: zero demand line", b.id);
                 assert!(
-                    *res == "gfx/invobjs/stone" || *res == "gfx/invobjs/branch",
+                    OBTAINABLE.contains(res),
                     "{}: demand {} not obtainable in this economy",
                     b.id,
                     res
@@ -359,6 +405,18 @@ mod tests {
             }
             assert!(b.stages >= 1 && b.stages <= 8, "{}: stage count", b.id);
         }
+    }
+
+    #[test]
+    fn kiln_registry_index_is_stable_across_saves() {
+        // Persistence stores the station spec as a BUILDABLES index;
+        // the kiln was APPENDED (session 69) so pre-existing save files
+        // keep their oven 0 / smelter 1 / alloyer 2 / trough 3 indices.
+        assert_eq!(buildable_by_ad("oven"), Some(0));
+        assert_eq!(buildable_by_ad("smelter"), Some(1));
+        assert_eq!(buildable_by_ad("alloyer"), Some(2));
+        assert_eq!(buildable_by_ad("trough"), Some(3));
+        assert_eq!(buildable_by_ad("kiln"), Some(4));
     }
 
     #[test]

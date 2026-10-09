@@ -697,6 +697,24 @@ pub fn smelt_result(raw_label: &str) -> Option<(&'static str, &'static str)> {
         .map(|(_, out)| *out)
 }
 
+/// Clay -> brick mapping for the kiln station (build.rs
+/// StationKind::Kiln, session 69). Legacy:Brick: "Bricks are produced
+/// by burning Clay in a Kiln" - one clay burns into one brick (unit
+/// count is server policy; the legacy page records no ratio). Output
+/// quality follows the station formula (2*q_item + q_kiln + q_fuel)/4,
+/// the same rule the RoB forum's brick quality rearrangement implies
+/// (BrickQ*4 = 2*ClayQ + KilnQ + FuelQ). The world shapes ship in the
+/// pack (gfx/terobjs/items/clay, gfx/terobjs/items/brick) so the drops
+/// render without an alias.
+pub const KILN_MAP: &[(&str, (&str, &str))] = &[("Clay", ("gfx/invobjs/brick", "Brick"))];
+
+pub fn kiln_result(raw_label: &str) -> Option<(&'static str, &'static str)> {
+    KILN_MAP
+        .iter()
+        .find(|(raw, _)| raw.eq_ignore_ascii_case(raw_label))
+        .map(|(_, out)| *out)
+}
+
 /// Alloying Crucible charge (build.rs StationKind::Alloyer), the bronze
 /// leg of the metal chain. Legacy Ring of Brodgar: 2 Bars of Copper + 1
 /// Bar of Tin smelt into 3 Bars of Bronze - a 1:1 metal-to-bronze mass
@@ -935,6 +953,38 @@ Peapod=STR:0.1 PER:0.9
         }
         assert_eq!(smelt_result("Stone"), None);
         assert_eq!(smelt_result("Beef"), None);
+    }
+
+    /// Session 69 (kiln chain): the kiln input the world spawns (the
+    /// Clay label from the shore deposits) resolves to the brick item,
+    /// and non-clay items refuse. The pack ships both the brick invobj
+    /// AND its world shape, so the output drop renders without an
+    /// alias - pinned here when the pack is locatable (the
+    /// smelt-map-test pattern).
+    #[test]
+    fn kiln_map_fires_clay_into_bricks() {
+        if crate::resources::RES_DIR.get().is_none() {
+            let pack = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../gameres");
+            if pack.is_dir() {
+                crate::resources::init_res_dir(pack);
+            }
+        }
+        let (res, label) = kiln_result("Clay").expect("Clay must fire");
+        assert_eq!(res, "gfx/invobjs/brick");
+        assert_eq!(label, "Brick");
+        assert_eq!(kiln_result("clay"), Some((res, label)), "case-insensitive");
+        assert_eq!(kiln_result("Bar of Copper"), None);
+        assert_eq!(kiln_result("Stone"), None);
+        if crate::resources::RES_DIR.get().is_some() {
+            assert!(
+                crate::resources::served(res),
+                "{res} must exist in the served pack"
+            );
+            assert!(
+                crate::resources::served("gfx/terobjs/items/brick"),
+                "the brick world shape must exist in the served pack"
+            );
+        }
     }
 
     /// Session 66 refinement tier (on top of the ore -> bar smelting

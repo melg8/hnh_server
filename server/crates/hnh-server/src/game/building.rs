@@ -644,6 +644,8 @@ impl Game {
                         .label
                         .eq_ignore_ascii_case(crate::craft::ALLOY_INPUT_TIN)
             }
+            // Session 69: the kiln takes the Clay label (craft::KILN_MAP).
+            crate::build::StationKind::Kiln => crate::craft::kiln_result(cursor.label).is_some(),
         };
         if !accepts {
             self.system_line(sid, "The station cannot process that.");
@@ -905,6 +907,15 @@ impl Game {
                     // input unchanged rather than silently destroying it.
                     None => {
                         let input_res = self.world.res.name(res_idx).unwrap_or("gfx/invobjs/stone");
+                        finished.push((*gob, input_res, label, q_item));
+                    }
+                },
+                // Session 69: the kiln fires clay into bricks (the same
+                // map-or-re-emit contract as the smelter arm above).
+                crate::build::StationKind::Kiln => match crate::craft::kiln_result(label) {
+                    Some((res, output_label)) => finished.push((*gob, res, output_label, ql)),
+                    None => {
+                        let input_res = self.world.res.name(res_idx).unwrap_or("gfx/invobjs/clay");
                         finished.push((*gob, input_res, label, q_item));
                     }
                 },

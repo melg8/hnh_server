@@ -1834,6 +1834,12 @@ impl Game {
             "paginae/build/oven",
             "paginae/build/smelter",
             "paginae/build/trough",
+            // Session 66 follow-up: the alloying crucible page was built
+            // but never pushed (the wire probes sent act() directly, so
+            // the gap was invisible to them); session 69 adds the kiln
+            // page - both menugrid leaves are live from this push on.
+            "paginae/build/alloyer",
+            "paginae/build/kiln",
         ]);
         for r in crate::craft::RECIPES {
             pages.push(r.pagina);
@@ -3062,7 +3068,8 @@ impl Game {
         }
         // Station input dispatch mirrors station_itemact: the oven roasts
         // meat labels, the smelter melts ore labels, the crucible takes
-        // copper (input) and tin (aux) (session 66).
+        // copper (input) and tin (aux) (session 66), the kiln takes the
+        // Clay label (session 69).
         let accepts = match station_spec.kind {
             crate::build::StationKind::Oven => {
                 crate::craft::roast_result(leak_static(stack.label.as_str())).is_some()
@@ -3077,6 +3084,9 @@ impl Game {
                     || stack
                         .label
                         .eq_ignore_ascii_case(crate::craft::ALLOY_INPUT_TIN)
+            }
+            crate::build::StationKind::Kiln => {
+                crate::craft::kiln_result(leak_static(stack.label.as_str())).is_some()
             }
         };
         if !accepts {
@@ -3148,6 +3158,11 @@ impl Game {
                 }
                 (Kind::OreDeposit { .. }, StaticAct::Mine) => {
                     Some((vec![None], self.harvest_ore_deposit(target, tslot)))
+                }
+                // Session 69: shore clay deposits relay the Mine act
+                // exactly like ore deposits (the Stone class tag).
+                (Kind::ClayDeposit { .. }, StaticAct::Mine) => {
+                    Some((vec![None], self.harvest_clay_deposit(target, tslot)))
                 }
                 (Kind::Crop { .. }, StaticAct::HarvestCrop) => Some((
                     self.relay_crop_harvest(target, tslot)

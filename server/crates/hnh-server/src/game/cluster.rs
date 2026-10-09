@@ -688,6 +688,16 @@ impl Game {
                 stage: None,
                 drop: None,
             },
+            // Clay deposits (session 69) relay Mine acts the same way;
+            // the authority picks the clay-harvest leg.
+            Kind::ClayDeposit { .. } => GuestKind::Static {
+                res_name: self.static_res_name(slot),
+                class: crate::nodes::StaticClass::Stone,
+                crop: None,
+                station: None,
+                stage: None,
+                drop: None,
+            },
             // Stumps render but are not harvestable; the Structure class
             // carries no relay act, so a guest click on one is a no-op.
             Kind::Stump => GuestKind::Static {

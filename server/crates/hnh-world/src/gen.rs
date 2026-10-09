@@ -298,4 +298,63 @@ mod tests {
         }
         println!("rocky tiles in the 61x61 belt window: {belt}");
     }
+
+    /// World-design assertion behind the clay chain (session 69): sandy
+    /// shore tiles (the coastline sand belt standing in for the legacy
+    /// mudflats) must exist within walking range of the spawn area on
+    /// the dev seed, or clay deposits would be unreachable and the
+    /// kiln chain unplayable. Prints the measured distance and the
+    /// sand-tile counts that drive the clay-deposit spawn roll.
+    #[test]
+    fn sandy_shores_are_reachable_from_spawn() {
+        let w = WorldGen::new(42);
+        let sandy = |t: u8| t == tile::SAND;
+        let ((x, y), r) = w
+            .find_tile(50, 50, 400, sandy)
+            .expect("no sand terrain within 400 tiles of spawn on seed 42");
+        assert!(r <= 250, "sandy shores too far from spawn: {r} tiles");
+        println!("nearest sand tile on seed 42: ({x}, {y}), {r} tiles from (50, 50)");
+        // Shore size report: sand-tile count in the 41x41 window around
+        // the nearest hit. Drives the clay-deposit spawn roll (a narrow
+        // beach needs a higher per-tile roll to stay playable).
+        let mut shore = 0usize;
+        let mut near_shore = 0usize;
+        for ty in y - 20..=y + 20 {
+            for tx in x - 20..=x + 20 {
+                let t = w.tile_at(tx, ty);
+                if sandy(t) {
+                    shore += 1;
+                }
+                // Clay deposits need SOME walkable 4-neighbor like the
+                // ore deposits do (the player stands next to the pile).
+                let walkable_neighbor = [
+                    w.tile_at(tx + 1, ty),
+                    w.tile_at(tx - 1, ty),
+                    w.tile_at(tx, ty + 1),
+                    w.tile_at(tx, ty - 1),
+                ]
+                .into_iter()
+                .any(walkable_dev);
+                if sandy(t) && walkable_neighbor {
+                    near_shore += 1;
+                }
+            }
+        }
+        println!("sand tiles in the 41x41 shore window: {shore} (with a walkable neighbor: {near_shore})");
+        assert!(
+            near_shore >= 10,
+            "too few pickable shore tiles: {near_shore}"
+        );
+
+        /// Walkability mirror for the world-design test above (a
+        /// dev-seed constant mirroring the server's tile_speed table:
+        /// water and the mountain walls are the impassable pair on
+        /// this pack).
+        fn walkable_dev(t: u8) -> bool {
+            !matches!(
+                t,
+                tile::DEEP_WATER | tile::WATER | tile::MOUNTAIN | tile::CAVE
+            )
+        }
+    }
 }

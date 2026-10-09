@@ -151,6 +151,27 @@ impl Game {
         crate::state::ORE_PICK_LP
     }
 
+    /// One clay pick off a shore deposit (session 69, the kiln chain's
+    /// gathering leg): a Clay item drop lands beside the pile; the
+    /// depleted deposit disappears. Returns the LP the act grants.
+    pub(super) fn harvest_clay_deposit(&mut self, target: GobId, tslot: usize) -> i32 {
+        let Kind::ClayDeposit { left } = self.world.gobs.kind[tslot] else {
+            return 0;
+        };
+        let pos = self.world.gobs.pos[tslot];
+        debug!(target, left, "clay pick");
+        self.spawn_drop_near(pos, "gfx/invobjs/clay", crate::state::GATHER_QL, "Clay");
+        if left > 1 {
+            self.world.gobs.kind[tslot] = Kind::ClayDeposit { left: left - 1 };
+            self.world.gobs.frame[tslot] += 1;
+            self.publish(target, GuestEv::Update);
+        } else {
+            self.world.gobs.kill(target);
+            self.broadcast_retract(target);
+        }
+        crate::state::CLAY_PICK_LP
+    }
+
     pub(super) fn player_interact(
         &mut self,
         sid: SessionId,
@@ -282,6 +303,14 @@ impl Game {
             }
             Kind::OreDeposit { .. } => {
                 let lp = self.harvest_ore_deposit(target, tslot);
+                if let Some(p) = self.world.player_mut(sid) {
+                    p.lp += lp;
+                }
+                self.push_cattr(sid);
+                self.push_lp_msgs(sid);
+            }
+            Kind::ClayDeposit { .. } => {
+                let lp = self.harvest_clay_deposit(target, tslot);
                 if let Some(p) = self.world.player_mut(sid) {
                     p.lp += lp;
                 }
