@@ -211,11 +211,14 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    morph, Bierwurst/Chicken Chorizo have no item resources).
    POTTERY CLOSED (session 79: four moldings + four fired kiln wares,
    live-driven end to end by test_pottery.py). BAKING BREADTH CLOSED
-   server-side (BAKE_MAP covers every shipped dough; the oven fires
-   the moment an ingredient chain lands). Remaining dead ends: five
-   baking doughs have no ingredient production source yet (apple /
-   blueberries / honey / raisins / chanterelles gathering chains) and
-   butter/carrot-cake lack a live chain drive (milk + carrot walks).
+   (session 81: the five dough recipes + their ingredient sources -
+   the forageable world, apple trees, wild hives, the raisin hand
+   recipe - landed together, live-driven by test_dough.py; every
+   dough output was already BAKE_MAP-keyed). Remaining dead ends:
+   butter/carrot-cake lack a live chain drive (milk needs a tamed
+   cow; carrots need the crop walk), and no dough OTHER than Bread
+   has been oven-fired live yet (the new doughs are BAKE_MAP-pinned
+   but not oven-driven).
 5. **Feeding depth**: LIFT CLOSED (session 62): the trough lift /
    place / transfer mechanic is implemented and probed; the carried
    store survives restarts and cross-node migration. Still open:
@@ -270,7 +273,7 @@ logged. All six types have been served - pick freely, but avoid serving
 the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
 48=3, 49=2, 50=4, 51=3, 52=5, 53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5,
 60=3, 61=2, 62=3, 63=4, 64=1, 65=5, 66=3, 67=4, 68=5, 69=3, 70=2, 71=3,
-72=4, 73=5, 74=0, 75=1, 76=2, 77=3, 78=5, 79=3.
+72=4, 73=5, 74=0, 75=1, 76=2, 77=3, 78=5, 79=3, 80=4, 81=3.
 
 ## Session index (one line each; full entries in the archive)
 
@@ -404,6 +407,11 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
   server/gameres snapshot dropped (43 MB, outdated overlay, the
   fresh-clone landmine); UiProbe tri-mode green, 326 green.
 ## 2026-10-09 - Session 80 (type 4: the client resource-source order fix)
+- S81 (type 3): the dough ingredient chains - five forageable
+  kinds + apple trees + wild hives + raisins hand recipe close
+  the S79 baking dead ends; multi-unit Drop stacks; the fork
+  pagina generator learns real parent versions; test_dough.py
+  live probe.
 
 SESSION TYPE ROTATION LOG: 74=0, 75=1, 76=2, 77=3, 78=5, 79=3, 80=4.
 All six types served - pick freely, avoid repeating the previous session's
@@ -482,74 +490,82 @@ generated pack is self-verified.
 COMMITS: 4a35d9d (client: serve the remote pack before the offline jar),
 e5c933b (repo: drop the stale server/gameres snapshot), this handoff.
 
-## 2026-10-09 - Session 79 (type 3: the pottery, butter and carrot-cake legs)
+## 2026-10-09/10 - Session 81 (type 3: the dough ingredient chains)
 
-SESSION TYPE ROTATION LOG: 74=0, 75=1, 76=2, 77=3, 78=5, 79=3. All six
-types served - pick freely, avoid repeating the previous session's type.
+SESSION TYPE ROTATION LOG: 77=3, 78=5, 79=3, 80=4, 81=3. All six types
+served - pick freely, avoid repeating the previous session's type.
 
-GOAL: close the remaining recipe-breadth dead ends (Known gap #4's tail:
-pottery beyond bricks and the baking doughs). Pure feature work on the
-verified station/craft infrastructure.
+GOAL: close the S79 "five baking doughs without ingredient sources"
+dead end in one move: five dough recipes (apple/blueberry/honey/
+raisin/pirozhki), the forageable world that feeds them, and the live
+probe that drives every new leg. The session was interrupted
+mid-feature (all code landed in the working tree, tests already
+green, but nothing committed); this continuation verified the tree
+live, committed, and pushed.
 
 DONE:
 
-- four molding recipes over the shore-clay economy: Unburnt Clay Mug
-  (Clay x2), Unburnt Jar (x3), Unburnt Teapot (x5), Treeplanter's Pot
-  (x10) - the jar and treeplanter counts read from RoB Legacy, mug and
-  teapot are server policy (the legacy pages record no ratios); all
-  Dexterity-softcapped, paginae/craft/mug|jar|teapot|treepot, outputs
-  ride the pack's dough-* resources
-- the kiln dispatch (craft::KILN_MAP) grew from the single Clay->Brick
-  leg to four fired wares keyed by the unburnt labels the moldings
-  produce; fired wares ride the station quality formula (2*q_item +
-  q_kiln + q_fuel)/4, one ware per firing
-- the butter churn leg: bucket-milk x1 -> Butter + empty bucket back
-  (the dough recipe's bucket-return shape; Cooking/Per softcap) - milk
-  rides the session-47 milking flow
-- carrot-cake dough: flour x2 + bucket-water + carrot x2 + butter ->
-  dough-cake-carrot x2 + bucket back - the ONE pie whose every
-  ingredient today's economy reaches
-- BAKE_MAP grew from the single Bread leg to the full shipped dough set
-  (apple/blueberry pies, carrot cake, raisin butter-cake, honeybun,
-  pirozhki): the oven is ready the moment their ingredient chains land;
-  the baked LABELS are the fep.conf eat keys (pie-blueberry carries the
-  legacy "Bluberry" typo in its tooltip - the server label wins)
-- fep.conf: plain Bread shipped no 2009 row - the S71 baked loaf
-  silently resolved no FEP and eat_item bailed; CON:5 added (the
-  baked-goods band, Apple Pie), policy recorded in the file
-- HARNESS FIX (hnhlib.py): bundled REL sub-messages read the body AFTER
-  the 2-byte length prefix; the old slice swallowed the length bytes
-  and dropped every mid-bundle widget (item widgets died there with the
-  NEWWDG PARSE diagnostic - the mug item widget died exactly there);
-  now byte-for-byte identical to rel.rs poll_transmit and the Rust wire
-  harness. Long-standing latent bug, surfaced by the pottery probe
-- test_pottery.py: the full live contract - shore clay 50, kiln build
-  (45 sink), jar + mug molded through the make widget, both fired
-  through the Light menu, wares picked up and label/resource-verified.
-  Live run: POTTERY: OK (Clay Jar q10, Clay Mug q10). The probe also
-  re-requests missing 3x3 grids like the real client (a one-shot 3x3
-  can lose a fragment under the entry burst; the old test_kiln pattern
-  died on that once here)
+- Five dough recipes over the flour-and-water base invariant
+  (apdough, dough_blueberrypie, hbdough, rbcdough, dough_pirozhki),
+  all Cooking/Per-softcapped, every output label keying the BAKE_MAP
+  oven dispatch. Ratios are server policy where RoB Legacy records
+  no counts (the ccdough x2-fruit + x1-butter shape); the honeybun
+  returns TWO empty buckets.
+- state::ForageKind registry + Kind::Forage gobs: Blueberries
+  (forest/heath), Chantrelles (forest), wild Grapevines, Yellow
+  Onion (grass). One pick = FORAGE_YIELD (3) units in a single
+  multi-unit Drop, then the plant is consumed (legacy single-pick).
+  Visibility gating DEVIATION from legacy Per*Exp recorded in the
+  farming doc.
+- Kind::FruitTree (appletree res): APPLE_PICKS (5) picks, one Apple
+  each, then degrades to a plain branch-yielding tree (the legacy
+  stage-6 behavior compressed into one gob).
+- Kind::BeeHive (bhive res): HIVE_HONEY_UNITS (3), bucket-gated
+  harvest exactly like the session-47 milking contract (empty bucket
+  in -> Bucket of Honey out; refusal system lines when empty-handed
+  or drained). Permanent fixture. Guest nodes publish it as a
+  no-act Structure (the bucket check lives on the home node - the
+  S62 guest-trough state).
+- Raisins: grapes x2 -> raisins x1 hand recipe (the S79 butter-
+  precedent deviation; legacy dries on a frame over two days).
+- make_fork_paginae.py resolves the parent's REAL on-disk version
+  into the AButton layer (the session-80 "Wrong res version" root
+  cause made hardcoded parent_ver=1 untrustworthy). The raisins
+  fork page (paginae/craft/raisins, parented into the baking
+  family) ships in res/compiled.
+- Kind::Drop grew a count field (serde default 1; persisted queues
+  and fixtures unchanged); the relay carries it through DropView
+  and StaticStack; pickup grants the whole stack.
+- fep.conf: Apple=CON:1 and Bucket of Honey=AGI:1 (any label the
+  server can produce must resolve a row or eating silently bails -
+  enforced by the eat path, documented in food-and-fep.md).
+- Roll-band spawn table design: every new broadleaf/forest/grass
+  static draws from the SAME per-tile roll (no extra draws), so all
+  pre-existing spawns stay bit-identical and old saves keep their
+  surroundings.
+- test_dough.py: the live five-leg probe (four forage handfuls,
+  apple budget + degradation, hive refusal + harvest, raisins
+  craft, raw apple eat). DOUGH: OK live. White-box pin
+  dough_chain_recipes_are_wired (every dough recipe keys BAKE_MAP,
+  paginas ship, fep rows resolve, world sprites exist).
+- diag_statics.py (the spawn-table dump used while tuning the roll
+  bands) attic'ed.
 
-MEASURED/EVIDENCE: white-box pins - kiln_map_pottery_legs_are_wired
-(every pottery kiln key must be a molding output; every fired ware's
-resource AND world shape must ship in the pack), bake_map_outputs_
-carry_fep_rows (every baked label must resolve its fep.conf row - the
-eat contract), pottery_butter_and_cake_recipes_are_wired (the clay
-ladder counts, both bucket-return legs, pagina + output resources, the
-cake dough label keys the BAKE_MAP dispatch).
+MEASURED/EVIDENCE: DOUGH: OK live run (dough79555: 3 grapes, 5
+apples, honey, raisins, eat). fix_gameres_parent_refs.py --check
+gameres: stale=0 over 6385 resources. Gate: fmt + clippy -D warnings
+clean; 327 workspace tests green (11 proto + 297 unit [2 ign] +
+7 wire [1 ign] + 12 world). make-gameres already runs both repair
+passes (the S80 follow-up is closed by inspection).
 
-GATE: fmt + clippy -D warnings clean; workspace 326 green (11 proto +
-296 unit [2 ign] + 7 wire [1 ign] + 12 world). Live smoke: POTTERY: OK.
-No tmp residue on SIGTERM.
+NOT DONE / next session carries: the butter + carrot-cake live
+chain drive (milk needs a tamed cow - the taming walkthrough is on
+the GL e2e list); a full dough->bake->eat pie cycle live (needs the
+farm/quern flour chain - test_bake covers Bread end to end, the new
+doughs are BAKE_MAP-pinned but not oven-driven); the vis delta-scan
+re-measure (gap #10b); multi-machine cluster profile; GL e2e +
+Windows smoke; CI push retry (the PAT still lacks the workflow
+scope as of S74/S75 retries).
 
-NOT DONE / next session carries: butter + carrot-cake have wiring pins
-but no live chain drive yet (milk needs a milking walkthrough, carrots
-need the crop chain - both on the GL e2e list from gap #6); the five
-baking doughs without ingredient sources (apple/blueberry/honey/raisins/
-chanterelles gathering chains); the vis delta-scan re-measure (gap #10b);
-GL e2e + Windows smoke; multi-machine cluster profile; CI push retry.
-
-COMMITS: b1423e6 (the pottery/butter/cake legs + harness fix + probe),
-this handoff.
-
+COMMITS: a3c3394 (world: the five dough ingredient chains close the
+baking breadth), this handoff.

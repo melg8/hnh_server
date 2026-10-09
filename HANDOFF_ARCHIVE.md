@@ -5571,3 +5571,74 @@ cluster profile. remaining known gap tail: pottery/baking dough depth,
 per-animal breed stat rows, cross-node trough relays.
 
 COMMITS: 571b011 (the allocator-free sweep layout), this handoff.
+
+## 2026-10-09 - Session 79 (type 3: the pottery, butter and carrot-cake legs)
+
+SESSION TYPE ROTATION LOG: 74=0, 75=1, 76=2, 77=3, 78=5, 79=3. All six
+types served - pick freely, avoid repeating the previous session's type.
+
+GOAL: close the remaining recipe-breadth dead ends (Known gap #4's tail:
+pottery beyond bricks and the baking doughs). Pure feature work on the
+verified station/craft infrastructure.
+
+DONE:
+
+- four molding recipes over the shore-clay economy: Unburnt Clay Mug
+  (Clay x2), Unburnt Jar (x3), Unburnt Teapot (x5), Treeplanter's Pot
+  (x10) - the jar and treeplanter counts read from RoB Legacy, mug and
+  teapot are server policy (the legacy pages record no ratios); all
+  Dexterity-softcapped, paginae/craft/mug|jar|teapot|treepot, outputs
+  ride the pack's dough-* resources
+- the kiln dispatch (craft::KILN_MAP) grew from the single Clay->Brick
+  leg to four fired wares keyed by the unburnt labels the moldings
+  produce; fired wares ride the station quality formula (2*q_item +
+  q_kiln + q_fuel)/4, one ware per firing
+- the butter churn leg: bucket-milk x1 -> Butter + empty bucket back
+  (the dough recipe's bucket-return shape; Cooking/Per softcap) - milk
+  rides the session-47 milking flow
+- carrot-cake dough: flour x2 + bucket-water + carrot x2 + butter ->
+  dough-cake-carrot x2 + bucket back - the ONE pie whose every
+  ingredient today's economy reaches
+- BAKE_MAP grew from the single Bread leg to the full shipped dough set
+  (apple/blueberry pies, carrot cake, raisin butter-cake, honeybun,
+  pirozhki): the oven is ready the moment their ingredient chains land;
+  the baked LABELS are the fep.conf eat keys (pie-blueberry carries the
+  legacy "Bluberry" typo in its tooltip - the server label wins)
+- fep.conf: plain Bread shipped no 2009 row - the S71 baked loaf
+  silently resolved no FEP and eat_item bailed; CON:5 added (the
+  baked-goods band, Apple Pie), policy recorded in the file
+- HARNESS FIX (hnhlib.py): bundled REL sub-messages read the body AFTER
+  the 2-byte length prefix; the old slice swallowed the length bytes
+  and dropped every mid-bundle widget (item widgets died there with the
+  NEWWDG PARSE diagnostic - the mug item widget died exactly there);
+  now byte-for-byte identical to rel.rs poll_transmit and the Rust wire
+  harness. Long-standing latent bug, surfaced by the pottery probe
+- test_pottery.py: the full live contract - shore clay 50, kiln build
+  (45 sink), jar + mug molded through the make widget, both fired
+  through the Light menu, wares picked up and label/resource-verified.
+  Live run: POTTERY: OK (Clay Jar q10, Clay Mug q10). The probe also
+  re-requests missing 3x3 grids like the real client (a one-shot 3x3
+  can lose a fragment under the entry burst; the old test_kiln pattern
+  died on that once here)
+
+MEASURED/EVIDENCE: white-box pins - kiln_map_pottery_legs_are_wired
+(every pottery kiln key must be a molding output; every fired ware's
+resource AND world shape must ship in the pack), bake_map_outputs_
+carry_fep_rows (every baked label must resolve its fep.conf row - the
+eat contract), pottery_butter_and_cake_recipes_are_wired (the clay
+ladder counts, both bucket-return legs, pagina + output resources, the
+cake dough label keys the BAKE_MAP dispatch).
+
+GATE: fmt + clippy -D warnings clean; workspace 326 green (11 proto +
+296 unit [2 ign] + 7 wire [1 ign] + 12 world). Live smoke: POTTERY: OK.
+No tmp residue on SIGTERM.
+
+NOT DONE / next session carries: butter + carrot-cake have wiring pins
+but no live chain drive yet (milk needs a milking walkthrough, carrots
+need the crop chain - both on the GL e2e list from gap #6); the five
+baking doughs without ingredient sources (apple/blueberry/honey/raisins/
+chanterelles gathering chains); the vis delta-scan re-measure (gap #10b);
+GL e2e + Windows smoke; multi-machine cluster profile; CI push retry.
+
+COMMITS: b1423e6 (the pottery/butter/cake legs + harness fix + probe),
+this handoff.
