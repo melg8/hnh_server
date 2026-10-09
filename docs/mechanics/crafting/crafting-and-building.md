@@ -541,3 +541,14 @@ Server implementation notes (this repo, session 60):
   tile under the click with no player-distance check; the legacy
   client surely enforced adjacency client-side, but a server-side
   reach policy for itemacts is not implemented (see Open questions).
+- **Tool-gate refusal names the display name (session 72).** The
+  missing-tool refusal used to interpolate the raw resource path
+  ("You need the gfx/invobjs/saw to make that."); it now names the
+  producing recipe's display name ("You need the Saw to make that.")
+  - consistent with the display-label string policy above. The wire
+  tier pins the exact refusal line (craft_flow
+  ..._enforces_the_tool_gate) plus the whole saw/bucket hand-craft
+  shape from the starter kit; the white-box battery pins the oven
+  bake contract (label gate, fuel gate, FUEL_PER_JOB burn, the
+  BAKE_MAP output drop) and the quern's fuel-gate skip on the real
+  itemact/menu/tick paths.

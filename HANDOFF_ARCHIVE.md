@@ -4815,3 +4815,292 @@ NOT DONE (the debt session 70 inherits):
 - The HANDOFF record (this entry) and the rotation-log/index updates.
 
 COMMITS: d4b965a (clay deposits + kiln station, wave 1).
+
+## 2026-10-08 - Session 67 (type 4: test coverage)
+
+GOAL: the live bronze-chain wire probe (test_smelt.py) - session 66
+built the crucible but only unit-tested it.
+
+DONE (committed across this session):
+- GitNexus deployed (318e215): index 10.6k symbols / 39k edges,
+  AGENTS.md/CLAUDE.md sections, .claude/skills, .gitnexus gitignored;
+  `gitnexus detect-changes` verified live.
+- Bronze world-shape fix (80f12e0): bar-bronze rides the
+  gfx/terobjs/items/bar-copper alias in DROP_WORLD_ALIASES (game.rs);
+  craft.rs alloy_charge_pins pins the world shape, closing the hole
+  the bug slipped through.
+- hnhlib item_info now carries "count" (args[4], default 1) so stack
+  merges (grant_pickup) are assertable.
+- test_smelt.py rewritten: mine_until (kind accumulation across
+  deposits) -> build_station (sdt-change tracking, not fixed values)
+  -> smelt (per ore kind) -> gather_topup (boulder/tree picks) ->
+  alloy (two bronze drops, count=2 assert).
+
+VERIFIED FINDINGS (the "verify, don't assume" core of this session):
+- MOVEMENT: the server accepts a ground click ONLY when the whole
+  straight segment is walkable (state::path_clear samples one point
+  per tile of Manhattan distance; LinMove, no detours). Ridge-blocked
+  clicks move NOTHING, silently - the old probes stalled in place
+  for minutes. Documented in map-and-terrain.md.
+- SERVER BUG (fixed): MSG_MAPDATA pktid was world.tick-derived; the
+  3x3 bootstrap MAPREQs land in the SAME tick, so their fragments
+  shared one pktid and reassembly interleaved grids into garbage
+  (the Java client's Defrag hits the same corruption). Fix: a
+  monotonic mapdata_seq counter (game.rs, stream.rs). Documented in
+  network-protocol.md.
+- RCVBUF: the world-entry burst (9 grids + several hundred gob
+  spawns) overflowed the default ~200 KB SO_RCVBUF; the kernel
+  dropped whole grids nondeterministically (4-of-9 receptions).
+  hnhlib now sets a 4 MB receive buffer.
+- NAVIGATION LAYER (hnhlib): MSG_MAPDATA reassembly + zlib + per-grid
+  tile bytes (row-major y*100+x), tile_at/walkable/line_clear (the
+  path_clear mirror), find_tile_path (BFS over streamed tiles,
+  8-neighbor, impassable goals retarget a walkable 4-neighbor), and
+  nav_walk (short-segment clicking along the BFS path with stall
+  retry). All future probes navigate instead of blind-clicking.
+
+PROBE STATE (not yet SMELT: OK): copper mining is STABLE (two
+deposits picked clean of copper: (264,264) and (121,-1100), the
+northern one reached via a 1900-subtile BFS walk). Tin is NOT yet
+mined: the three north-western deposits are ridge-isolated (BFS: no
+tile path at all), the southern pair (-143,429) / (-572,286) has BFS
+paths but nav_walk oscillates near the south-west rim (bot walks,
+then re-plans back; suspect click-on-nearby-gob interception or a
+client/server line-sampling mismatch on long diagonals - the
+short-segment clicking already fixed the worst of it). Next session:
+finish the tin leg, then the smelter/crucible phases are already
+written and waiting.
+
+VERIFIED: fmt + clippy -D warnings clean; cargo test --workspace
+307 green after the mapdata fix (11 proto + 280 unit + 6 wire + 10
+world).
+
+NEXT (handoff):
+- Finish test_smelt.py: tin deposit reach (debug the nav oscillation
+  - try clicking pure tile centers away from gobs, or widen the
+  sidestep retry), then SMELT: OK end-to-end (smelter + crucible
+  phases are written).
+- hnhlib nav_walk polish: the farthest-line-clear variant got whole
+  clicks rejected on long diagonals (client/server integer sampling
+  differ by one tile on negative deltas); short segments fixed it -
+  keep that shape.
+- Type-5 candidates: mvbat_fanout_us; entry-burst wmax (283 ms).
+- Carried: GL e2e + Windows smoke; multi-machine cluster profile; CI
+  push when the token gets the workflow scope.
+
+COMMITS: 318e215 (gitnexus), 80f12e0 (bronze shape), + this session's
+mapdata pktid fix, rcvbuf, nav harness, probe rewrite, docs.
+
+---
+## 2026-10-08 - Session 68 (type 5: performance)
+
+SESSION TYPE ROTATION LOG: 64=1, 65=5, 66=3, 67=4, 68=5. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the S65/S67 handoffs named two type-5 candidates - mvbat_fanout_us
+(the top single phase at 1000 sessions) and the entry-burst wmax (283 ms)
+attribution. Both were fixed this session behind first-step instrumentation
+(perf-profile-first: attribute, then cut).
+
+INSTRUMENTED BASELINE (1000 bots, saturated world, release build; the
+attribution commit efbddb1 produced these):
+
+- fanout_pairs 347K vs fanout_hits 183K per tick: 53% of the pair work
+  is a visible-set HashSet probe that ends in a REJECT (scattered
+  FxHashSet bucket walk per (session, block) pair); fanout_fin only 19K
+  (finalizer copies are NOT the dominant cost); fanout_msgs ~2000.
+- mvbat_fanout_us 8-62 ms steady; mean_tick_us 71-92 ms.
+- wmax attribution (the new snapshot): wmax_retx_sweep_us 85-107 ms -
+  the RETRANSMIT SWEEP owns the entry-burst spikes (wmax_tick 188-208
+  ms), not the fan-out (wmax_mvbat_fanout 22-27 ms). The sweep's
+  retx_resent hit 44-73K blocks per pass with retx_pending 158-538K:
+  the 80 ms first-retry schedule expires BEFORE the load bots' batched
+  200 ms OBJACK lands, so every in-flight block reads as lost once and
+  is resent (each with a deep bytes clone). The S65 "post-fix" numbers
+  were measured on a smaller cohort; at a full 1000 the artificial-loss
+  storm returns through the ack lag, not the missing OBJACK echo.
+
+FIX (commit 20a96d4, one change set):
+
+- SessionOut.visible_bits: a slot-index bitset mirror of the visible
+  set (GobId packs the slot into the low 16 bits; a live gob owns its
+  slot exclusively, so the mirror is exact when updated at the same
+  three sites that mutate `visible` - spawn stream.rs, retract
+  stream.rs, guest spawn cluster.rs). The fan-out pair loop probes one
+  aligned word (~1 L1 load) instead of hashing into the scattered set;
+  the authoritative set re-checks every bit-set pair, so a stale bit
+  costs one probe, never a wrong send. Pinned by the
+  visible_bitset_mirror_tracks_the_set unit test (direct method
+  contract + live-path invariant after entry ticks).
+- Ack-lag adaptive RTO: on_objack samples now - last_sent of the
+  highest newly-confirmed block into an EMA (ack_lag_ema_ms); the sweep
+  floors a block's FIRST retry at 2x the peer's mean lag (capped 4 s;
+  tries > 0 keep the legacy schedule). A peer that acks in 200 ms
+  batches no longer has its in-flight blocks retried at 80 ms. Fast
+  ackers (lag < 40 ms) keep the legacy behavior unchanged.
+- Retire pass (the second full O(pending) retain walk) now runs only
+  when the main walk SAW an expired block (expired_n counter).
+
+POST-FIX (same 1000-bot scenario, fresh runs):
+
+- mean_tick_us 52-78 ms (was 71-92); wmax_tick_us 90-183 ms (was
+  188-208); wmax_retx_sweep_us 22-85 ms (was 85-107).
+- retx_resent 18-44K per pass (was 44-73K); retx_pending 54-165K (was
+  158-538K); queue_full refusals mostly single digits after the burst
+  (was 14-61K spikes).
+- mvbat_fanout_us 3.5-43 ms band (was 8-62); hit ratio 42% of pairs
+  (was 53%) - the bitset rejects the non-visible majority cheaply.
+
+VERIFIED (fresh runs): fmt --check clean; clippy --all-targets -D
+warnings clean; cargo test --workspace 308 green (11 proto + 281 unit
+[incl. the new bitset pin] + 6 wire + 10 world). WORLD ENTRY: OK +
+CATTR ORDER: OK on the final binary (python probe).
+
+NOT DONE (deliberate, measured out of scope for the remaining budget):
+- UnackedBlock.bytes as Arc<Vec<u8>> only pays if the raw channel
+  carries Arcs too (a Vec channel forces the deep clone on resend
+  regardless); with the ack-lag RTO the resend count fell ~2x already -
+  revisit only if retx_resent climbs again.
+
+WAVE 3 (same session, follow-up commit): the budget-capped incremental
+retx sweep - DONE and verified.
+
+- RETRANS_SWEEP_BUDGET = 8192 resends per sweep pass; each live
+  session is guaranteed RETRANS_SESSION_SHARE_MIN = 64 sends (the
+  global budget still caps the sum: with the share floor, sends stop
+  at the budget boundary - share*sessions saturates it after ~128
+  busy sessions at the 1000-peer scale).
+- Round-robin ring: the sweep walks a SessionId-sorted scratch ring
+  (retx_scratch, taken/restored - no per-sweep allocation) starting at
+  retx_cursor; the cursor advances by the slots SEEN, so budget-starved
+  sessions go first on the next pass. The ring MUST be sorted: the
+  sessions map iterates in randomized order and an unsorted ring makes
+  the cursor point at a different session every sweep (no fairness).
+- Queue-full pre-check BEFORE the clone: tokio's mpsc capacity()
+  counts FREE slots (drops on send, rises on recv) - a full queue
+  reads capacity == 0. The first cut had this inverted
+  (capacity >= max_capacity is TRUE for an EMPTY queue) and silently
+  refused every resend - caught by the wire suite
+  (trough_lift... "lift never confirmed": the retract echo is a
+  retransmitted block, syslines are not). Fixed to capacity() == 0;
+  the pre-check also kills the wasted deep clones on full queues.
+- Share spent mid-gob breaks to the next sweep; breaking never
+  reorders the wire - later frames are just NOT sent yet (the
+  blocked-latch ordering guarantee is unchanged).
+
+POST-FIX (1000-bot entry burst, /tmp/load_budget2.log):
+
+- retx_resent pinned at 8.19-8.25K per sweep for the WHOLE run (the
+  budget is the binding constraint, as designed; was 18-44K free-running).
+- wmax_retx_sweep_us 5.5-14.3 ms (was 22-85 post-RTO, 85-107 pre-S68).
+- retx_queue_full = 0 on every report (was 14-61K spikes).
+- retx_pending drains 57K -> 10-17K steady (was 54-165K).
+- mean_tick_us declines 66 -> 16 ms as the entry burst settles;
+  end-of-run wmax_tick_us 33-47 ms (entry-window peaks 144-226 ms are
+  mvbat fan-out bursts of 650-690K pairs, NOT the sweep - re-rank).
+- VERIFIED: 308 green (11 proto + 281 unit + 6 wire + 10 world);
+  fmt --check + clippy -D warnings clean.
+
+NEXT (handoff):
+- Type-5 candidate #1: mvbat_fanout_us - the last big wmax_tick
+  contributor (31-63 ms peaks at 650K+ pair bursts during entry and
+  bot-retirement churn). Ideas: split the fan-out pair loop per grid
+  cell (the encode+bitset probe is already cheap per pair - profile
+  where the 63 ms goes: pair iteration itself vs the HashSet-style
+  finalize bookkeeping), or snapshot the mover list before the pass.
+- Type-5 candidate #2: retx_resent stays budget-pinned in STEADY
+  state (every report shows ~8.2K with pending 10-17K) - the sweep
+  keeps resending ~8 blocks/session; check whether the ack-lag RTO
+  floor (2x EMA, capped 4 s) is too low for load bots whose ack
+  stream competes with the fan-out, or whether load bots retire
+  before acking (retx_pending retiring through RETRANS_MAX_AGE_MS).
+- Type-3 candidates (from S66/S67): kiln + brick chain, anvil +
+  tool-gated recipes, flower pick verbs, per-animal breed stat rows.
+- Finish test_smelt.py tin leg (S67 finding; smelter/crucible phases
+  are written and waiting).
+- Carried: GL e2e + Windows smoke; multi-machine cluster profile; CI
+  push when the token gets the workflow scope.
+
+COMMITS: efbddb1 (fan-out pair attribution + wmax snapshot),
+20a96d4 (bitset fast path + ack-lag RTO + conditional retire),
+this session's wave 3 (budgeted round-robin retx sweep).
+
+---
+## 2026-10-09 - Session 70 (type 2: refactoring / tech debt)
+
+SESSION TYPE ROTATION LOG: 65=5, 66=3, 67=4, 68=5, 69=3, 70=2.
+
+GOAL: game.rs had regrown to 3634 lines after the S49/S55 splits (every
+feature wave S58-S68 landed in the parent) - the top type-2 debt.
+Secondary: the inherited S69 debt (the kiln chain committed but never
+driven live).
+
+DONE (committed across this session):
+
+- Wave 1 (d1ae3ab): game.rs split into five adjacent-file child
+  modules, a pure move on the S49/S55 pattern (proj-mod-by-feature;
+  methods only the parent calls are pub(super), proj-pub-super-parent;
+  no signatures changed):
+  - game/pose.rs (190): pose layer tables, move_dir/art_dir. The pub
+    use re-export keeps crate::game::move_dir/art_dir reachable for
+    the state.rs/nodes.rs doc references; the table accessors ride a
+    pub(super) re-export into the sibling stream/interact/cluster
+    globs (a glob only pulls items declared in game itself).
+  - game/lifecycle.rs (430): autosave + save_all_and_flush, handle_cmd,
+    report_perf, persist_player, on_session_closed.
+  - game/entry.rs (633): session_connected, char_attr_snapshot,
+    enter_world/enter_world_inner, find_spawn_position.
+  - game/social.rs (631): chat relay, party invite/join/leave/sync, LP
+    skill shop, chr/mapview/speedget widgets.
+  - game/relay.rs (540): the authority-side legs applying guest-node
+    relayed interactions (plant/plow/station/static/harvest/pickup/
+    swing); the wire contracts stay in game/cluster.rs.
+  game.rs: 3634 -> 1287 lines (the Game struct, constructors, run
+  loop, tick, on_wdgmsg dispatch, shared wire helpers). GitNexus
+  impact (enter_world) flagged HIGH pre-edit - compensated by the
+  full gate; detect-changes run pre-commit. VERIFIED: fmt clean,
+  clippy -D warnings clean, 311 green.
+- Wave 2 (222a9ad): the S69 kiln debt closed. The chain was driven
+  end to end on a live server (shore clay pick 46/48, kiln built from
+  one merged 45-unit delivery, brick fired through fuel + input +
+  Light, Brick q10 in the inventory) and surfaced two real bugs:
+  - The plan -> station conversion keeps the gob id, so a deliverer
+    that keeps sinking to the old plan target fed the new STATION's
+    input slot - the S69 "second sink round loses the clay" suspicion
+    confirmed as a real plan/station sink contract gap. Server policy:
+    sink_material now announces completion with the system line
+    'The <id> is finished.' (recorded in crafting-and-building.md).
+  - test_kiln.walk_to_shore started walking before the shore grid
+    (gc 1,0) streamed in - BFS only walks loaded tiles. The probe
+    now waits for the grid (debug_kiln_nav*.py keep the record).
+  test_kiln.py hardened: sink_demand stops on the completion line
+  (chat lines cleared per build), build_kiln asserts the announcement
+  + the station re-render (a full-demand delivery never shows an
+  intermediate stage byte). VERIFIED LIVE: KILN: OK. Gate: fmt +
+  clippy -D warnings clean, 311 green.
+- Housekeeping: debug_kiln_sink.py dropped - its investigation is
+  closed by the wave-2 finding.
+- Java client headless verification (post-gate budget): the full
+  client source (223 .java files) compiles against the live protocol
+  and the REAL client classes drove auth -> charlist -> play -> world
+  entry -> UI widgets headlessly - UI PROBE run/equip/charlist all OK
+  (MapView, MenuGrid, Equipory, CharWnd, ...). The first run exposed a
+  REAL pack defect: MenuGrid died with PaginaException on
+  paginae/craft/clothmat - the legacy jar ships STALE parent_ver
+  references (string.res -> clothmat ver 1 vs the real file ver 3;
+  tanhide.res -> leather ver 1 vs ver 2), a second corruption class
+  the existing fix_gameres_versions.py pass does not cover. New
+  server/scripts/fix_gameres_parent_refs.py aligns every action-layer
+  parent_ver with the parent's real file version (--check/--using for
+  the partial res/compiled overlay); both make-gameres generators
+  (sh + ps1) now run it over the generated pack AND res/compiled.
+  gameres/ regenerated from scratch: WORLD ENTRY OK + all three UI
+  PROBE modes green. debug_pagina_announce.py added (a wire probe
+  asserting every RMSG_PAGINAE add matches the served file version -
+  the differential that located the defect server-side vs pack-side).
+
+COMMITS: d1ae3ab (the split), 222a9ad (kiln verified + fixes), this
+handoff + the sink-probe removal + the Java-client pack fix
+(fix_gameres_parent_refs.py, res/compiled repairs, UiProbe green).
+
+---
