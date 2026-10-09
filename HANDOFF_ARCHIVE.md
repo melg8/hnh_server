@@ -5417,3 +5417,46 @@ staged work.
 
 COMMITS: 037240c (the background flush), this handoff.
 
+
+## 2026-10-09 - Session 76 (type 2: refactoring)
+
+SESSION TYPE ROTATION LOG: 72=4, 73=5, 74=0, 75=1, 76=2, 77=3, 78=5. All six
+types served - pick freely, avoid repeating the previous session's type.
+
+GOAL: split the crate's largest file - game/tests.rs (8384 lines, 154
+tests + 35 shared helpers) - into per-theme modules. Pure move, zero
+logic changes.
+
+DONE:
+
+- game/tests.rs is now a thin module wrapper; the battery lives in
+  game/tests/{equip,animals,movement,cluster,migration,drops,crops,
+  stations,craft,archery,combat,trough}.rs (190-1091 lines each, cut
+  by feature: entry/equip/cursor, predators+taming+production,
+  movement/art layers, cluster relays, char migration, static drops,
+  crops/plow, stations/bake, craft chains, archery, melee/PvP, trough)
+- the 35 shared setup helpers (entered_game, clustered_game, drains,
+  species/station/trough builders) are pub(super) in
+  game/tests/common.rs and imported by every theme module
+- the mod tests declaration lost its #[path = "game/tests.rs"] hack -
+  a plain `#[cfg(test)] mod tests;` resolves game/tests.rs plus the
+  game/tests/ children natively (the #[path] form would have looked
+  for the children in game/ directly)
+- the split was performed by a scripted segmenter (exact-name test
+  map, helpers auto-routed to common); two parser defects were caught
+  by compile errors and fixed before commit: segment ends previously
+  swallowed the next segment's doc/attribute header (leaving
+  "expected item after attributes" tails), and header blocks split by
+  a blank line between the docs and the #[test] attribute stayed
+  behind
+- verified: 287 unit green (the exact pre-split count, same set),
+  fmt + clippy -D warnings clean, workspace 317 green (first run hit
+  the known two-boot wire flake on the 2-core sandbox, clean rerun)
+
+NOT DONE / next session carries: unchanged - retx_sweep unacked layout
+and vis delta-scan (type 5), GL e2e + Windows smoke, multi-machine
+cluster profile; state.rs (2130) and game/cluster.rs (2054) are the
+next-largest non-test files if a future type-2 session wants them.
+
+COMMITS: 76900f0 (the test battery split), this handoff.
+

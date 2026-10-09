@@ -244,15 +244,15 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    and the sweep hit 426 ms (see the S65 entry). The load cohort now
    echoes batched MSG_OBJACK like the real client, a hard age ceiling
    and a queue-full throttle bound any peer's table regardless.
-10. **Perf follow-ups** (the S73 profile's named candidates, both
-   measured on current master): (a) `retx_sweep_us` 5-27 ms - 12-37k
-   pending blocks each pay 2-3 hash probes + a BTreeMap walk + a deep
-   clone per resend; a cache-friendly `unacked` layout (inline block
-   bytes, no BTreeMap node per insert) is the natural next cut;
-   (b) the vis full rescan per moving session (a cell crossing
-   re-scans the whole rectangle) - a delta-scan (new cell strip only)
-   is a bigger refactor; re-measure whether it still pays after the
-   S73 parallel-probe move.
+10. **Perf follow-ups** (the S73 profile's named candidates): (a)
+   CLOSED (session 78): the `unacked` layout went cache-friendly -
+   inline BlockBytes over the raw channel (zero-alloc resends) and a
+   flat frame-ordered per-gob Vec (no BTreeMap node per insert);
+   measured retx_sweep mean -25..-27%, wmax -46..-48% at 1000
+   saturated bots; (b) the vis full rescan per moving session (a cell
+   crossing re-scans the whole rectangle) - a delta-scan (new cell
+   strip only) is a bigger refactor; re-measure whether it still pays
+   after the S73 parallel-probe move and the S78 allocator relief.
 11. **10k memory footprint** (S75 measured): ~0.8 MB RSS per saturated
    session (830 MB at 1000) - the 10k single-process extrapolation is
    ~8 GB plus the per-node game/world overhead. Fits a 16-32 GB node;
@@ -377,52 +377,80 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
   per-theme modules + common.rs (pure move, 154 tests + 35 helpers
   redistributed, the largest file now <=1091 lines); the #[path] hack
   dropped; 317 green.
+- S78 (type 5): the unacked table went cache-friendly - inline
+  BlockBytes over the raw channel (zero-alloc resends) + a flat
+  frame-ordered per-gob Vec (was BTreeMap); retx sweep mean -25%,
+  wmax -46..48%, tick band 42->29-33 ms at 1000 saturated bots; 323
+  green.
 - S77 (type 3): the sausage chain - bear + hen join the roster,
   Intestines enter the butcher loot, 12 of 13 wurst paginae become
   labeled-meat-slot recipes (Piglet Wursts deferred: no pork source);
   fep.conf reaches the unit tier; 320 green, live-verified.
 
-## 2026-10-09 - Session 76 (type 2: refactoring)
+## 2026-10-09 - Session 78 (type 5: the retransmit sweep sheds its allocator)
 
-SESSION TYPE ROTATION LOG: 72=4, 73=5, 74=0, 75=1, 76=2, 77=3. All six
+SESSION TYPE ROTATION LOG: 73=5, 74=0, 75=1, 76=2, 77=3, 78=5. All six
 types served - pick freely, avoid repeating the previous session's type.
 
-GOAL: split the crate's largest file - game/tests.rs (8384 lines, 154
-tests + 35 shared helpers) - into per-theme modules. Pure move, zero
-logic changes.
+GOAL: the Known gaps #10a cut - the cache-friendly `unacked` layout the
+S73/S76 notes named as the natural next retx move (the sweep walked
+BTreeMap nodes per block and deep-cloned a Vec per resend; the
+entry-burst profile had it at 5-27 ms with 12-37k pending).
 
 DONE:
 
-- game/tests.rs is now a thin module wrapper; the battery lives in
-  game/tests/{equip,animals,movement,cluster,migration,drops,crops,
-  stations,craft,archery,combat,trough}.rs (190-1091 lines each, cut
-  by feature: entry/equip/cursor, predators+taming+production,
-  movement/art layers, cluster relays, char migration, static drops,
-  crops/plow, stations/bake, craft chains, archery, melee/PvP, trough)
-- the 35 shared setup helpers (entered_game, clustered_game, drains,
-  species/station/trough builders) are pub(super) in
-  game/tests/common.rs and imported by every theme module
-- the mod tests declaration lost its #[path = "game/tests.rs"] hack -
-  a plain `#[cfg(test)] mod tests;` resolves game/tests.rs plus the
-  game/tests/ children natively (the #[path] form would have looked
-  for the children in game/ directly)
-- the split was performed by a scripted segmenter (exact-name test
-  map, helpers auto-routed to common); two parser defects were caught
-  by compile errors and fixed before commit: segment ends previously
-  swallowed the next segment's doc/attribute header (leaving
-  "expected item after attributes" tails), and header blocks split by
-  a blank line between the docs and the #[test] attribute stayed
-  behind
-- verified: 287 unit green (the exact pre-split count, same set),
-  fmt + clippy -D warnings clean, workspace 317 green (first run hit
-  the known two-boot wire flake on the 2-core sandbox, clean rerun)
+- UnackedBlock.bytes is now BlockBytes: a 144-byte inline buffer with a
+  heap spill for oversize blocks (the profile showed none in the hot
+  path - an OD_REM is ~13 bytes, a player spawn ~90). A resend used to
+  be malloc+copy+free on the tick thread; now it is one memcpy
+- the raw UDP channel ships BlockBytes end to end (send_raw converts
+  at the door, the receiver sends as_slice()), so a resend enqueues
+  the inline buffer with NO allocation; Deref<Target=[u8]> keeps the
+  receiver task and the test harness reading the payload like a slice
+- PerGobPending replaces BTreeMap<u32, UnackedBlock>: a flat
+  frame-ordered Vec reserving the cap (4) up front - ONE allocation
+  per gob instead of a heap node per block, the ordered walk now runs
+  over contiguous memory. The ordered contract is identical and
+  pinned: ascending walk with the blocked-latch, min = blocks[0] /
+  max = blocks.last() (retract's rem_frame), at_or_below for the
+  ack-lag sample (was range(..=frame).next_back()), retain-above-ack,
+  equal-frame REPLACE (the FX overlay re-records the gob's current
+  frame - the BTreeMap::insert semantics interact.rs:683 relies on)
+- the per-sweep budget, the throttle, the age ceiling, the adaptive
+  RTO and the round-robin cursor are untouched - this is a layout
+  change, not a policy change
 
-NOT DONE / next session carries: unchanged - retx_sweep unacked layout
-and vis delta-scan (type 5), GL e2e + Windows smoke, multi-machine
-cluster profile; state.rs (2130) and game/cluster.rs (2054) are the
-next-largest non-test files if a future type-2 session wants them.
+MEASURED (1000 saturated bots, 2 cores, the same run recipe as the
+S65/S73 baselines; 26 base windows vs 31/19 after-windows):
 
-COMMITS: 76900f0 (the test battery split), this handoff.
+- retx_sweep_us mean 7.2 -> 5.2/5.4 ms (-25..-27%) across two runs;
+  the per-window worst (wmax_retx_sweep_us) mean 10.3 -> 5.6/5.4 ms
+  (-46..-48%)
+- mean tick 42.3 -> 28.6/33.3 ms in this run pair (-21..-32%): the
+  retx attribution is the direct signal, the mvbat_fanout drop
+  (16.2 -> 11.9 ms) is the relieved-allocator side effect; run
+  variance is real, treat the tick band as the evidence band
+- retx_pending drains slightly lower (20.3k -> 15.4-17.9k mean, max
+  48.4k -> 27.8-30.7k) at the same resent volume (the 8192 budget
+  still burns - the load cohort still never acks everything)
+- gate: fmt + clippy -D warnings clean; workspace 323 green (11 proto
+  + 293 unit [2 ign] + 7 wire [1 ign] + 12 world) - the three new
+  white-box pins cover the inline spill/clone boundary, the ordered
+  insert + equal-frame replace + cap trim, and the age-ceiling retire;
+  lost_static_spawn_wave_is_retransmitted stays green (the wire
+  contract survived the layout change)
+- live smoke: WORLD ENTRY / CATTR ORDER / CRAFT FLOW OK; EAT FLOW
+  initially read FAIL - root-caused to the PERSISTENT testuser having
+  eaten its starter food across sessions (a probe flake, not a
+  regression): a fresh username eats fine. No tmp residue on SIGTERM
+
+NOT DONE / next session carries: the vis delta-scan re-measure (the
+second #10 follow-up; after this cut the vis full rescan is the
+remaining named candidate), GL e2e + Windows smoke, multi-machine
+cluster profile. remaining known gap tail: pottery/baking dough depth,
+per-animal breed stat rows, cross-node trough relays.
+
+COMMITS: 571b011 (the allocator-free sweep layout), this handoff.
 
 ## 2026-10-09 - Session 77 (type 3: the sausage chain)
 
