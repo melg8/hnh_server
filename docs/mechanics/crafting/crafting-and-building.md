@@ -505,3 +505,39 @@ Server implementation notes (this repo, session 60):
   The flat GATHER_QL, TREE_HARVESTS = 5 and BOULDER_STONES = 5 are
   chosen server policy (state.rs constants); reconcile them against
   Legacy:Branch / Legacy:Stone / Legacy:Quality when reachable.
+
+## Server implementation notes (this repo, session 71: baking chain)
+
+- **Baking chain (verified live end to end, `test_bake.py`).** Mature
+  wheat yields Grist of Wheat (the 2009 pack ships no grain item;
+  sprout/grist/malt only - recorded in the farming doc). The quern
+  (Legacy:Quern; appended LAST to the buildable registry, Stone x2 +
+  Branch x2 demand) is a FUEL-LESS production station: the menu verb
+  is "Grind" instead of "Light", the fuel gate skips it entirely, a
+  15-tick job grinds one Grist of Wheat unit into one Flour. The oven
+  gained BAKE_MAP: a Bread Dough label bakes into Bread (own
+  resource), checked before the meat roast map. The dough hand recipe
+  (paginae/craft/dough ships): Flour x2 + Bucket of Water -> Dough x2
+  + the empty bucket back (1:1 flour-to-dough mass balance is server
+  policy). Water enters the economy through the bucket-fill itemact
+  (items domain). Legacy had four dough slots per oven; the single
+  input slot stays server policy (session-15 note above).
+- **Display labels are station contracts.** Every station input gate
+  matches the cursor stack's display label against the kind's map
+  keys (BAKE_MAP / GRIND_MAP / KILN_MAP / SMELT_MAP). Crafted stacks
+  shipped an EMPTY label, so the hand-kneaded Bread Dough was
+  rejected at the oven ("The station cannot process that.") - the
+  live probe caught it. Fix (58c8776): `craft_once` labels the
+  PRIMARY output with the recipe's display name (all 38 recipe names
+  are the product display names); multi-output byproducts (the dough
+  recipe's returned bucket) keep the empty label and the client falls
+  back to the resource name. Lesson recorded: any new stack producer
+  must set a display label when the stack can become a station input.
+- **Drop world shapes for milled grain.** The pack ships flour/grist
+  inventory icons but no terobjs world shapes; both render through
+  the seed-bag silhouette (DROP_WORLD_ALIASES -> gfx/terobjs/items/
+  bag-seed), the same fallback policy as bronze -> copper.
+- **Reach policy gap (open).** The bucket-fill itemact keys on the
+  tile under the click with no player-distance check; the legacy
+  client surely enforced adjacency client-side, but a server-side
+  reach policy for itemacts is not implemented (see Open questions).

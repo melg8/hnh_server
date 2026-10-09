@@ -4774,3 +4774,44 @@ COMMITS: wave 1 = d91dcb0 (parallel writer); wave 2 = the refinement
 tier + probe fix + docs + handoff (the second writer); wave 3 = the
 alloyer + fmt (a third writer under the same session number).
 
+
+---
+## 2026-10-09 - Session 69 (type 3: new functionality) - LOST SESSION RECORD
+
+NOTE: reconstructed by session 70 from the commit (d4b965a) and the
+files the session left behind - the session was cut off before it could
+write its handoff record.
+
+SESSION TYPE ROTATION LOG: 65=5, 66=3, 67=4, 68=5, 69=3.
+
+GOAL: the S66/S68 handoffs named "kiln + brick chain" as the top type-3
+candidate. Wave 1 landed and was committed (d4b965a) with the full local
+gate green (fmt + clippy clean, 311 tests green):
+
+- Clay deposits on the sandy shore belt (SAND tile, 150/1000 roll,
+  mining-heap sprite, CLAY_PICKS = 8 picks then the deposit is gone);
+  a world-design test pins shore reachability on the dev seed (nearest
+  shore 51 tiles from spawn, 215 shore tiles in the 41x41 window).
+- Kiln buildable (paginae/build/kiln, Clay x45 build demand,
+  StationKind::Kiln, branch fuel, 30-tick job) APPENDED to BUILDABLES
+  so persisted spec indices stay stable (pinned by test).
+- craft::KILN_MAP: Clay -> Brick; the pack ships both the invobj and
+  the world shape, so no drop alias is needed (pinned by test).
+- Station input/output dispatch on every path: local itemact
+  (game/building.rs), the cluster relay acceptance check (game.rs),
+  tick_stations output roll; the mine-act relay rides the Stone class
+  tag exactly like OreDeposit; harvest_clay_deposit in
+  game/interact.rs.
+- Paginae push fix (S66 follow-up): the alloying crucible page is now
+  pushed too; the push list carries alloyer + kiln.
+
+NOT DONE (the debt session 70 inherits):
+- The chain was never verified end-to-end on a live server. The session
+  wrote server/scripts/test_kiln.py (full clay -> kiln -> brick probe
+  on the hnhlib harness) and hit a suspected bug - "the second
+  sink_demand round loses the clay" (debug_kiln_sink.py is the
+  unfinished investigation). Both scripts were left uncommitted;
+  session 70 committed them as-is.
+- The HANDOFF record (this entry) and the rotation-log/index updates.
+
+COMMITS: d4b965a (clay deposits + kiln station, wave 1).

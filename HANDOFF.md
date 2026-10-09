@@ -196,9 +196,12 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    pick, kiln build, brick fired; the S69 "second sink round loses the
    clay" suspicion was a real plan -> station sink gap, fixed with the
    completion sysline 'The <id> is finished.').
-   Remaining dead ends: pottery beyond bricks, wurst/sausage and
-   baking doughs (station cooking depth), flour/bread (the 2009 pack
-   has no grain item - sprout/grist only, see farm.rs).
+   FLOUR/BREAD CLOSED (session 71: the full grain -> bread chain driven
+   live end to end - wheat harvest, quern Grind verb, hand-kneaded
+   dough, oven-baked Bread q10; test_bake.py in the gate corpus).
+   Remaining dead ends: pottery beyond bricks, wurst/sausage and other
+   baking doughs (station cooking depth; BAKE_MAP has exactly one
+   entry, Bread Dough -> Bread).
 5. **Feeding depth**: LIFT CLOSED (session 62): the trough lift /
    place / transfer mechanic is implemented and probed; the carried
    store survives restarts and cross-node migration. Still open:
@@ -236,11 +239,10 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 
 Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
-logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
-53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2, 62=3, 63=4, 64=1, 65=5,
-66=3, 67=4, 68=5, 69=3, 70=2. All six
-types have been served - pick freely, but avoid serving the same type as
-the previous session.
+logged. All six types have been served - pick freely, but avoid serving
+the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
+48=3, 49=2, 50=4, 51=3, 52=5, 53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5,
+60=3, 61=2, 62=3, 63=4, 64=1, 65=5, 66=3, 67=4, 68=5, 69=3, 70=2, 71=3.
 
 ## Session index (one line each; full entries in the archive)
 
@@ -322,6 +324,10 @@ the previous session.
   children (3634 -> 1287 lines, pure move, pub(super) parent-only
   methods); the S69 kiln debt closed - chain driven live end to end,
   the "lost clay" sink bug fixed (completion sysline) + probe hardening.
+- S71 (type 3): the baking chain - quern (Grind verb, no fuel), grist ->
+  flour, hand-kneaded dough, oven-baked bread; bucket fill at water
+  tiles; crafted stacks now carry the recipe display name (the station
+  label-matching defect); test_bake.py live green (BAKE: OK, Bread q10).
 
 ## 2026-10-08 - Session 67 (type 4: test coverage)
 
@@ -533,46 +539,6 @@ COMMITS: efbddb1 (fan-out pair attribution + wmax snapshot),
 this session's wave 3 (budgeted round-robin retx sweep).
 
 ---
-## 2026-10-09 - Session 69 (type 3: new functionality) - LOST SESSION RECORD
-
-NOTE: reconstructed by session 70 from the commit (d4b965a) and the
-files the session left behind - the session was cut off before it could
-write its handoff record.
-
-SESSION TYPE ROTATION LOG: 65=5, 66=3, 67=4, 68=5, 69=3.
-
-GOAL: the S66/S68 handoffs named "kiln + brick chain" as the top type-3
-candidate. Wave 1 landed and was committed (d4b965a) with the full local
-gate green (fmt + clippy clean, 311 tests green):
-
-- Clay deposits on the sandy shore belt (SAND tile, 150/1000 roll,
-  mining-heap sprite, CLAY_PICKS = 8 picks then the deposit is gone);
-  a world-design test pins shore reachability on the dev seed (nearest
-  shore 51 tiles from spawn, 215 shore tiles in the 41x41 window).
-- Kiln buildable (paginae/build/kiln, Clay x45 build demand,
-  StationKind::Kiln, branch fuel, 30-tick job) APPENDED to BUILDABLES
-  so persisted spec indices stay stable (pinned by test).
-- craft::KILN_MAP: Clay -> Brick; the pack ships both the invobj and
-  the world shape, so no drop alias is needed (pinned by test).
-- Station input/output dispatch on every path: local itemact
-  (game/building.rs), the cluster relay acceptance check (game.rs),
-  tick_stations output roll; the mine-act relay rides the Stone class
-  tag exactly like OreDeposit; harvest_clay_deposit in
-  game/interact.rs.
-- Paginae push fix (S66 follow-up): the alloying crucible page is now
-  pushed too; the push list carries alloyer + kiln.
-
-NOT DONE (the debt session 70 inherits):
-- The chain was never verified end-to-end on a live server. The session
-  wrote server/scripts/test_kiln.py (full clay -> kiln -> brick probe
-  on the hnhlib harness) and hit a suspected bug - "the second
-  sink_demand round loses the clay" (debug_kiln_sink.py is the
-  unfinished investigation). Both scripts were left uncommitted;
-  session 70 committed them as-is.
-- The HANDOFF record (this entry) and the rotation-log/index updates.
-
-COMMITS: d4b965a (clay deposits + kiln station, wave 1).
-
 ## 2026-10-09 - Session 70 (type 2: refactoring / tech debt)
 
 SESSION TYPE ROTATION LOG: 65=5, 66=3, 67=4, 68=5, 69=3, 70=2.
@@ -647,5 +613,79 @@ DONE (committed across this session):
   the differential that located the defect server-side vs pack-side).
 
 COMMITS: d1ae3ab (the split), 222a9ad (kiln verified + fixes), this
+## 2026-10-09 - Session 71 (type 3: new functionality)
+
+SESSION TYPE ROTATION LOG: 66=3, 67=4, 68=5, 69=3, 70=2, 71=3. All six
+types served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the S66/S68 handoffs named "kiln + brick chain" (done in S69/S70)
+and the S70 known-gap #4 carried "flour/bread (the 2009 pack has no
+grain item)". This session built and VERIFIED LIVE the full baking
+chain: wheat -> grist -> flour -> dough -> bread. NOTE: this session
+spanned multiple LLM incarnations (the first left the quern/GRIND_MAP
+wave committed as bc84762; the last one finished the oven leg).
+
+DONE (committed across the session):
+
+- Wave 1 (bc84762, recovered + finished from the earlier incarnation's
+  tree): quern station appended LAST to BUILDABLES (save-spec indices
+  stable; Stone x2 + Branch x2 demand, NO fuel - the fuel gate skips
+  StationKind::Quern, menu verb Grind instead of Light), GRIND_MAP
+  Grist of Wheat -> Flour, BAKE_MAP Bread Dough -> Bread (own
+  resource, not the roast-meat contract) with BOTH the relay accept
+  and the tick output routed through the new maps; the dough hand
+  recipe (flour x2 + bucket-water -> dough x2 + the empty bucket
+  back, paginae/craft/dough ships); mature wheat yields Grist of
+  Wheat (farm.rs WHEAT_MATURE, the pack has no grain item - sprout /
+  grist / malt only); bucket fill (an empty bucket itemact on a water
+  tile becomes a Bucket of Water in the cursor, game/items.rs);
+  paginae/build/quern pushed; hnh-world test water_is_reachable_from
+  _spawn (nearest water 57 tiles from spawn on seed 42, walkable
+  launch neighbor pinned); craft unit tests pin the maps + recipe.
+- Wave 2 (8fa470a): test_bake.py - the live end-to-end probe (saw +
+  bucket crafts, farming skill sattr buy, five seeds plowed/planted,
+  flower-menu harvest, water ring-scan + bucket scoop, quern build,
+  2x Grind jobs, dough craft, oven build + bake). DROP_WORLD_ALIASES
+  gained grist-wheat / flour -> gfx/terobjs/items/bag-seed (the pack
+  ships no world shapes for the milled-grain items; the seed-bag is
+  the closest silhouette, same fallback policy as bronze -> copper).
+- Wave 3 (58c8776): REAL BUG fixed - crafted stacks shipped an EMPTY
+  label, and every station input gate matches on the DISPLAY LABEL
+  (BAKE_MAP/GRIND_MAP/KILN_MAP/SMELT_MAP keys are display names): the
+  hand-crafted Bread Dough was refused with 'The station cannot
+  process that.' - the oven leg was unreachable. craft_once now
+  labels the PRIMARY output with recipe.name (all 38 recipe names are
+  the product display names - verified); multi-output byproducts (the
+  dough recipe's returned bucket) keep the empty label. Side effect:
+  crafted tooltips show real names.
+
+VERIFIED LIVE (the BAKE: OK run):
+- saw + bucket crafted from the starter kit; Farming bought via sattr;
+  five wheat seeds plowed/planted, 250 ms/stage growth, flower-menu
+  harvest -> 8 Grist of Wheat; bucket scooped at the shore (the
+  bucket-fill contract keys on the TILE under the click, the probe
+  skips the shore-rim walk - nav oscillation, the S67 finding);
+  quern built and ground 2 Flour (Grind verb, no fuel, 15-tick jobs,
+  drops render through the bag-seed alias); dough crafted (x2 + the
+  empty bucket back); oven fueled + loaded + Light -> Bread q10 in
+  the inventory.
+- Regression: KILN: OK (one flaky shore-grid wait on the first run,
+  green on the retry); WORLD ENTRY: OK + CATTR ORDER: OK.
+- Gate: fmt clean, clippy -D warnings clean, cargo test --workspace
+  313 green (11 proto + 284 unit [1 ign] + 6 wire [1 ign] + 12 world).
+
+NOT DONE / next session carries:
+- A transient hnhlib UnicodeDecodeError on a bundled NEWWDG frame
+  (killed ONE run after the bread drop spawned; did not reproduce;
+  the decode now dumps the body and skips - monitor).
+- The probe's water leg skips the shore walk (server does not check
+  reach for the bucket fill) - a legacy-fidelity reach policy is an
+  open server question for the mechanics doc.
+- Carried from S70: GL e2e + Windows smoke; CI push (no workflow
+  scope); multi-machine cluster profile.
+
+COMMITS: bc84762 (quern + maps + dough + bucket + wheat), 8fa470a
+(test_bake.py + drop aliases), 58c8776 (crafted-label fix).
+
 handoff + the sink-probe removal + the Java-client pack fix
 (fix_gameres_parent_refs.py, res/compiled repairs, UiProbe green).
