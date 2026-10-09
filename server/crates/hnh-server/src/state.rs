@@ -618,6 +618,17 @@ pub const ORE_PICKS: u8 = 4;
 /// disappears (the kiln chain's gathering leg; the kiln's legacy build
 /// demand is Clay x45, so a deposit must outlast a few trips).
 pub const CLAY_PICKS: u8 = 8;
+/// Server policy (session 81, apple pie chain): an apple tree yields
+/// this many apple picks before it degrades to a plain tree.
+pub const APPLE_PICKS: u8 = 5;
+/// Server policy (session 81, honeybun chain): a wild beehive holds
+/// this many harvestable honey units (the legacy hive "holds at most
+/// 1.0 L honey"; unit policy recorded in crafting-and-building.md).
+pub const HIVE_HONEY_UNITS: u8 = 3;
+/// Server policy (session 81): one forage pick yields this many item
+/// units (a bush carries a handful, a mushroom patch a couple - one
+/// uniform count keeps the dough recipes one-pick-per-ingredient).
+pub const FORAGE_YIELD: u32 = 3;
 /// Flat gathering quality, matched to the starter kit (branch/stone at
 /// ql 10) so world-gathered materials craft identically.
 pub const GATHER_QL: u8 = 10;
@@ -631,6 +642,76 @@ pub const ORE_PICK_LP: i32 = 8;
 /// LP granted per clay pick (server policy: the shore trip is longer
 /// than a stone walk, the pick grants a mid-tier amount of learning).
 pub const CLAY_PICK_LP: i32 = 5;
+/// LP granted per apple pick (server policy: fruit off a tree matches
+/// the branch-pick learning of the same gob).
+pub const APPLE_PICK_LP: i32 = 5;
+/// LP granted per forage pick (server policy: between a stone pick and
+/// a branch pick - the herb walk is short but the plants are sparser).
+pub const FORAGE_PICK_LP: i32 = 4;
+/// LP granted per honey harvest (server policy: foraging a hive pays
+/// like an herb pick).
+pub const HONEY_PICK_LP: i32 = 4;
+
+/// Wild forageable plant registry (session 81, the dough ingredient
+/// chains). Fixed data per kind: the world sprite, the item the pick
+/// restores, the stack label (the fep.conf key keeps raw eating
+/// alive), and the sdt byte for the world sprite (code-carrying plant
+/// resources decode the sdt as a growth frame; 0 is the universally
+/// valid first frame, 1 is the onion crop's own proven harvest stage).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForageKind {
+    Blueberry,
+    Chantrelle,
+    Grapevine,
+    WildOnion,
+}
+
+impl ForageKind {
+    /// World gob resource (gfx/terobjs/...).
+    pub fn world_res(self) -> &'static str {
+        match self {
+            ForageKind::Blueberry => "gfx/terobjs/herbs/blueberry",
+            ForageKind::Chantrelle => "gfx/terobjs/herbs/chantrelle",
+            ForageKind::Grapevine => "gfx/terobjs/plants/wine",
+            ForageKind::WildOnion => "gfx/terobjs/plants/onion",
+        }
+    }
+
+    /// Inventory item resource the pick restores.
+    pub fn item_res(self) -> &'static str {
+        match self {
+            ForageKind::Blueberry => "gfx/invobjs/bluberry",
+            ForageKind::Chantrelle => "gfx/invobjs/shrooms-picked",
+            ForageKind::Grapevine => "gfx/invobjs/grapes",
+            ForageKind::WildOnion => "gfx/invobjs/onion",
+        }
+    }
+
+    /// Stack display label; every one is a fep.conf key so the raw
+    /// items are eatable (Blueberries / Chantrelles / Grapes /
+    /// Yellow Onion).
+    pub fn label(self) -> &'static str {
+        match self {
+            ForageKind::Blueberry => "Blueberries",
+            ForageKind::Chantrelle => "Chantrelles",
+            ForageKind::Grapevine => "Grapes",
+            ForageKind::WildOnion => "Yellow Onion",
+        }
+    }
+
+    /// sdt byte for the world sprite (growth-frame index the pack's
+    /// plant code decodes; see the type docs for the per-kind choice).
+    pub fn sdt(self) -> u8 {
+        match self {
+            ForageKind::Blueberry => 0,
+            ForageKind::Chantrelle => 0,
+            ForageKind::Grapevine => 0,
+            // The onion crop proves stage 1 renders (its own harvest
+            // stage); the wild patch shows the mature bulb.
+            ForageKind::WildOnion => 1,
+        }
+    }
+}
 
 /// Metal-bearing ore a deposit yields (the metal chain's mining leg).
 /// The item mapping is fixed registry data: `item_res` is the inventory
@@ -686,6 +767,28 @@ pub enum Kind {
     Tree {
         harvests: u8,
     },
+    /// Fruit-bearing apple tree (session 81, the apple pie chain):
+    /// `left` counts the remaining apple picks; an exhausted tree
+    /// degrades to a plain branch-yielding [`Kind::Tree`] (the legacy
+    /// stage-6 apple tree yields Apples AND Branches from the same
+    /// gob). Renders as `gfx/terobjs/trees/appletree`.
+    FruitTree {
+        left: u8,
+    },
+    /// Forageable wild plant (session 81, the dough ingredient
+    /// chains): single pick consumes the plant and drops its item
+    /// (legacy forageables are picked once; see farming-and-plants.md
+    /// "Wild plants vs planted crops").
+    Forage {
+        forage: ForageKind,
+    },
+    /// Wild beehive (session 81, the honeybun chain): a bucket-gated
+    /// honey source. Each pick consumes one empty bucket and one honey
+    /// unit; at zero units further picks get the empty-hive refusal.
+    /// The hive itself is a permanent fixture (never removed).
+    BeeHive {
+        honey: u8,
+    },
     /// Growing crop (docs/mechanics/livestock/farming-and-plants.md).
     /// `spec` indexes `farming::CROPS`; `stage` is the wire sdt byte.
     Crop {
@@ -738,12 +841,15 @@ pub enum Kind {
     /// keeps its fep.conf identity from ground to inventory. The gob
     /// renders with `resname_idx` (a gfx/terobjs/items world shape that
     /// has a `neg` layer); picking up restores `inv_res_idx` (the
-    /// gfx/invobjs icon resource the inventory widget needs).
+    /// gfx/invobjs icon resource the inventory widget needs). `count`
+    /// is the stack size one pickup grants (1 for the classic single
+    /// drops; FORAGE_YIELD handfuls for the session-81 forage picks).
     Drop {
         resname_idx: u16,
         inv_res_idx: u16,
         ql: u8,
         label: &'static str,
+        count: u32,
     },
 }
 
@@ -1856,6 +1962,13 @@ impl World {
                 // kiln chain): the arm consumes no extra roll, so the
                 // other terrain arms' roll sequences stay untouched.
                 let mut clay = false;
+                // Session 81 (dough chains) carries its statics the same
+                // way: flags rolled out of the SAME per-tile roll (no
+                // extra draws), so every pre-existing spawn is
+                // bit-identical and saves keep their surroundings.
+                let mut apple_tree = false;
+                let mut forage: Option<ForageKind> = None;
+                let mut hive = false;
                 let res = match t {
                     tile::CONIFER if roll < 220 => {
                         let s = r.next_bounded(3);
@@ -1884,7 +1997,57 @@ impl World {
                             "gfx/terobjs/bumlings/02"
                         }
                     }
+                    // Session 81 (pirozhki chain): wild onion patches on
+                    // the grass meadows - the onion crop's seed is its own
+                    // harvest, so the crop chain needs a world seed source
+                    // (the legacy seed ladder runs through WWW drying,
+                    // which this server does not model). Roll band sits
+                    // strictly above the bumling band; no extra draw.
+                    tile::GRASS if roll < 20 => {
+                        forage = Some(ForageKind::WildOnion);
+                        ForageKind::WildOnion.world_res()
+                    }
                     tile::HEATH if roll < 6 => "gfx/terobjs/bumlings/01",
+                    // Session 81 (blueberry pie chain): blueberries grow
+                    // on forest AND heath (farming-and-plants.md
+                    // "Foraging" terrain binding). Band [6, 26) sits above
+                    // the heath bumling band.
+                    tile::HEATH if roll < 26 => {
+                        forage = Some(ForageKind::Blueberry);
+                        ForageKind::Blueberry.world_res()
+                    }
+                    // Session 81 (the dough chains): broadleaf forest
+                    // carries the forageable set - blueberries and
+                    // chantrelles (the doc's forest bindings), wild
+                    // grapevines (the raisin chain's grape source) and
+                    // sparse wild beehives (the honey source; the legacy
+                    // buildable hive model is out of scope, recorded in
+                    // crafting-and-building.md). Every band sits above the
+                    // 220 tree band, so no roll that used to spawn a tree
+                    // changes meaning. No arm consumes an extra draw.
+                    tile::BROADLEAF if roll < 250 => {
+                        forage = Some(ForageKind::Blueberry);
+                        ForageKind::Blueberry.world_res()
+                    }
+                    tile::BROADLEAF if roll < 268 => {
+                        forage = Some(ForageKind::Chantrelle);
+                        ForageKind::Chantrelle.world_res()
+                    }
+                    tile::BROADLEAF if roll < 286 => {
+                        forage = Some(ForageKind::Grapevine);
+                        ForageKind::Grapevine.world_res()
+                    }
+                    tile::BROADLEAF if roll < 294 => {
+                        hive = true;
+                        "gfx/terobjs/bhive"
+                    }
+                    // Apple trees: roughly one tree in six of the forest
+                    // carries fruit (band [294, 334) against the 220-wide
+                    // regular-tree band).
+                    tile::BROADLEAF if roll < 334 => {
+                        apple_tree = true;
+                        "gfx/terobjs/trees/appletree"
+                    }
                     tile::MOOR if roll < 4 => "gfx/terobjs/bumlings/stal2",
                     // Metal chain, mining leg: rocky terrain carries ore
                     // deposits (the ore-heap sprite distinguishes them from
@@ -1944,8 +2107,12 @@ impl World {
                 }
                 // Trees are pickable (branches), bumlings are boulders with
                 // a stone supply, rocky-corner heaps are ore deposits, and
-                // shore heaps are clay deposits; see the "World gathering"
-                // section of crafting-and-building.md.
+                // shore heaps are clay deposits; the session-81 statics
+                // (herbs, hives, apple trees) dispatch on their roll flags
+                // BEFORE the generic trees/ test - the appletree res would
+                // otherwise swallow the apple gob into the branch economy.
+                // See the "World gathering" section of
+                // crafting-and-building.md.
                 let kind = if let Some(ore) = ore_kind {
                     Kind::OreDeposit {
                         ore,
@@ -1953,6 +2120,14 @@ impl World {
                     }
                 } else if clay {
                     Kind::ClayDeposit { left: CLAY_PICKS }
+                } else if let Some(f) = forage {
+                    Kind::Forage { forage: f }
+                } else if hive {
+                    Kind::BeeHive {
+                        honey: HIVE_HONEY_UNITS,
+                    }
+                } else if apple_tree {
+                    Kind::FruitTree { left: APPLE_PICKS }
                 } else if res.contains("trees/") {
                     Kind::Tree {
                         harvests: TREE_HARVESTS,

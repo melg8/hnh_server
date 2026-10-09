@@ -169,6 +169,25 @@ The client displays whatever the server pushes - there is no eating-specific buf
   modeled yet (open questions 2/5 below still stand); the energy pool
   drains via the existing vitals tick.
 
+## Server implementation notes (this repo, sessions 79+81: fep.conf gaps)
+
+- Session 79: plain `Bread` shipped no row in the 2009 file, so the
+  S71 baked loaf resolved no FEP and the eat path silently bailed
+  (the `eat: no fep entry` debug line). Server policy: `Bread=CON:5`
+  (the baked-goods band, Apple Pie). This closes the provenance
+  promise the session-79 fep.conf comment made.
+- Session 81: the dough ingredient chains added raw `Apple=CON:1`
+  (the raw-fruit band, Blueberries=INT:1; the wild apple tree drops
+  them) and `Bucket of Honey=AGI:1` (one-fifth of the Honey Bun band;
+  the wild hive's bucket-gated harvest). Same rule as Bread: a label
+  the server can produce must resolve an fep.conf row or eating it
+  silently does nothing - any new food source requires a table row
+  in the same change set.
+- Session 81 side effect: the raw forage items (Blueberries,
+  Chantrelles, Grapes, Yellow Onion) all matched existing 2009 rows
+  verbatim; the forage registry's labels double as the fep.conf keys
+  so the raw handfuls stay eatable straight off the bush.
+
 ## Open questions
 
 1. **Legacy hunger-fill values per food.** `fep.conf` carries FEPs and HHP but not the energy fill; the legacy per-food satiation/energy table (current-world RoB "Food Satiations"/food pages have replacement data) must be reconstructed from legacy-era pages or the reference server.

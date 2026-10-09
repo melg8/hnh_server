@@ -172,6 +172,132 @@ impl Game {
         crate::state::CLAY_PICK_LP
     }
 
+    /// One apple pick off a fruit tree (session 81, the apple pie
+    /// chain): an Apple drop lands next to the tree; an exhausted tree
+    /// degrades to a plain branch-yielding tree (the legacy stage-6
+    /// apple tree yields both from the same gob, so the apple economy
+    /// never removes the branch source). Returns the LP the act grants.
+    pub(super) fn harvest_fruit_tree(&mut self, target: GobId, tslot: usize) -> i32 {
+        let Kind::FruitTree { left } = self.world.gobs.kind[tslot] else {
+            return 0;
+        };
+        let pos = self.world.gobs.pos[tslot];
+        debug!(target, left, "apple pick");
+        if left > 1 {
+            self.world.gobs.kind[tslot] = Kind::FruitTree { left: left - 1 };
+            self.world.gobs.frame[tslot] += 1;
+            self.spawn_drop_near(pos, "gfx/invobjs/apple", crate::state::GATHER_QL, "Apple");
+            // Re-publish so guest copies on subscriber nodes re-render.
+            self.publish(target, GuestEv::Update);
+            crate::state::APPLE_PICK_LP
+        } else {
+            // Exhausted: the apple tree keeps standing as a plain tree.
+            self.world.gobs.kind[tslot] = Kind::Tree {
+                harvests: crate::state::TREE_HARVESTS,
+            };
+            self.world.gobs.frame[tslot] += 1;
+            self.spawn_drop_near(pos, "gfx/invobjs/apple", crate::state::GATHER_QL, "Apple");
+            self.publish(target, GuestEv::Update);
+            0
+        }
+    }
+
+    /// One forage pick (session 81, the dough chains): the plant's item
+    /// drop lands where the plant stood and the plant itself is
+    /// consumed (legacy forageables are single-pick). Returns the LP
+    /// the act grants (0 for an already-picked gob).
+    pub(super) fn harvest_forage(&mut self, target: GobId, tslot: usize) -> i32 {
+        let Kind::Forage { forage } = self.world.gobs.kind[tslot] else {
+            return 0;
+        };
+        let pos = self.world.gobs.pos[tslot];
+        debug!(target, ?forage, "forage pick");
+        let item = forage.item_res();
+        let label = forage.label();
+        // The handful contract: one pick restores FORAGE_YIELD units in
+        // ONE Drop gob (spawn_drop_count), so every dough recipe's fruit
+        // slot is one bush, one click, one pickup.
+        self.spawn_drop_count(
+            pos,
+            item,
+            crate::state::GATHER_QL,
+            label,
+            crate::state::FORAGE_YIELD,
+        );
+        self.world.gobs.kill(target);
+        self.broadcast_retract(target);
+        crate::state::FORAGE_PICK_LP
+    }
+
+    /// One honey harvest off a wild beehive (session 81, the honeybun
+    /// chain): the milking bucket contract - the picker must hold an
+    /// empty bucket, which the hive fills (one honey unit per pick; an
+    /// empty hive refuses with the milking system line). The hive is a
+    /// permanent fixture and never disappears. Returns whether the
+    /// harvest fired (the LP grant rides the bool: refusal grants 0).
+    pub(super) fn harvest_hive(&mut self, sid: SessionId, target: GobId, tslot: usize) -> i32 {
+        let Kind::BeeHive { honey } = self.world.gobs.kind[tslot] else {
+            return 0;
+        };
+        let Some(pidx) = self.world.by_session.get(&sid).copied() else {
+            return 0;
+        };
+        debug!(target, honey, "hive pick");
+        if honey == 0 {
+            self.system_line(sid, "The hive has no honey right now.");
+            return 0;
+        }
+        let buckete = self.world.res.intern("gfx/invobjs/buckete");
+        let inv_has = self.world.players[pidx]
+            .inv
+            .iter()
+            .any(|s| s.res == buckete && s.count > 0);
+        let equip_has = self.world.players[pidx]
+            .equip
+            .iter()
+            .flatten()
+            .any(|s| s.res == buckete && s.count > 0);
+        if !inv_has && !equip_has {
+            self.system_line(sid, "You need an empty bucket to harvest a hive.");
+            return 0;
+        }
+        // Mutate phase: drain the bucket (inventory first), the hive's
+        // honey meter, then grant the filled bucket.
+        if inv_has {
+            let inv = &mut self.world.players[pidx].inv;
+            if let Some(s) = inv.iter_mut().find(|s| s.res == buckete && s.count > 0) {
+                s.count -= 1;
+            }
+            self.world.players[pidx].inv.retain(|s| s.count > 0);
+        } else if let Some(e) = self.world.players[pidx]
+            .equip
+            .iter_mut()
+            .find(|e| matches!(e, Some(s) if s.res == buckete && s.count > 0))
+        {
+            if let Some(s) = e.as_mut() {
+                s.count -= 1;
+                if s.count == 0 {
+                    *e = None;
+                }
+            }
+        }
+        self.world.gobs.kind[tslot] = Kind::BeeHive { honey: honey - 1 };
+        self.world.gobs.frame[tslot] += 1;
+        self.publish(target, GuestEv::Update);
+        self.refresh_inventory(sid);
+        let honey_res = self.world.res.intern("gfx/invobjs/bucket-honey");
+        self.grant_pickup(
+            sid,
+            crate::state::InvStack {
+                res: honey_res,
+                count: 1,
+                ql: crate::state::GATHER_QL,
+                label: "Bucket of Honey",
+            },
+        );
+        crate::state::HONEY_PICK_LP
+    }
+
     pub(super) fn player_interact(
         &mut self,
         sid: SessionId,
@@ -239,6 +365,9 @@ impl Game {
                                 Some(crate::nodes::StaticAct::Pickup)
                             }
                             crate::nodes::StaticClass::Tree => Some(crate::nodes::StaticAct::Chop),
+                            crate::nodes::StaticClass::Forage => {
+                                Some(crate::nodes::StaticAct::Forage)
+                            }
                             crate::nodes::StaticClass::Stone => Some(crate::nodes::StaticAct::Mine),
                             crate::nodes::StaticClass::Crop
                             | crate::nodes::StaticClass::Station
@@ -316,6 +445,38 @@ impl Game {
                 }
                 self.push_cattr(sid);
                 self.push_lp_msgs(sid);
+            }
+            // Session 81 (dough chains): the apple, herb and honey pick
+            // legs mirror the clay leg's LP contract.
+            Kind::FruitTree { .. } => {
+                let lp = self.harvest_fruit_tree(target, tslot);
+                if lp > 0 {
+                    if let Some(p) = self.world.player_mut(sid) {
+                        p.lp += lp;
+                    }
+                    self.push_cattr(sid);
+                    self.push_lp_msgs(sid);
+                }
+            }
+            Kind::Forage { .. } => {
+                let lp = self.harvest_forage(target, tslot);
+                if let Some(p) = self.world.player_mut(sid) {
+                    p.lp += lp;
+                }
+                self.push_cattr(sid);
+                self.push_lp_msgs(sid);
+            }
+            Kind::BeeHive { .. } => {
+                // The hive leg is bucket-gated, so it carries the session
+                // id (refusals answer through the system line).
+                let lp = self.harvest_hive(sid, target, tslot);
+                if lp > 0 {
+                    if let Some(p) = self.world.player_mut(sid) {
+                        p.lp += lp;
+                    }
+                    self.push_cattr(sid);
+                    self.push_lp_msgs(sid);
+                }
             }
             Kind::Stump => {
                 // Decorative remnant: nothing to pick (docs "World

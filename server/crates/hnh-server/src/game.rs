@@ -1209,6 +1209,10 @@ const DROP_WORLD_ALIASES: &[(&str, &str)] = &[
     // milled grain (same fallback policy as bronze->copper above).
     ("grist-wheat", "gfx/terobjs/items/bag-seed"),
     ("flour", "gfx/terobjs/items/bag-seed"),
+    // Session 81 (dough chains): blueberries ship no world sprite; the
+    // mulberry silhouette is the pack's own berry-pile shape (same
+    // fallback policy as bronze->copper above).
+    ("bluberry", "gfx/terobjs/items/mulberry"),
 ];
 
 /// Crate-visible lookup for tests and callers that need to know whether
@@ -1245,8 +1249,9 @@ impl Kind {
                 inv_res_idx,
                 ql,
                 label,
+                count,
                 ..
-            } => Some((*inv_res_idx, 1, *ql, label)),
+            } => Some((*inv_res_idx, *count, *ql, label)),
             _ => None,
         }
     }

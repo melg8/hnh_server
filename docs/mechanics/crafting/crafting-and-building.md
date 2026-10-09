@@ -601,3 +601,69 @@ Server implementation notes (this repo, session 60):
   pose sets - verified in the jar). `Piglet Wursts` stays
   unimplemented: Raw Pork has no source until the pig morph ships
   (the pack ships no pig kritter).
+
+## Server implementation notes (this repo, session 81: the dough ingredient chains)
+
+- **The five dough recipes close the baking breadth.** The pack
+  already shipped every dough ingredient icon and every dough pagina
+  (apdough, dough_blueberrypie, hbdough, rbcdough, dough_pirozhki -
+  2009 jar entries); the oven's BAKE_MAP has awaited inputs since
+  S79. Recipes: Apple Pie Dough (flour x2 + bucket-water + apple x2 +
+  butter -> dough x2 + bucket back), Blueberry Pie Dough (blueberry
+  x3, no butter), Honeybun Dough (bucket-water + bucket-honey ->
+  dough x2 + TWO empty buckets), Raisin Butter-cake Dough (raisins x2
+  + butter), Pirozhki Dough (chantrelles x2 + onion x2). All
+  Cooking/Per-softcapped ("per"), flour-and-water base invariant, and
+  every output label keys BAKE_MAP. Ratios are server policy where
+  the legacy pages record none (RoB Legacy lists ingredients without
+  counts for the pies); the ccdough precedent (x2 fruit + x1 butter)
+  is the shape.
+- **The forageable world (deviation from legacy foraging).** Legacy
+  gates forageable visibility behind Per*Exp base levels (B/2 .. 2B
+  "First Seen"/"All Seen" - see the farming doc); this server spawns
+  forageables as plain visible statics with NO visibility gating
+  (skill economy still young; the deviation is recorded here and in
+  the farming doc's implementation notes). Registry
+  `state::ForageKind`: Blueberries (forest/heath - the legacy terrain
+  binding), Chantrelles (forest), Grapes off wild grapevines
+  (gfx/terobjs/plants/wine), Yellow Onion (grass meadow - the
+  pirozhki chain's own seed source; the legacy seed ladder runs
+  through WWW drying, which this server does not model). One pick =
+  one FORAGE_YIELD (3) handful in a single multi-unit Drop gob, then
+  the plant is consumed (legacy forageables are single-pick).
+- **Apple trees.** Legacy runs a 7-stage lifecycle (Legacy:Apple_Tree;
+  stage 6 yields Apples + Branches). Server policy: the broadleaf
+  spawn table gains an apple-tree band (gfx/terobjs/trees/appletree);
+  `Kind::FruitTree` yields APPLE_PICKS (5) apple picks (one Apple drop
+  each, then degrades to a plain branch-yielding tree - the legacy
+  stage-6 tree yields both). The Chop act rides the same relay
+  contract as trees.
+- **Wild beehives.** gfx/terobjs/bhive statics on broadleaf forest
+  (server policy - legacy hives are player-built for pollination; see
+  the farming doc's "Beehives accelerate crops"). HONEY harvest is
+  bucket-gated exactly like the session-47 milking flow: the picker
+  must hold one empty bucket, the hive fills it (Bucket of Honey,
+  HIVE_HONEY_UNITS=3 per hive, hive is a permanent fixture). Guest
+  nodes publish the hive as a no-act Structure (the bucket check
+  lives on the home node - same cross-node state as the S62 guest
+  trough).
+- **Raisins: the hand-recipe deviation.** Legacy dries grapes on a
+  drying frame over two in-game days; this server keeps the chain
+  playable with the S79 butter precedent: a hand recipe (grapes x2 ->
+  raisins x1, Per-softcapped, fork pagina paginae/craft/raisins
+  parented into the baking family). The pack ships the raisins icon
+  (2009) but no pagina - `make_fork_paginae.py` composes it, and the
+  script now resolves the parent's REAL on-disk version into the
+  AButton layer (the session-80 "Wrong res version" root cause made
+  a hardcoded parent_ver=1 untrustworthy; fix_gameres_parent_refs.py
+  --check stays the pack-side guard, stale=0 over 6385 resources).
+- **Multi-unit drops.** `Kind::Drop` grew a `count` field: one pickup
+  grants the whole stack (serde default 1 - persisted queues and
+  fixtures unchanged). Forage handfuls are the first user; every
+  classic drop stays count=1. The cross-node relay carries the count
+  through `DropView` and `StaticStack`.
+- **World sprites for the new items.** Blueberries ship no terobjs
+  shape; the drop renders through the mulberry silhouette
+  (DROP_WORLD_ALIASES, the bronze->copper fallback policy). The
+  forage sdt byte is the verified-valid growth frame per plant code
+  (0 universal, 1 the onion crop's own proven harvest stage).

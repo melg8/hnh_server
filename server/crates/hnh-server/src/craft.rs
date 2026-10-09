@@ -907,6 +907,124 @@ pub const RECIPES: &[Recipe] = &[
         tool: None,
         q_weights: &[3, 1, 2, 2],
     },
+    // Session 81: the five dough ingredient chains close the baking
+    // breadth (the S79 dead ends). Apple pies and the raisin
+    // butter-cake mirror the carrot-cake shape (fruit + butter over
+    // the flour-and-water base); the counts are server policy where
+    // the legacy pages record no ratios, matched to the ccdough
+    // precedent. Apples come off wild apple trees (state::Kind::
+    // FruitTree), raisins from the sun-dried hand recipe below.
+    Recipe {
+        id: "apdough",
+        name: "Apple Pie Dough",
+        inputs: &[
+            ("gfx/invobjs/flour", 2),
+            ("gfx/invobjs/bucket-water", 1),
+            ("gfx/invobjs/apple", 2),
+            ("gfx/invobjs/butter", 1),
+        ],
+        outputs: &[
+            ("gfx/invobjs/dough-pie-apple", 2),
+            ("gfx/invobjs/buckete", 1),
+        ],
+        pagina: "paginae/craft/apdough",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[3, 1, 2, 2],
+    },
+    // Blueberry pies are the butter-less pie shape (RoB Legacy:
+    // blueberries over dough); berries grow on forest/heath bushes.
+    Recipe {
+        id: "dough_blueberrypie",
+        name: "Blueberry Pie Dough",
+        inputs: &[
+            ("gfx/invobjs/flour", 2),
+            ("gfx/invobjs/bucket-water", 1),
+            ("gfx/invobjs/bluberry", 3),
+        ],
+        outputs: &[
+            ("gfx/invobjs/dough-pie-blueberry", 2),
+            ("gfx/invobjs/buckete", 1),
+        ],
+        pagina: "paginae/craft/dough_blueberrypie",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[3, 1, 2],
+    },
+    // Honeybuns take TWO filled buckets (water + honey); both empty
+    // buckets come back - the multi-output grant merges them into one
+    // buckete stack.
+    Recipe {
+        id: "hbdough",
+        name: "Honeybun Dough",
+        inputs: &[
+            ("gfx/invobjs/flour", 2),
+            ("gfx/invobjs/bucket-water", 1),
+            ("gfx/invobjs/bucket-honey", 1),
+        ],
+        outputs: &[
+            ("gfx/invobjs/dough-bun-honey", 2),
+            ("gfx/invobjs/buckete", 2),
+        ],
+        pagina: "paginae/craft/hbdough",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[3, 1, 2],
+    },
+    Recipe {
+        id: "rbcdough",
+        name: "Raisin Butter-cake Dough",
+        inputs: &[
+            ("gfx/invobjs/flour", 2),
+            ("gfx/invobjs/bucket-water", 1),
+            ("gfx/invobjs/raisins", 2),
+            ("gfx/invobjs/butter", 1),
+        ],
+        outputs: &[
+            ("gfx/invobjs/dough-cake-raisinbutter", 2),
+            ("gfx/invobjs/buckete", 1),
+        ],
+        pagina: "paginae/craft/rbcdough",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[3, 1, 2, 2],
+    },
+    // Pirozhki (Chantrelle & Onion): the mushroom-and-onion savory
+    // pie. Chanterelles come off forest patches, onions off wild
+    // grass patches (the pirozhki chain's own seed source).
+    Recipe {
+        id: "dough_pirozhki",
+        name: "Pirozhki Dough",
+        inputs: &[
+            ("gfx/invobjs/flour", 2),
+            ("gfx/invobjs/bucket-water", 1),
+            ("gfx/invobjs/shrooms-picked", 2),
+            ("gfx/invobjs/onion", 2),
+        ],
+        outputs: &[
+            ("gfx/invobjs/dough-pirozhki", 2),
+            ("gfx/invobjs/buckete", 1),
+        ],
+        pagina: "paginae/craft/dough_pirozhki",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[3, 1, 2, 2],
+    },
+    // Session 81: the raisin leg. Legacy dries grapes on a drying
+    // frame over two in-game days; this server keeps the chain
+    // playable with the hand shape (the S79 butter precedent - the
+    // deviation is recorded in crafting-and-building.md). Two grape
+    // bunches sun-dry into one raisin pack.
+    Recipe {
+        id: "raisins",
+        name: "Raisins",
+        inputs: &[("gfx/invobjs/grapes", 2)],
+        outputs: &[("gfx/invobjs/raisins", 1)],
+        pagina: "paginae/craft/raisins",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[1],
+    },
 ];
 
 /// The one inventory resource every raw meat rides on; the species is
@@ -1574,6 +1692,151 @@ Peapod=STR:0.1 PER:0.9
                     );
                 }
             }
+        }
+    }
+
+    /// Session 81: the five dough ingredient chains close the baking
+    /// breadth. Pins: every dough recipe's primary output label keys
+    /// the BAKE_MAP oven dispatch, every pagina ships in the pack (the
+    /// raisins page is a fork page under res/compiled), the forage
+    /// item inputs resolve their fep.conf eat rows (raw eating stays
+    /// alive), and the forage registry's world sprites ship.
+    #[test]
+    fn dough_chain_recipes_are_wired() {
+        if crate::resources::RES_DIR.get().is_none() {
+            let pack = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../gameres");
+            if pack.is_dir() {
+                crate::resources::init_res_dir(pack);
+            }
+        }
+        let dough_ladder: &[(&str, &str)] = &[
+            ("apdough", "Apple Pie Dough"),
+            ("dough_blueberrypie", "Blueberry Pie Dough"),
+            ("hbdough", "Honeybun Dough"),
+            ("rbcdough", "Raisin Butter-cake Dough"),
+            ("dough_pirozhki", "Pirozhki Dough"),
+        ];
+        for (id, label) in dough_ladder {
+            let r = RECIPES
+                .iter()
+                .find(|r| r.id == *id)
+                .unwrap_or_else(|| panic!("{id}: the dough recipe must be registered"));
+            assert_eq!(r.name, *label, "{id}: the label keys the oven dispatch");
+            // The dough base is invariant: flour x2 + one water bucket,
+            // and the water bucket comes back.
+            assert_eq!(r.inputs[0], ("gfx/invobjs/flour", 2), "{id}: flour base");
+            assert_eq!(
+                r.inputs[1],
+                ("gfx/invobjs/bucket-water", 1),
+                "{id}: water base"
+            );
+            assert!(
+                r.outputs
+                    .iter()
+                    .any(|(res, _)| *res == "gfx/invobjs/buckete"),
+                "{id}: the water bucket must return"
+            );
+            let baked = bake_result(r.name)
+                .unwrap_or_else(|| panic!("{id}: the dough must bake (BAKE_MAP key)"));
+            let _ = baked;
+        }
+        // The honeybun dough returns TWO empty buckets (water + honey).
+        let hb = RECIPES
+            .iter()
+            .find(|r| r.id == "hbdough")
+            .expect("the honeybun dough recipe must be registered");
+        assert_eq!(
+            hb.outputs,
+            &[
+                ("gfx/invobjs/dough-bun-honey", 2),
+                ("gfx/invobjs/buckete", 2),
+            ],
+            "both filled buckets return empty"
+        );
+        // The raisin leg: two grapes sun-dry into one raisin pack.
+        let raisins = RECIPES
+            .iter()
+            .find(|r| r.id == "raisins")
+            .expect("the raisins recipe must be registered");
+        assert_eq!(raisins.inputs, &[("gfx/invobjs/grapes", 2)]);
+        assert_eq!(raisins.outputs, &[("gfx/invobjs/raisins", 1)]);
+        // The forage registry: every item label resolves its fep.conf
+        // eat row, every world sprite ships in the pack.
+        let conf = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../etc/needed/fep.conf")
+            .display()
+            .to_string();
+        let text = std::fs::read_to_string(&conf)
+            .unwrap_or_else(|e| panic!("fep.conf must ship with the repo ({conf}): {e}"));
+        let fep = FepTable::parse(&text).expect("the shipped fep.conf must parse");
+        for f in [
+            crate::state::ForageKind::Blueberry,
+            crate::state::ForageKind::Chantrelle,
+            crate::state::ForageKind::Grapevine,
+            crate::state::ForageKind::WildOnion,
+        ] {
+            assert!(
+                fep.get(f.label()).is_some(),
+                "{:?}: the forage label {:?} must resolve its fep.conf row",
+                f,
+                f.label()
+            );
+        }
+        if crate::resources::RES_DIR.get().is_some() {
+            for r in RECIPES.iter().filter(|r| {
+                matches!(
+                    r.id,
+                    "apdough"
+                        | "dough_blueberrypie"
+                        | "hbdough"
+                        | "rbcdough"
+                        | "dough_pirozhki"
+                        | "raisins"
+                )
+            }) {
+                assert!(
+                    crate::resources::served(r.pagina),
+                    "{}: the craft pagina must exist in the served pack",
+                    r.pagina
+                );
+                for (res, _) in r.inputs {
+                    assert!(
+                        crate::resources::served(res),
+                        "{res}: the input resource must exist in the served pack"
+                    );
+                }
+                for (res, _) in r.outputs {
+                    assert!(
+                        crate::resources::served(res),
+                        "{res}: the output resource must exist in the served pack"
+                    );
+                }
+            }
+            for f in [
+                crate::state::ForageKind::Blueberry,
+                crate::state::ForageKind::Chantrelle,
+                crate::state::ForageKind::Grapevine,
+                crate::state::ForageKind::WildOnion,
+            ] {
+                assert!(
+                    crate::resources::served(f.world_res()),
+                    "{}: the forage world sprite must ship in the pack",
+                    f.world_res()
+                );
+                assert!(
+                    crate::resources::served(f.item_res()),
+                    "{}: the forage item must ship in the pack",
+                    f.item_res()
+                );
+            }
+            assert!(
+                crate::resources::served("gfx/terobjs/bhive"),
+                "the beehive world sprite must ship in the pack"
+            );
+            assert!(
+                crate::resources::served("gfx/terobjs/trees/appletree"),
+                "the apple tree sprite must ship in the pack"
+            );
         }
     }
 

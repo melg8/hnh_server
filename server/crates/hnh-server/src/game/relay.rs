@@ -343,6 +343,16 @@ impl Game {
                 (Kind::Tree { .. }, StaticAct::Chop) => {
                     Some((vec![None], self.harvest_tree(target, tslot)))
                 }
+                // Session 81 (dough chains): apple trees ride the Chop
+                // act (the Tree class tag) into the apple-harvest leg;
+                // forage plants ride the Forage act. Both share the
+                // local implementations.
+                (Kind::FruitTree { .. }, StaticAct::Chop) => {
+                    Some((vec![None], self.harvest_fruit_tree(target, tslot)))
+                }
+                (Kind::Forage { .. }, StaticAct::Forage) => {
+                    Some((vec![None], self.harvest_forage(target, tslot)))
+                }
                 (Kind::Boulder { .. }, StaticAct::Mine) => {
                     Some((vec![None], self.harvest_boulder(target, tslot)))
                 }
@@ -456,7 +466,7 @@ impl Game {
         target: GobId,
         tslot: usize,
     ) -> Option<(Option<crate::nodes::StaticStack>, i32)> {
-        let (inv_res, _count, ql, label) = self.world.gobs.kind[tslot].drop_info()?;
+        let (inv_res, count, ql, label) = self.world.gobs.kind[tslot].drop_info()?;
         let res_name = self
             .world
             .res
@@ -468,7 +478,7 @@ impl Game {
         Some((
             Some(crate::nodes::StaticStack {
                 res: res_name,
-                count: 1,
+                count,
                 ql,
                 label: label.to_string(),
             }),

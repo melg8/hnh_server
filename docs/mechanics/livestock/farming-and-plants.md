@@ -396,6 +396,25 @@ Original notes kept for reference below.
   year fraction in `src/haven/Glob.java`); one in-game day = 8 real hours; 1 year =
   365 in-game days. Crop timers are real-time regardless of night/day.
 
+## Server implementation notes (this repo, session 81: forageables, apple trees, wild hives)
+
+- The session-81 dough chains materialize a first forageable set
+  (details in the crafting doc's session-81 notes): Blueberries
+  (forest/heath - this doc's terrain binding), Chantrelles (forest),
+  wild Grapevines, wild Yellow Onion (grass). DEVIATION: no Per*Exp
+  visibility gating - every forageable is plainly visible (the legacy
+  B/2..2B reveal curve stays unimplemented; revisit once the
+  Exploration skill exists). One pick = FORAGE_YIELD (3) units in a
+  single multi-unit Drop; the plant is consumed (legacy single-pick).
+- Wild APPLE TREES: broadleaf forest band, 5 picks, degrades to a
+  plain branch-yielding tree (the legacy 7-stage lifecycle's stage-6
+  yields-apples-and-branches behavior compressed into one gob kind).
+- Wild BEEHIVES: broadleaf statics holding 3 honey units each,
+  bucket-gated harvest (empty bucket -> Bucket of Honey). Legacy
+  hives are player-built pollination accelerators; the pollination
+  speedup itself is NOT implemented (the original note above stands);
+  the wild hive here is purely the honey source.
+
 ## Open questions (farming)
 
 - Exact per-crop stage counts and stage durations without beehives; the wiki table

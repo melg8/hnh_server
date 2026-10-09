@@ -161,6 +161,16 @@ pub struct DropView {
     pub ql: u8,
     /// Display label (food fep.conf identity).
     pub label: String,
+    /// Stack size one pickup grants (session 81: forage handfuls;
+    /// 1 for every classic drop).
+    #[serde(default = "one")]
+    pub count: u32,
+}
+
+/// serde default for [`DropView::count`] - every pre-session-81
+/// message (hand-rolled fixtures, persisted queues) reads 1.
+fn one() -> u32 {
+    1
 }
 
 /// Snapshot of a production station's authority state, piggybacked on
@@ -188,6 +198,9 @@ pub enum StaticClass {
     Drop,
     /// Harvestable tree: the relay act is Chop.
     Tree,
+    /// Forageable wild plant (session 81): the relay act is Forage -
+    /// the authority consumes the plant and answers the item drop.
+    Forage,
     /// Stone: the relay act is Mine.
     Stone,
     /// Growing crop: the home node opens the stage-appropriate harvest
@@ -225,6 +238,9 @@ pub enum StaticAct {
     Pickup,
     Chop,
     Mine,
+    /// Forage a wild plant (session 81): the authority drops the
+    /// plant's item and removes the gob (single-pick contract).
+    Forage,
     /// Harvest a growing crop (session 31). The authority decides
     /// mature vs unripe from ITS crop state, rolls the yield table and
     /// answers one StaticAck per yielded stack (crops never grant LP).

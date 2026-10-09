@@ -380,6 +380,7 @@ async fn map_drop_conserves_stack_contents() {
             inv_res_idx,
             ql,
             label,
+            ..
         } = k
         {
             if *inv_res_idx == taken.res && *ql == taken.ql && *label == taken.label {

@@ -648,6 +648,7 @@ impl Game {
                 inv_res_idx,
                 ql,
                 label,
+                count,
                 ..
             } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
@@ -659,11 +660,47 @@ impl Game {
                     inv_res: self.world.res.name(inv_res_idx).unwrap_or("").to_owned(),
                     ql,
                     label: label.to_owned(),
+                    count,
                 }),
             },
             Kind::Tree { .. } => GuestKind::Static {
                 res_name: self.static_res_name(slot),
                 class: crate::nodes::StaticClass::Tree,
+                crop: None,
+                station: None,
+                stage: None,
+                drop: None,
+            },
+            // Session 81 (dough chains): fruit trees relay Chop acts
+            // exactly like trees - the authority re-validates against
+            // Kind::FruitTree and picks the apple-harvest leg.
+            Kind::FruitTree { .. } => GuestKind::Static {
+                res_name: self.static_res_name(slot),
+                class: crate::nodes::StaticClass::Tree,
+                crop: None,
+                station: None,
+                stage: None,
+                drop: None,
+            },
+            // Session 81: forage plants relay the Forage act (the plant
+            // is consumed by the pick; the item drop lands as a normal
+            // Drop gob the picker picks up cross-node like any other).
+            Kind::Forage { .. } => GuestKind::Static {
+                res_name: self.static_res_name(slot),
+                class: crate::nodes::StaticClass::Forage,
+                crop: None,
+                station: None,
+                stage: None,
+                drop: None,
+            },
+            // Session 81: hives are bucket-gated on the picker's home
+            // node, which the relay cannot answer; publish as a
+            // no-act Structure so guests see the hive but cannot
+            // harvest it cross-node (recorded in crafting-and-building
+            // .md, the same state the S62 guest trough carried).
+            Kind::BeeHive { .. } => GuestKind::Static {
+                res_name: self.static_res_name(slot),
+                class: crate::nodes::StaticClass::Structure,
                 crop: None,
                 station: None,
                 stage: None,
@@ -1554,6 +1591,7 @@ impl Game {
                         inv_res_idx,
                         ql: view.ql,
                         label,
+                        count: view.count,
                     },
                     res_idx,
                 )

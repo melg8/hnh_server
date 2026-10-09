@@ -20,6 +20,21 @@ impl Game {
         ql: u8,
         label: &'static str,
     ) {
+        self.spawn_drop_count(at, resname, ql, label, 1);
+    }
+
+    /// The multi-unit form (session 81): one forage pick yields a
+    /// FORAGE_YIELD handful - a single Drop gob whose pickup grants the
+    /// whole stack (one click per bush, the dough recipes' one-pick-
+    /// per-ingredient contract).
+    pub(super) fn spawn_drop_count(
+        &mut self,
+        at: (i32, i32),
+        resname: &'static str,
+        ql: u8,
+        label: &'static str,
+        count: u32,
+    ) {
         let inv_res_idx = self.world.res.intern(resname);
         let world_res = drop_world_res(resname);
         let res_idx = self.world.res.intern(world_res);
@@ -32,13 +47,14 @@ impl Game {
                 inv_res_idx,
                 ql,
                 label,
+                count,
             },
             (at.0 + jx, at.1 + jy),
             res_idx,
             1,
             0,
         );
-        debug!(gob = id, resname, world_res, "drop spawned");
+        debug!(gob = id, resname, world_res, count, "drop spawned");
         self.broadcast_spawn(id);
     }
 

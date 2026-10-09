@@ -105,6 +105,14 @@ impl Game {
             m.uint8(OD_RES).uint16(wire_res | 0x8000);
             let sdt = match kind {
                 Kind::Tree { harvests } => vec![harvests],
+                // Session 81: fruit trees mirror the tree contract (the
+                // codeless appletree res ignores the byte, but every
+                // viewer re-renders through the frame bump on each pick).
+                Kind::FruitTree { left } => vec![left],
+                // Session 81: forage sprites decode the sdt as a growth
+                // frame (code-carrying plant resources); the kind's byte
+                // is the verified-valid stage for its res.
+                Kind::Forage { forage } => vec![forage.sdt()],
                 Kind::Crop { stage, .. } => vec![stage],
                 Kind::Plan { stage, .. } => vec![stage],
                 Kind::Station { lit, .. } => vec![lit as u8],

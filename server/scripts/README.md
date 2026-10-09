@@ -50,6 +50,7 @@ taming) that are easier to drive from python.
 | test_kiln.py | clay chain: shore clay picks -> kiln build -> brick fired (session 70) | `KILN: OK` |
 | test_bake.py | baking chain: saw+bucket crafts, wheat farm, bucket fill, quern grind, dough craft, oven bake (session 71; fast-crop isolated server) | `BAKE: OK` |
 | test_pottery.py | pottery chain: shore clay picks -> kiln build -> jar + mug molded -> both fired into wares (session 79) | `POTTERY: OK` |
+| test_dough.py | dough chains: forage handfuls (grapes/blueberries/chantrelles/onions), apple-tree picks + degradation, hive honey (bucket-gated), raisins hand recipe, raw apple eat (session 81) | `DOUGH: OK` |
 | load43.sh | 1000-bot duel cohort perf window | p95 histograms |
 
 ## Utilities
@@ -73,8 +74,10 @@ taming) that are easier to drive from python.
   'res/paginae/craft/*' -d /tmp/hx` first). Session-58 recipe
   inventory source of truth.
 - `make_fork_paginae.py` - compose the fork craft paginae the pack
-  lacks (string, tanhide) into `res/compiled/`; donor image layer +
-  new AButton layer, layout verified by scan_paginae.py.
+  lacks (string, tanhide, raisins) into `res/compiled/`; donor image
+  layer + new AButton layer (parent_ver resolved from the parent's
+  real on-disk version - the session-80 root cause), layout verified
+  by scan_paginae.py.
 - `profile_guests.sh` - guest-scan profiling run (session-43 artifact;
   the O(guests) rescan cost it measured was removed in sessions 54/59
   (view-cell-bounded scan, packed guest pose batch) - kept for history.
