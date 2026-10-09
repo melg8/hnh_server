@@ -467,6 +467,22 @@ pub(super) fn set_inv(g: &mut Game, stacks: &[(&'static str, u32, u8)]) {
         .collect();
 }
 
+/// Session 77: the labeled variant - raw meats share ONE resource and
+/// are told apart by the display label (Species::meat_label), so the
+/// wurst tests need stacks that carry it.
+pub(super) fn set_inv_labeled(g: &mut Game, stacks: &[(&'static str, u32, u8, &'static str)]) {
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    g.world.players[pidx].inv = stacks
+        .iter()
+        .map(|(res, count, ql, label)| InvStack {
+            res: g.world.res.intern(res),
+            count: *count,
+            ql: *ql,
+            label,
+        })
+        .collect();
+}
+
 /// Equip a bow into slot 0 and put one stack of arrows into the
 /// inventory.
 pub(super) fn arm_bow(g: &mut Game, pidx: usize, arrows: u32, bow_ql: u8) {

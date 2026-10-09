@@ -350,7 +350,11 @@ impl Species {
                 ("gfx/invobjs/meat", 2, self.meat_label()),
                 ("gfx/invobjs/hide-raw-sheep", 1, ""),
                 ("gfx/invobjs/wool", 1, ""),
-                ("gfx/invobjs/intestines", if self == Species::Sheep { 2 } else { 1 }, ""),
+                (
+                    "gfx/invobjs/intestines",
+                    if self == Species::Sheep { 2 } else { 1 },
+                    "",
+                ),
                 ("gfx/invobjs/bone", 1, ""),
             ],
             // Session 77: the bear mirrors its doc butcher row (Meat x8,
@@ -2081,14 +2085,14 @@ mod cluster_tests {
 
     /// Species index round-trip (the node-link discriminant contract).
     /// Values 0-6 predate session 46 and are frozen on the wire; 7-8
-    /// (mouflon, sheep) append.
+    /// (mouflon, sheep) appended; 9-10 (bear, hen) append in session 77.
     #[test]
     fn species_index_roundtrips() {
-        for i in 0..9u8 {
+        for i in 0..11u8 {
             let sp = Species::from_index(i).expect("valid index");
             assert_eq!(sp.index(), i);
         }
-        assert!(Species::from_index(9).is_none());
+        assert!(Species::from_index(11).is_none());
         assert!(Species::from_index(255).is_none());
     }
 

@@ -671,7 +671,179 @@ pub const RECIPES: &[Recipe] = &[
         tool: None,
         q_weights: &[3, 1],
     },
+    // Session 77: the sausage branch (paginae/craft/sausages -> 13
+    // wurst-*.res pages, ad "craft|wurst_<id>"). Twelve of the thirteen
+    // legacy wurst pages become recipes; Piglet Wursts stays out - its
+    // Raw Pork input has no source until the pig morph ships (the pack
+    // ships no pig kritter; recorded in Open questions). Inputs follow
+    // the doc's meat-per-wurst pairing (Fox Wurst <- Fox Meat, Cow
+    // Chorizo <- Beef, ...); the counts and the equal per-type quality
+    // weights are server policy (no verified legacy numbers - Open
+    // questions), Intestines x1-2 is the universal casing. Softcap:
+    // Cooking caps Perception, matching the dough entry. fep.conf
+    // carries a FEP row for every implemented label - all twelve eat
+    // (the Chicken Chorizo and Bierwurst keys have no item resource in
+    // the pack and stay unimplemented; food-and-fep.md provenance).
+    Recipe {
+        id: "wurst_fox",
+        name: "Fox Wurst",
+        inputs: &[("gfx/invobjs/meat", 2), ("gfx/invobjs/intestines", 1)],
+        outputs: &[("gfx/invobjs/wurst-fox", 1)],
+        pagina: "paginae/craft/wurst-fox",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    Recipe {
+        id: "wurst_foxfuet",
+        name: "Fox Fuet",
+        inputs: &[("gfx/invobjs/meat", 3), ("gfx/invobjs/intestines", 1)],
+        outputs: &[("gfx/invobjs/wurst-foxfuet", 1)],
+        pagina: "paginae/craft/wurst-foxfuet",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    Recipe {
+        id: "wurst_boarbaloney",
+        name: "Boar Baloney",
+        inputs: &[("gfx/invobjs/meat", 2), ("gfx/invobjs/intestines", 1)],
+        outputs: &[("gfx/invobjs/wurst-boarbaloney", 1)],
+        pagina: "paginae/craft/wurst-boarbaloney",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    Recipe {
+        id: "wurst_boarboudin",
+        name: "Boar Boudin",
+        inputs: &[("gfx/invobjs/meat", 3), ("gfx/invobjs/intestines", 2)],
+        outputs: &[("gfx/invobjs/wurst-boarboudin", 1)],
+        pagina: "paginae/craft/wurst-boarboudin",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    Recipe {
+        id: "wurst_cowchorizo",
+        name: "Cow Chorizo",
+        inputs: &[("gfx/invobjs/meat", 3), ("gfx/invobjs/intestines", 1)],
+        outputs: &[("gfx/invobjs/wurst-cowchorizo", 1)],
+        pagina: "paginae/craft/wurst-cowchorizo",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    Recipe {
+        id: "wurst_ddd",
+        name: "Delicious Deer Dog",
+        inputs: &[("gfx/invobjs/meat", 2), ("gfx/invobjs/intestines", 1)],
+        outputs: &[("gfx/invobjs/wurst-ddd", 1)],
+        pagina: "paginae/craft/wurst-ddd",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    Recipe {
+        id: "wurst_bearsalami",
+        name: "Bear Salami",
+        inputs: &[("gfx/invobjs/meat", 3), ("gfx/invobjs/intestines", 1)],
+        outputs: &[("gfx/invobjs/wurst-bearsalami", 1)],
+        pagina: "paginae/craft/wurst-bearsalami",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    Recipe {
+        id: "wurst_bigbearbanger",
+        name: "Big Bear Banger",
+        inputs: &[("gfx/invobjs/meat", 5), ("gfx/invobjs/intestines", 2)],
+        outputs: &[("gfx/invobjs/wurst-bigbearbanger", 1)],
+        pagina: "paginae/craft/wurst-bigbearbanger",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    Recipe {
+        id: "wurst_lambsausages",
+        name: "Lamb Sausages",
+        inputs: &[("gfx/invobjs/meat", 2), ("gfx/invobjs/intestines", 1)],
+        outputs: &[("gfx/invobjs/wurst-lambsausages", 1)],
+        pagina: "paginae/craft/wurst-lambsausages",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    Recipe {
+        id: "wurst_runrabbit",
+        name: "Running Rabbit Sausage",
+        inputs: &[("gfx/invobjs/meat", 2), ("gfx/invobjs/intestines", 1)],
+        outputs: &[("gfx/invobjs/wurst-runningrabbit", 1)],
+        pagina: "paginae/craft/wurst-runningrabbit",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    // The mixed-meat pair: the liverwurst is the domestic blend (Beef +
+    // Raw Mutton), the WWW the wild blend (Bear + Deer + Fox) - the
+    // doc's "tame game" vs "wonderful wilderness" wording.
+    Recipe {
+        id: "wurst_tamegame",
+        name: "Tame Game Liverwurst",
+        inputs: &[("gfx/invobjs/meat", 4), ("gfx/invobjs/intestines", 2)],
+        outputs: &[("gfx/invobjs/wurst-tamegame", 1)],
+        pagina: "paginae/craft/wurst-tamegame",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[1, 1],
+    },
+    Recipe {
+        id: "wurst_www",
+        name: "Wonderful Wilderness Wurst",
+        inputs: &[("gfx/invobjs/meat", 3), ("gfx/invobjs/intestines", 2)],
+        outputs: &[("gfx/invobjs/wurst-www", 1)],
+        pagina: "paginae/craft/wurst-www",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[1, 1],
+    },
 ];
+
+/// The one inventory resource every raw meat rides on; the species is
+/// told apart by the stack's display label (state::Species::meat_label).
+pub const MEAT_RES: &str = "gfx/invobjs/meat";
+
+/// Session 77: the wurst recipes' meat-slot labels. The wurst inputs
+/// must key on the DISPLAY LABEL, not just the resource - without the
+/// label gate a Fox Wurst would happily grind Beef. Keys are recipe
+/// ids; values are (label, count) slots that REPLACE the recipe's
+/// generic meat input: the slot counts must sum exactly to that
+/// recipe's (MEAT_RES, N) line (pinned by a unit test below). The
+/// mixed blends carry two slots (tame game = Beef + Raw Mutton,
+/// wilderness = Bear + Deer); the labels are fep.conf-verified keys.
+pub const WURST_MEAT_SLOTS: &[(&str, &[(&str, u32)])] = &[
+    ("wurst_fox", &[("Fox Meat", 2)]),
+    ("wurst_foxfuet", &[("Fox Meat", 3)]),
+    ("wurst_boarbaloney", &[("Boar Meat", 2)]),
+    ("wurst_boarboudin", &[("Boar Meat", 3)]),
+    ("wurst_cowchorizo", &[("Beef", 3)]),
+    ("wurst_ddd", &[("Raw Deer Meat", 2)]),
+    ("wurst_bearsalami", &[("Bear Meat", 3)]),
+    ("wurst_bigbearbanger", &[("Bear Meat", 5)]),
+    ("wurst_lambsausages", &[("Raw Mutton", 2)]),
+    ("wurst_runrabbit", &[("Rabbit Meat", 2)]),
+    ("wurst_tamegame", &[("Beef", 2), ("Raw Mutton", 2)]),
+    ("wurst_www", &[("Bear Meat", 1), ("Raw Deer Meat", 2)]),
+];
+
+/// The meat-slot list of a wurst recipe, `None` for every other recipe
+/// (game/craft.rs keys the per-label validation + consumption on it).
+pub fn meat_slots(recipe_id: &str) -> Option<&'static [(&'static str, u32)]> {
+    WURST_MEAT_SLOTS
+        .iter()
+        .find(|(id, _)| *id == recipe_id)
+        .map(|(_, slots)| *slots)
+}
 
 /// Raw -> roasted meat mapping for the `roast` recipe (paginae/craft/roastmeat,
 /// ad = ["craft", "roast"]). Keys are the raw item display labels; values the

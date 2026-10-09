@@ -197,8 +197,33 @@ impl Game {
                 return false;
             }
         }
-        // Validate: every input present in the required quantity.
+        // Validate: every input present in the required quantity. A
+        // recipe with meat slots (craft::WURST_MEAT_SLOTS) validates its
+        // meat input PER LABEL instead: every raw meat shares one
+        // resource, only the display label tells Fox Meat from Beef
+        // (session 77; the refusal names the label like the S72 tool
+        // gate names the tool).
+        let meat_slots = crate::craft::meat_slots(recipe.id);
+        let meat_gidx = meat_slots.map(|_| self.world.res.intern(crate::craft::MEAT_RES));
         for (resname, need) in recipe.inputs {
+            if *resname == crate::craft::MEAT_RES {
+                if let (Some(slots), Some(mg)) = (meat_slots, meat_gidx) {
+                    for (label, slot_need) in slots {
+                        let have: u32 = self.world.players[pidx]
+                            .inv
+                            .iter()
+                            .filter(|s| s.res == mg && s.label == *label)
+                            .map(|s| s.count)
+                            .sum();
+                        if have < *slot_need {
+                            let msg = format!("You need the {} for that.", label);
+                            self.chat_line(sid, &msg, Some((255, 128, 128)));
+                            return false;
+                        }
+                    }
+                    continue;
+                }
+            }
             let gidx = self.world.res.intern(resname);
             let have: u32 = self.world.players[pidx]
                 .inv
@@ -219,6 +244,43 @@ impl Game {
         let mut consumed: Vec<(u8, u32)> = Vec::new(); // (ql, units)
         let mut per_type: Vec<(u32, u32)> = vec![(0, 0); recipe.inputs.len()];
         for (ti, (resname, need)) in recipe.inputs.iter().enumerate() {
+            // Meat-slot inputs consume per label (validation note); the
+            // slots share the meat input's per_type bucket.
+            if *resname == crate::craft::MEAT_RES {
+                if let (Some(slots), Some(mg)) = (meat_slots, meat_gidx) {
+                    for (label, slot_need) in slots {
+                        let mut remaining = *slot_need;
+                        while remaining > 0 {
+                            let slot = {
+                                let inv = &self.world.players[pidx].inv;
+                                inv.iter().enumerate().fold(None::<usize>, |best, (i, s)| {
+                                    if s.res == mg && s.label == *label && s.count > 0 {
+                                        match best {
+                                            None => Some(i),
+                                            Some(b) if s.ql < inv[b].ql => Some(i),
+                                            other => other,
+                                        }
+                                    } else {
+                                        best
+                                    }
+                                })
+                            };
+                            let Some(slot) = slot else {
+                                // Validation passed but stacks emptied mid-loop.
+                                return false;
+                            };
+                            let stack = &mut self.world.players[pidx].inv[slot];
+                            let take = remaining.min(stack.count);
+                            stack.count -= take;
+                            consumed.push((stack.ql, take));
+                            per_type[ti].0 += u32::from(stack.ql) * take;
+                            per_type[ti].1 += take;
+                            remaining -= take;
+                        }
+                    }
+                    continue;
+                }
+            }
             let gidx = self.world.res.intern(resname);
             let mut remaining = *need;
             while remaining > 0 {

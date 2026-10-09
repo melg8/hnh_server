@@ -347,3 +347,210 @@ async fn bucket_craft_needs_the_saw() {
 // Food Trough + feeding (session 48; animals-and-husbandry.md
 // "Feeding: troughs and grazing").
 // ------------------------------------------------------------------
+
+// ------------------------------------------------------------------
+// The sausage chain (session 77; crafting doc "Sausages" session note).
+// ------------------------------------------------------------------
+
+/// The wurst recipe set is internally consistent: every wurst id has a
+/// meat-slot table entry and vice versa, the slot counts sum exactly to
+/// the recipe's generic meat input, and every slot label is a real
+/// fep.conf meat key (Fox Meat, Beef, ... - the same keys ROAST_MAP
+/// rides on). The edible/inedible split is fep.conf's own: the five
+/// labels the table carries eat; the other seven refuse (the table is
+/// the truth, no invented numbers).
+#[tokio::test]
+async fn wurst_recipes_key_the_meat_slots_and_the_fep_table() {
+    let (g, _rx, _raw) = entered_game("wursttable");
+    let mut slot_ids: Vec<&str> = crate::craft::WURST_MEAT_SLOTS
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+    slot_ids.sort_unstable();
+    let mut recipe_ids: Vec<&str> = crate::craft::RECIPES
+        .iter()
+        .filter(|r| r.id.starts_with("wurst_"))
+        .map(|r| r.id)
+        .collect();
+    recipe_ids.sort_unstable();
+    assert_eq!(recipe_ids.len(), 12, "twelve of the thirteen wurst pages");
+    assert_eq!(
+        recipe_ids, slot_ids,
+        "every wurst recipe has a meat-slot entry and nothing else does"
+    );
+    for (id, slots) in crate::craft::WURST_MEAT_SLOTS {
+        let recipe = crate::craft::RECIPES.iter().find(|r| r.id == *id).unwrap();
+        let meat_units: u32 = recipe
+            .inputs
+            .iter()
+            .filter(|(res, _)| *res == crate::craft::MEAT_RES)
+            .map(|(_, n)| n)
+            .sum();
+        let slot_sum: u32 = slots.iter().map(|(_, n)| n).sum();
+        assert_eq!(
+            meat_units, slot_sum,
+            "{id}: the meat slots must replace the generic meat input exactly"
+        );
+        assert_eq!(recipe.outputs.len(), 1, "{id}: one wurst per craft");
+        for (label, _) in slots.iter() {
+            assert!(
+                g.fep.get(label).is_some(),
+                "{id}: slot label {label} must be a fep.conf meat key"
+            );
+        }
+        // fep.conf carries a row for every implemented wurst (the
+        // "Chicken Chorizo" and "Bierwurst" keys have no item resource
+        // in the pack and stay unimplemented) - all twelve eat.
+        assert!(
+            g.fep.get(recipe.name).is_some(),
+            "{}: the crafted label must resolve its fep.conf row",
+            recipe.name
+        );
+    }
+}
+
+/// The label gate end to end through craft_once: Fox Wurst grinds Fox
+/// Meat only - a Beef-carrying inventory refuses with the chat line,
+/// and the correct meat crafts at the two-type quality average
+/// (Fox Meat q30 + Intestines q20 -> 25, Perception-10 softcap -> 17).
+#[tokio::test]
+async fn fox_wurst_crafts_from_labeled_meat_and_refuses_the_wrong_species() {
+    let (mut g, mut rx, _raw) = entered_game("wurstfox");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    // Beef instead of Fox Meat: the refusal names the missing label and
+    // consumes nothing.
+    set_inv_labeled(
+        &mut g,
+        &[
+            ("gfx/invobjs/meat", 5, 40, "Beef"),
+            ("gfx/invobjs/intestines", 1, 20, ""),
+        ],
+    );
+    assert!(
+        !g.craft_once(1, "wurst_fox"),
+        "Beef must not pass the Fox Wurst meat gate"
+    );
+    let lines = drain_chat(&mut rx);
+    assert!(
+        lines.iter().any(|l| l.contains("You need the Fox Meat")),
+        "the refusal names the missing meat label, got {lines:?}"
+    );
+    let meat = g.world.res.intern(crate::craft::MEAT_RES);
+    assert_eq!(
+        g.world.players[pidx]
+            .inv
+            .iter()
+            .filter(|s| s.res == meat)
+            .map(|s| s.count)
+            .sum::<u32>(),
+        5,
+        "the refusal must not consume the ingredients"
+    );
+    // The right labels craft: Fox Meat x2 + Intestines x1 -> wurst.
+    set_inv_labeled(
+        &mut g,
+        &[
+            ("gfx/invobjs/meat", 2, 30, "Fox Meat"),
+            ("gfx/invobjs/meat", 5, 40, "Beef"),
+            ("gfx/invobjs/intestines", 1, 20, ""),
+        ],
+    );
+    assert!(g.craft_once(1, "wurst_fox"), "labeled meat + casing craft");
+    let wurst = g.world.res.intern("gfx/invobjs/wurst-fox");
+    let stack = g.world.players[pidx]
+        .inv
+        .iter()
+        .find(|s| s.res == wurst)
+        .expect("the wurst lands in the inventory");
+    assert_eq!(stack.count, 1);
+    assert_eq!(stack.ql, 17, "(30+20)/2 = 25 softcapped by per 10 -> 17");
+    assert_eq!(
+        stack.label, "Fox Wurst",
+        "the crafted label carries the name"
+    );
+    // The Fox Meat slots are gone; the Beef stack survives untouched.
+    assert_eq!(
+        g.world.players[pidx]
+            .inv
+            .iter()
+            .filter(|s| s.res == meat && s.label == "Fox Meat")
+            .map(|s| s.count)
+            .sum::<u32>(),
+        0,
+        "the Fox Meat slots are consumed"
+    );
+    assert_eq!(
+        g.world.players[pidx]
+            .inv
+            .iter()
+            .filter(|s| s.res == meat && s.label == "Beef")
+            .map(|s| s.count)
+            .sum::<u32>(),
+        5,
+        "the Beef stack is untouched"
+    );
+}
+
+/// The session-77 butcher loot: Intestines follow the doc's table
+/// verbatim (Aurochs/Cattle/Bear x4, Deer x3, Boar/Sheep x2, Fox x1,
+/// mouflon policy 1; Wolf/Hare/Hen drop none per their rows), and the
+/// two new species carry their doc yields (Bear Meat x8 + the bear
+/// hide; Raw Chicken Meat + Chicken Feather x3).
+#[test]
+fn intestines_loot_follows_the_butcher_table() {
+    use crate::state::Species;
+    let expect: &[(Species, u32)] = &[
+        (Species::Deer, 3),
+        (Species::Aurochs, 4),
+        (Species::Cow, 4),
+        (Species::Boar, 2),
+        (Species::Fox, 1),
+        (Species::Wolf, 0),
+        (Species::Hare, 0),
+        (Species::Mouflon, 1),
+        (Species::Sheep, 2),
+        (Species::Bear, 4),
+        (Species::Hen, 0),
+    ];
+    for (sp, want) in expect {
+        let got = sp
+            .loot()
+            .iter()
+            .filter(|(res, _, _)| *res == "gfx/invobjs/intestines")
+            .map(|(_, n, _)| n)
+            .sum::<u32>();
+        assert_eq!(
+            &got, want,
+            "{sp:?}: the intestines yield must match the doc table"
+        );
+    }
+    let bear = Species::Bear.loot();
+    assert!(
+        bear.iter()
+            .any(|(res, n, _)| *res == "gfx/invobjs/meat" && *n == 8),
+        "the bear mirrors its doc row: Meat x8"
+    );
+    assert!(
+        bear.iter()
+            .any(|(res, _, _)| *res == "gfx/invobjs/hide-raw-bear"),
+        "the bear drops the raw bear hide"
+    );
+    assert_eq!(Species::Bear.meat_label(), "Bear Meat");
+    assert_eq!(Species::Bear.name(), "Bear");
+    let hen = Species::Hen.loot();
+    assert!(
+        hen.iter()
+            .any(|(res, n, _)| *res == "gfx/invobjs/feather-chicken" && *n == 3),
+        "the hen mirrors its doc row: Chicken Feather x3"
+    );
+    assert_eq!(Species::Hen.meat_label(), "Raw Chicken Meat");
+    assert_eq!(Species::Hen.name(), "Hen");
+    // The pose routing covers the whole roster (pose.rs arrays sized by
+    // the enum count - an uncompiled addition would panic at runtime).
+    assert_eq!(Species::ALL.len(), 11);
+    assert_eq!(Species::Bear.index(), 9);
+    assert_eq!(Species::Hen.index(), 10);
+    assert_eq!(Species::from_index(9), Some(Species::Bear));
+    assert_eq!(Species::from_index(10), Some(Species::Hen));
+    assert_eq!(Species::from_index(11), None);
+}

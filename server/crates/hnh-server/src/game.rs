@@ -265,6 +265,11 @@ impl Game {
                 // target/release -> server/target/release/../../.. -> repo root
                 candidates.push(dir.join("../../../etc/needed/fep.conf"));
                 candidates.push(dir.join("../../etc/needed/fep.conf"));
+                // Cargo test binaries live one level deeper
+                // (target/debug/deps/) - the fourth hop reaches the
+                // repo root from there, so unit tests see the same
+                // fep.conf the live server boots with.
+                candidates.push(dir.join("../../../../etc/needed/fep.conf"));
             }
         }
         let mut fep = crate::craft::FepTable::default();
