@@ -1198,6 +1198,12 @@ const DROP_WORLD_ALIASES: &[(&str, &str)] = &[
     // 67: before this alias the crucible's output drops fell back to
     // the branch shape, making the wire probe's drop scan impossible).
     ("bar-bronze", "gfx/terobjs/items/bar-copper"),
+    // Session 71 (baking chain): the pack ships flour and grist
+    // inventory icons but no world shapes for them; both render through
+    // the seed-bag silhouette - the closest held-item shape to a bag of
+    // milled grain (same fallback policy as bronze->copper above).
+    ("grist-wheat", "gfx/terobjs/items/bag-seed"),
+    ("flour", "gfx/terobjs/items/bag-seed"),
 ];
 
 /// Crate-visible lookup for tests and callers that need to know whether
