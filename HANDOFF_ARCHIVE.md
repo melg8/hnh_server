@@ -5460,3 +5460,49 @@ next-largest non-test files if a future type-2 session wants them.
 
 COMMITS: 76900f0 (the test battery split), this handoff.
 
+## 2026-10-09 - Session 77 (type 3: the sausage chain)
+
+SESSION TYPE ROTATION LOG: 72=4, 73=5, 74=0, 75=1, 76=2, 77=3. All six
+types served - pick freely, avoid repeating the previous session's type.
+
+GOAL: close the last big recipe-breadth dead end - the sausage branch
+(Known gap #4's remaining cooking depth). Pure feature work on top of
+the verified station/craft infrastructure.
+
+DONE:
+
+- the roster grew to eleven: Species::Bear (hp 120, aggressive, Meat x8
+  + Raw Bear Hide + Intestines x4 per the doc butcher row) and
+  Species::Hen (the only Raw Chicken Meat source, Chicken Feather x3
+  loot) - both ship full kritter pose sets in the 2009 jar (verified
+  BEFORE landing); pose tables 9 -> 11; node-link discriminants APPEND
+  9/10 (0-8 frozen on the wire)
+- Intestines enter the butcher loot verbatim from the doc's table
+  (Aurochs/Cattle/Bear x4, Deer x3, Boar/Sheep x2, Fox x1, mouflon
+  policy 1, Wolf/Hare/Hen none) - the universal sausage casing
+- twelve of the thirteen shipped wurst paginae became hand recipes
+  (ad craft|wurst_*); Piglet Wursts stays out - Raw Pork has no source
+  until the pig morph ships (the pack ships no pig kritter)
+- the load-bearing find: every raw meat rides ONE resource
+  (gfx/invobjs/meat) and is told apart by the DISPLAY LABEL, so the
+  wurst meat inputs key on craft::WURST_MEAT_SLOTS - per-label
+  validation + lowest-quality-first consumption + a refusal that names
+  the missing label; without the gate a Fox Wurst would grind Beef
+- fep.conf boot candidates gained the cargo-test exe depth (4 hops to
+  the repo root) so unit tests parse the same 111-food table the live
+  server boots with - the FEP contract moved into the white-box tier
+- all twelve implemented wurst labels carry fep.conf rows (the
+  Chicken Chorizo and Bierwurst keys have no item resource - recorded);
+  verified live: 12 paginae served over HTTP, make window opens,
+  the label-gate refusal lands as system chat, CRAFT FLOW + EAT FLOW OK
+- pins: slot/input consistency + fep coverage, the Fox Wurst label gate
+  end to end (refuse Beef, craft from Fox Meat q30/q20 -> per-softcap
+  17, Beef untouched), the butcher-loot table; species_index_roundtrips
+  extends to 11
+
+GATE: fmt + clippy -D warnings clean; workspace 320 green (11 proto +
+290 unit [2 ign] + 7 wire [1 ign] + 12 world). Live smoke: WORLD ENTRY,
+CATTR ORDER, CRAFT FLOW, EAT FLOW all OK; no tmp residue on SIGTERM.
+
+COMMITS: a026c9e (bear + hen + intestines), 173bc4e (the sausage chain),
+this handoff.
