@@ -5104,3 +5104,78 @@ handoff + the sink-probe removal + the Java-client pack fix
 (fix_gameres_parent_refs.py, res/compiled repairs, UiProbe green).
 
 ---
+## 2026-10-09 - Session 71 (type 3: new functionality)
+
+SESSION TYPE ROTATION LOG: 66=3, 67=4, 68=5, 69=3, 70=2, 71=3. All six
+types served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the S66/S68 handoffs named "kiln + brick chain" (done in S69/S70)
+and the S70 known-gap #4 carried "flour/bread (the 2009 pack has no
+grain item)". This session built and VERIFIED LIVE the full baking
+chain: wheat -> grist -> flour -> dough -> bread. NOTE: this session
+spanned multiple LLM incarnations (the first left the quern/GRIND_MAP
+wave committed as bc84762; the last one finished the oven leg).
+
+DONE (committed across the session):
+
+- Wave 1 (bc84762, recovered + finished from the earlier incarnation's
+  tree): quern station appended LAST to BUILDABLES (save-spec indices
+  stable; Stone x2 + Branch x2 demand, NO fuel - the fuel gate skips
+  StationKind::Quern, menu verb Grind instead of Light), GRIND_MAP
+  Grist of Wheat -> Flour, BAKE_MAP Bread Dough -> Bread (own
+  resource, not the roast-meat contract) with BOTH the relay accept
+  and the tick output routed through the new maps; the dough hand
+  recipe (flour x2 + bucket-water -> dough x2 + the empty bucket
+  back, paginae/craft/dough ships); mature wheat yields Grist of
+  Wheat (farm.rs WHEAT_MATURE, the pack has no grain item - sprout /
+  grist / malt only); bucket fill (an empty bucket itemact on a water
+  tile becomes a Bucket of Water in the cursor, game/items.rs);
+  paginae/build/quern pushed; hnh-world test water_is_reachable_from
+  _spawn (nearest water 57 tiles from spawn on seed 42, walkable
+  launch neighbor pinned); craft unit tests pin the maps + recipe.
+- Wave 2 (8fa470a): test_bake.py - the live end-to-end probe (saw +
+  bucket crafts, farming skill sattr buy, five seeds plowed/planted,
+  flower-menu harvest, water ring-scan + bucket scoop, quern build,
+  2x Grind jobs, dough craft, oven build + bake). DROP_WORLD_ALIASES
+  gained grist-wheat / flour -> gfx/terobjs/items/bag-seed (the pack
+  ships no world shapes for the milled-grain items; the seed-bag is
+  the closest silhouette, same fallback policy as bronze -> copper).
+- Wave 3 (58c8776): REAL BUG fixed - crafted stacks shipped an EMPTY
+  label, and every station input gate matches on the DISPLAY LABEL
+  (BAKE_MAP/GRIND_MAP/KILN_MAP/SMELT_MAP keys are display names): the
+  hand-crafted Bread Dough was refused with 'The station cannot
+  process that.' - the oven leg was unreachable. craft_once now
+  labels the PRIMARY output with recipe.name (all 38 recipe names are
+  the product display names - verified); multi-output byproducts (the
+  dough recipe's returned bucket) keep the empty label. Side effect:
+  crafted tooltips show real names.
+
+VERIFIED LIVE (the BAKE: OK run):
+- saw + bucket crafted from the starter kit; Farming bought via sattr;
+  five wheat seeds plowed/planted, 250 ms/stage growth, flower-menu
+  harvest -> 8 Grist of Wheat; bucket scooped at the shore (the
+  bucket-fill contract keys on the TILE under the click, the probe
+  skips the shore-rim walk - nav oscillation, the S67 finding);
+  quern built and ground 2 Flour (Grind verb, no fuel, 15-tick jobs,
+  drops render through the bag-seed alias); dough crafted (x2 + the
+  empty bucket back); oven fueled + loaded + Light -> Bread q10 in
+  the inventory.
+- Regression: KILN: OK (one flaky shore-grid wait on the first run,
+  green on the retry); WORLD ENTRY: OK + CATTR ORDER: OK.
+- Gate: fmt clean, clippy -D warnings clean, cargo test --workspace
+  313 green (11 proto + 284 unit [1 ign] + 6 wire [1 ign] + 12 world).
+
+NOT DONE / next session carries:
+- A transient hnhlib UnicodeDecodeError on a bundled NEWWDG frame
+  (killed ONE run after the bread drop spawned; did not reproduce;
+  the decode now dumps the body and skips - monitor).
+- The probe's water leg skips the shore walk (server does not check
+  reach for the bucket fill) - a legacy-fidelity reach policy is an
+  open server question for the mechanics doc.
+- Carried from S70: GL e2e + Windows smoke; CI push (no workflow
+  scope); multi-machine cluster profile.
+
+COMMITS: bc84762 (quern + maps + dough + bucket + wheat), 8fa470a
+(test_bake.py + drop aliases), 58c8776 (crafted-label fix).
+
+---
