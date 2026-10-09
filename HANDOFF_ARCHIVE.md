@@ -5506,3 +5506,68 @@ CATTR ORDER, CRAFT FLOW, EAT FLOW all OK; no tmp residue on SIGTERM.
 
 COMMITS: a026c9e (bear + hen + intestines), 173bc4e (the sausage chain),
 this handoff.
+
+## 2026-10-09 - Session 78 (type 5: the retransmit sweep sheds its allocator)
+
+SESSION TYPE ROTATION LOG: 73=5, 74=0, 75=1, 76=2, 77=3, 78=5. All six
+types served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the Known gaps #10a cut - the cache-friendly `unacked` layout the
+S73/S76 notes named as the natural next retx move (the sweep walked
+BTreeMap nodes per block and deep-cloned a Vec per resend; the
+entry-burst profile had it at 5-27 ms with 12-37k pending).
+
+DONE:
+
+- UnackedBlock.bytes is now BlockBytes: a 144-byte inline buffer with a
+  heap spill for oversize blocks (the profile showed none in the hot
+  path - an OD_REM is ~13 bytes, a player spawn ~90). A resend used to
+  be malloc+copy+free on the tick thread; now it is one memcpy
+- the raw UDP channel ships BlockBytes end to end (send_raw converts
+  at the door, the receiver sends as_slice()), so a resend enqueues
+  the inline buffer with NO allocation; Deref<Target=[u8]> keeps the
+  receiver task and the test harness reading the payload like a slice
+- PerGobPending replaces BTreeMap<u32, UnackedBlock>: a flat
+  frame-ordered Vec reserving the cap (4) up front - ONE allocation
+  per gob instead of a heap node per block, the ordered walk now runs
+  over contiguous memory. The ordered contract is identical and
+  pinned: ascending walk with the blocked-latch, min = blocks[0] /
+  max = blocks.last() (retract's rem_frame), at_or_below for the
+  ack-lag sample (was range(..=frame).next_back()), retain-above-ack,
+  equal-frame REPLACE (the FX overlay re-records the gob's current
+  frame - the BTreeMap::insert semantics interact.rs:683 relies on)
+- the per-sweep budget, the throttle, the age ceiling, the adaptive
+  RTO and the round-robin cursor are untouched - this is a layout
+  change, not a policy change
+
+MEASURED (1000 saturated bots, 2 cores, the same run recipe as the
+S65/S73 baselines; 26 base windows vs 31/19 after-windows):
+
+- retx_sweep_us mean 7.2 -> 5.2/5.4 ms (-25..-27%) across two runs;
+  the per-window worst (wmax_retx_sweep_us) mean 10.3 -> 5.6/5.4 ms
+  (-46..-48%)
+- mean tick 42.3 -> 28.6/33.3 ms in this run pair (-21..-32%): the
+  retx attribution is the direct signal, the mvbat_fanout drop
+  (16.2 -> 11.9 ms) is the relieved-allocator side effect; run
+  variance is real, treat the tick band as the evidence band
+- retx_pending drains slightly lower (20.3k -> 15.4-17.9k mean, max
+  48.4k -> 27.8-30.7k) at the same resent volume (the 8192 budget
+  still burns - the load cohort still never acks everything)
+- gate: fmt + clippy -D warnings clean; workspace 323 green (11 proto
+  + 293 unit [2 ign] + 7 wire [1 ign] + 12 world) - the three new
+  white-box pins cover the inline spill/clone boundary, the ordered
+  insert + equal-frame replace + cap trim, and the age-ceiling retire;
+  lost_static_spawn_wave_is_retransmitted stays green (the wire
+  contract survived the layout change)
+- live smoke: WORLD ENTRY / CATTR ORDER / CRAFT FLOW OK; EAT FLOW
+  initially read FAIL - root-caused to the PERSISTENT testuser having
+  eaten its starter food across sessions (a probe flake, not a
+  regression): a fresh username eats fine. No tmp residue on SIGTERM
+
+NOT DONE / next session carries: the vis delta-scan re-measure (the
+second #10 follow-up; after this cut the vis full rescan is the
+remaining named candidate), GL e2e + Windows smoke, multi-machine
+cluster profile. remaining known gap tail: pottery/baking dough depth,
+per-animal breed stat rows, cross-node trough relays.
+
+COMMITS: 571b011 (the allocator-free sweep layout), this handoff.

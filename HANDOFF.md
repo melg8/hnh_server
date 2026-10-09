@@ -397,6 +397,91 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
   sub-messages (mid-bundle widgets dropped silently since ever);
   POTTERY live-verified; 326 green.
 
+- S80 (type 4): the client resource-source order fix - addurl()
+  chains the server HTTP pack ahead of the offline jar (the jar's
+  historical AButton parent_ver, dodge->blk 28484 vs the pack's blk
+  ver 1, killed the menu on world entry); the stale tracked
+  server/gameres snapshot dropped (43 MB, outdated overlay, the
+  fresh-clone landmine); UiProbe tri-mode green, 326 green.
+## 2026-10-09 - Session 80 (type 4: the client resource-source order fix)
+
+SESSION TYPE ROTATION LOG: 74=0, 75=1, 76=2, 77=3, 78=5, 79=3, 80=4.
+All six types served - pick freely, avoid repeating the previous session's
+type.
+
+GOAL: the session opened on the S79 working-tree leftovers (debug prints
+in the client tree, uncommitted diagnostics) and immediately hit a hard
+client blocker: UiProbe died on world entry with a MenuGrid
+PaginaException - the same "Wrong res version (1 != 28484)" an S40-era
+note had attributed to an in-frame pagina desync. Chasing it consumed the
+session; the root cause and a two-commit fix landed.
+
+DONE:
+
+- ROOT CAUSE (client resource-source order): the static Resource loader
+  chain ends with JarSource (lib/haven-res.jar) and addurl() chained the
+  server's HTTP pack AFTER it, so every resource present in both was
+  decoded from the jar's historical copy. The jar's paginae/atk/dodge
+  embeds AButton parent "paginae/atk/blk" at pver 28484 (the upstream
+  server's version of that file), while this server's pack ships blk at
+  ver 1 (the fix_gameres_parent_refs.py alignment). Decoding the jar copy
+  asked for a parent version the pack never had: the load died with
+  "Wrong res version (1 != 28484)", MenuGrid.getSubResources threw
+  PaginaException, the RemoteUI thread died - the reported black screen
+  after entering the world. Latent since S40 (dodge entered the PAGINAE
+  push then); UiProbe simply had not been run against the full page set
+  since.
+- FIX (Resource.addurl): the server source is now inserted AHEAD of the
+  JarSource entry (new chainloader_before_jar). The self-consistent
+  remote pack wins; resources absent from the pack still fall through to
+  the jar via the normal Loader chain. Verified against the live server
+  with HAVEN_RESDIR unset - exactly the real user's classpath.
+- MINE #2 (stale tracked pack): server/gameres/ was a 43 MB tracked pack
+  snapshot frozen around S40 - missing the five later overlay resources
+  (paginae/craft/string + tanhide, gfx/hud/vilind, gfx/borka hair/head)
+  and still carrying the unaligned dodge parent_ver. default_repo_dir's
+  exe-anchored fallback picks it whenever the generated repo-root
+  gameres/ is absent, so a fresh clone that skipped make-gameres silently
+  served a menu-killing pack (reproduced: UiProbe against it died on
+  paginae/craft/string). The snapshot is deleted; the generated
+  repo-root gameres/ is the single source of truth (start-server.bat and
+  run-client.bat auto-generate it; a missing pack fails fast with the
+  generation instructions). fix_gameres_parent_refs.py --check gameres:
+  stale=0.
+- DEBUG PRINTS RETIRED: the temporary PAGDBG (Glob), BLKLOAD trace
+  (Resource.load) and RESIDDBG (Session) inserts never existed in master
+  (uncommitted working-tree edits only) and are gone; the tree is clean.
+- client-probe/ResLayers.java: tiny CLI that loads a res from the served
+  pack and prints its Image/AButton/Code layers - the tool that nailed
+  the diagnosis (blk HAS an action layer; the failure was purely the
+  version mismatch). Committed for future res debugging.
+- Diagnostics deleted: server/scripts/diag_nav.py (S79 shore-BFS helper,
+  superseded by the NAV DIAG inside test_pottery.py) and sniff_paginae.py
+  (pre-fix paginae sniffer). client-probe/*.class added to .gitignore.
+- Repro tool kept OUT of the repo: /home/z/my-project/scripts/pver_recon.py
+  raw-scans a pack root for paginae/ parent links and diffs the embedded
+  pver against the parent file's real version (PACK=<root> env).
+
+MEASURED/EVIDENCE: UiProbe run/equip/charlist all green post-fix (run
+built the full widget set - MapView, SlenHud, MenuGrid, Speedget,
+Bufflist, ChatHW, VMeter x3, Equipory, CharWnd - with zero version
+errors); python test_client WORLD ENTRY: OK + CATTR ORDER: OK; cargo gate
+untouched green: fmt + clippy clean, 326 workspace tests (11 proto +
+296 unit [2 ign] + 7 wire [1 ign] + 12 world).
+
+NOT DONE / next session carries: everything the S79 record lists (butter
++ carrot-cake live chain drive, the five dough ingredient chains, the
+vis delta-scan re-measure, multi-machine cluster profile, CI push retry)
+plus the new client tail: stand the UiProbe tri-mode up as a gate script
+(the attic verify_ui_probe.sh predates the JDK layout; its java -m
+jdk.compiler path cannot compile --release 8 without ct.sym - use a full
+JDK's javac as windows/run-client.bat does via ant) and consider wiring
+fix_gameres_parent_refs.py --check into make-gameres so a freshly
+generated pack is self-verified.
+
+COMMITS: 4a35d9d (client: serve the remote pack before the offline jar),
+e5c933b (repo: drop the stale server/gameres snapshot), this handoff.
+
 ## 2026-10-09 - Session 79 (type 3: the pottery, butter and carrot-cake legs)
 
 SESSION TYPE ROTATION LOG: 74=0, 75=1, 76=2, 77=3, 78=5, 79=3. All six
@@ -468,67 +553,3 @@ GL e2e + Windows smoke; multi-machine cluster profile; CI push retry.
 COMMITS: b1423e6 (the pottery/butter/cake legs + harness fix + probe),
 this handoff.
 
-## 2026-10-09 - Session 78 (type 5: the retransmit sweep sheds its allocator)
-
-SESSION TYPE ROTATION LOG: 73=5, 74=0, 75=1, 76=2, 77=3, 78=5. All six
-types served - pick freely, avoid repeating the previous session's type.
-
-GOAL: the Known gaps #10a cut - the cache-friendly `unacked` layout the
-S73/S76 notes named as the natural next retx move (the sweep walked
-BTreeMap nodes per block and deep-cloned a Vec per resend; the
-entry-burst profile had it at 5-27 ms with 12-37k pending).
-
-DONE:
-
-- UnackedBlock.bytes is now BlockBytes: a 144-byte inline buffer with a
-  heap spill for oversize blocks (the profile showed none in the hot
-  path - an OD_REM is ~13 bytes, a player spawn ~90). A resend used to
-  be malloc+copy+free on the tick thread; now it is one memcpy
-- the raw UDP channel ships BlockBytes end to end (send_raw converts
-  at the door, the receiver sends as_slice()), so a resend enqueues
-  the inline buffer with NO allocation; Deref<Target=[u8]> keeps the
-  receiver task and the test harness reading the payload like a slice
-- PerGobPending replaces BTreeMap<u32, UnackedBlock>: a flat
-  frame-ordered Vec reserving the cap (4) up front - ONE allocation
-  per gob instead of a heap node per block, the ordered walk now runs
-  over contiguous memory. The ordered contract is identical and
-  pinned: ascending walk with the blocked-latch, min = blocks[0] /
-  max = blocks.last() (retract's rem_frame), at_or_below for the
-  ack-lag sample (was range(..=frame).next_back()), retain-above-ack,
-  equal-frame REPLACE (the FX overlay re-records the gob's current
-  frame - the BTreeMap::insert semantics interact.rs:683 relies on)
-- the per-sweep budget, the throttle, the age ceiling, the adaptive
-  RTO and the round-robin cursor are untouched - this is a layout
-  change, not a policy change
-
-MEASURED (1000 saturated bots, 2 cores, the same run recipe as the
-S65/S73 baselines; 26 base windows vs 31/19 after-windows):
-
-- retx_sweep_us mean 7.2 -> 5.2/5.4 ms (-25..-27%) across two runs;
-  the per-window worst (wmax_retx_sweep_us) mean 10.3 -> 5.6/5.4 ms
-  (-46..-48%)
-- mean tick 42.3 -> 28.6/33.3 ms in this run pair (-21..-32%): the
-  retx attribution is the direct signal, the mvbat_fanout drop
-  (16.2 -> 11.9 ms) is the relieved-allocator side effect; run
-  variance is real, treat the tick band as the evidence band
-- retx_pending drains slightly lower (20.3k -> 15.4-17.9k mean, max
-  48.4k -> 27.8-30.7k) at the same resent volume (the 8192 budget
-  still burns - the load cohort still never acks everything)
-- gate: fmt + clippy -D warnings clean; workspace 323 green (11 proto
-  + 293 unit [2 ign] + 7 wire [1 ign] + 12 world) - the three new
-  white-box pins cover the inline spill/clone boundary, the ordered
-  insert + equal-frame replace + cap trim, and the age-ceiling retire;
-  lost_static_spawn_wave_is_retransmitted stays green (the wire
-  contract survived the layout change)
-- live smoke: WORLD ENTRY / CATTR ORDER / CRAFT FLOW OK; EAT FLOW
-  initially read FAIL - root-caused to the PERSISTENT testuser having
-  eaten its starter food across sessions (a probe flake, not a
-  regression): a fresh username eats fine. No tmp residue on SIGTERM
-
-NOT DONE / next session carries: the vis delta-scan re-measure (the
-second #10 follow-up; after this cut the vis full rescan is the
-remaining named candidate), GL e2e + Windows smoke, multi-machine
-cluster profile. remaining known gap tail: pottery/baking dough depth,
-per-animal breed stat rows, cross-node trough relays.
-
-COMMITS: 571b011 (the allocator-free sweep layout), this handoff.
