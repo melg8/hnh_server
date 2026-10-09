@@ -163,7 +163,7 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
 
 1. **CI**: `.github/workflows/rust.yml` (fmt, clippy -D warnings, cargo
    test --workspace on push/PR) could not be pushed - the PAT lacks the
-   `workflow` scope (session 50; retried in 53/55/56/57/61/63, see
+   `workflow` scope (session 50; retried in 53/55/56/57/61/63...73, see
    those entries). The full file content is preserved in the archive
    (session-50 addendum). Retry the push every session; a green local
    run stays mandatory.
@@ -179,7 +179,12 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    SEPARATE machines (or more cores), not a bigger single box; no
    further single-index work is justified here. Guest pose
    finalizers (the one profiled cluster excess) were already fixed
-   this session (see S59).
+   that session (see S59). CONFIRMED at the S73 sub-attribution: the
+   pair walk IS the fan-out floor (probe/append/unacked/send stages
+   sum to 3-8 ms of the 27-38 ms total at 204-288k pairs/tick) - and
+   per-pair Instant timers were REMOVED after measuring (their own
+   ~150-200 ns/pair x 270k pairs out-weighed every stage; do not
+   re-add per-pair timers, profile via the phase counters only).
 3. **Probe migration**: CLOSED (session 61): all five legacy
    self-contained scripts (probe_animals, probe_direction,
    test_farming, test_party_chat, dump_paginae) either subclass
@@ -234,6 +239,15 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    and the sweep hit 426 ms (see the S65 entry). The load cohort now
    echoes batched MSG_OBJACK like the real client, a hard age ceiling
    and a queue-full throttle bound any peer's table regardless.
+10. **Perf follow-ups** (the S73 profile's named candidates, both
+   measured on current master): (a) `retx_sweep_us` 5-27 ms - 12-37k
+   pending blocks each pay 2-3 hash probes + a BTreeMap walk + a deep
+   clone per resend; a cache-friendly `unacked` layout (inline block
+   bytes, no BTreeMap node per insert) is the natural next cut;
+   (b) the vis full rescan per moving session (a cell crossing
+   re-scans the whole rectangle) - a delta-scan (new cell strip only)
+   is a bigger refactor; re-measure whether it still pays after the
+   S73 parallel-probe move.
 
 ## Session type rotation log (consolidated)
 

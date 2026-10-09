@@ -42,6 +42,7 @@ taming) that are easier to drive from python.
 | test_farming.py | plow/plant/harvest | farming verdict |
 | test_party_chat.py | party + chat relays | chat verdict |
 | test_equip.py | equipment doll/world layers | equip verdict |
+| test_craft.py | craft + eat chain end to end: make-widget craft, item pickup, flower-menu eat, the chr food uimsg | `EAT FLOW: OK` |
 | test_newcraft.py | session-58 recipes end to end: saw, bucket-with-crafted-saw, fork paginae served | `NEWCRAFT: OK` |
 | test_gather.py | world gathering: branch pick + boulder stone picks into inventory | `GATHER: OK` |
 | test_feeding.py | trough build/load/lift/place/transfer (session 62) | `FEEDING FLOW: OK` |
@@ -85,7 +86,10 @@ taming) that are easier to drive from python.
 ## Attic
 
 `attic/` holds the frozen one-off session gate scripts
-(`verify_sessionNN.sh`, `verify_build.sh`, `verify_equip.sh`, ...).
+(`verify_sessionNN.sh`, `verify_build.sh`, `verify_equip.sh`, ...) and
+the closed one-off diagnostics (`debug_*.py`: the S70 kiln-nav tile
+dumps, the S70 pagina-announce capture, the S71 water-tile scan - their
+findings are folded into the domain docs and the handoff archive).
 They chain each other and assert historical wire behavior; nothing
 runs them anymore and they are NOT maintained. Do not extend them:
 write a probe on `hnhlib.py` (or a cargo wire test) instead.
