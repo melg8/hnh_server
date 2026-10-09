@@ -1055,6 +1055,12 @@ impl Game {
         p.retx_queue_full = full_n as u64;
         p.retx_busy_sessions = busy_sessions as u64;
         if expired_any {
+            // Session 82 attribution: this walk runs AFTER retx_sweep_us
+            // is recorded, so it is timed separately - the S82 tail
+            // analysis found burst ticks carrying up to 90 ms of tail
+            // that no counter owned, and the retire pass is the prime
+            // suspect (O(sessions x pending blocks) with retain).
+            let t_retire = Instant::now();
             for out in self.sessions.values_mut() {
                 if out.unacked.is_empty() {
                     continue;
@@ -1064,6 +1070,8 @@ impl Game {
                     !per.blocks.is_empty()
                 });
             }
+            let p2 = &mut self.world.perf;
+            p2.retx_retire_us = t_retire.elapsed().as_micros() as u64;
         }
     }
 

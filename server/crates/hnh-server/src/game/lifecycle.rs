@@ -329,6 +329,8 @@ impl Game {
             retx_busy_sessions = self.world.perf.retx_busy_sessions,
             tail_us = self.world.perf.tail_us,
             startbat_fanout_us = self.world.perf.startbat_fanout_us,
+            retx_retire_us = self.world.perf.retx_retire_us,
+            sweeps_us = self.world.perf.sweeps_us,
             grid_gens = self.world.grids.gen_count,
             grid_hits = self.world.grids.hit_count,
             wmax_mvbat_fanout_us = self.world.perf.wmax_mvbat_fanout_us,

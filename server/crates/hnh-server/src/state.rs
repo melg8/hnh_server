@@ -1901,6 +1901,17 @@ pub struct Perf {
     /// mvbat_fanout_us accumulates BOTH batch fan-outs, so this field
     /// splits the movement-batch cost from the start/FX-batch cost.
     pub startbat_fanout_us: u64,
+    /// Retire pass share of the retransmit sweep (session 82): the
+    /// expired-block retention walk runs AFTER `retx_sweep_us` is
+    /// recorded, so it previously landed in the unattributed tail.
+    /// `retx_retire_us + sweeps_us + startbat_fanout_us + retx_sweep_us`
+    /// now account for the whole `tail_us`.
+    pub retx_retire_us: u64,
+    /// Last-tick rare-event sweeps + dirty-index clear share of the tick
+    /// tail: criminal expiry, leash break, tamed production, vis dirty
+    /// clear. Expected near zero in the load steady state; a spike here
+    /// names the sweep that owns it.
+    pub sweeps_us: u64,
 }
 
 impl World {

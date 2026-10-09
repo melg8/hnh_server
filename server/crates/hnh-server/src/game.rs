@@ -885,6 +885,8 @@ impl Game {
         // mvbat_fanout_us (which sums both batch fan-outs).
         self.world.perf.tail_us = 0;
         self.world.perf.startbat_fanout_us = 0;
+        self.world.perf.retx_retire_us = 0;
+        self.world.perf.sweeps_us = 0;
         let t9 = Instant::now();
         // OBJDATA retransmission sweep (session 64): every 3rd tick the
         // unacked table is walked in frame order and unconfirmed blocks
@@ -893,6 +895,7 @@ impl Game {
         if self.world.tick.is_multiple_of(3) {
             self.retransmit_unacked();
         }
+        let t_sw = Instant::now();
         // Criminal-flag expiry: a rare-event O(players) scan kept out of
         // the phase histogram (it is empty in the steady state).
         self.tick_criminal_expiry();
@@ -1077,6 +1080,7 @@ impl Game {
         // The dirty set served this tick's visibility pass; spawn marks
         // after this point (farming/station drops) dirty the next pass.
         self.world.gobs.vis.clear_dirty();
+        self.world.perf.sweeps_us = t_sw.elapsed().as_micros() as u64;
         // Session 44: fan out the tick's accumulated LINBEG starts and FX
         // overlays (chase, hit tails, click handling) through the packed
         // cell-indexed batch - ONE combined datagram per session per tick,
