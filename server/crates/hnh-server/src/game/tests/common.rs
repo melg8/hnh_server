@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 type ClusterHarness = (
     Game,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-    tokio::sync::mpsc::Receiver<Vec<u8>>,
+    tokio::sync::mpsc::Receiver<crate::state::BlockBytes>,
     tokio::sync::mpsc::UnboundedReceiver<(usize, crate::nodes::NodeMsg)>,
 );
 
@@ -20,7 +20,7 @@ pub(super) fn entered_game(
 ) -> (
     Game,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-    tokio::sync::mpsc::Receiver<Vec<u8>>,
+    tokio::sync::mpsc::Receiver<crate::state::BlockBytes>,
 ) {
     let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -32,7 +32,7 @@ pub(super) fn entered_game(
         std::env::temp_dir().join(format!("hnh-equip-test-{}.json", name)),
     );
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(512);
+    let (raw_tx, raw_rx) = tokio::sync::mpsc::channel::<crate::state::BlockBytes>(512);
     g.session_connected(1, "acct".to_owned(), tx, raw_tx);
     let wid = g
         .sessions
@@ -139,7 +139,7 @@ pub(super) fn clustered_game(name: &str, me: usize, nodes: usize) -> ClusterHarn
         player_abroad: crate::fxhash::FxHashMap::default(),
     });
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(4096);
+    let (raw_tx, raw_rx) = tokio::sync::mpsc::channel::<crate::state::BlockBytes>(4096);
     g.session_connected(1, "acct".to_owned(), tx, raw_tx);
     let wid = g
         .sessions
@@ -312,7 +312,7 @@ pub(super) fn bare_clustered(
 /// login path; cluster nodes may defer the entry on a CharQuery).
 pub(super) fn open_session_and_play(g: &mut Game, sid: SessionId, account: &str, chosen: &str) {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (raw_tx, _raw) = tokio::sync::mpsc::channel(512);
+    let (raw_tx, _raw) = tokio::sync::mpsc::channel::<crate::state::BlockBytes>(512);
     g.session_connected(sid, account.to_owned(), tx, raw_tx);
     let wid = g.sessions[&sid]
         .widgets
@@ -564,7 +564,7 @@ pub(super) fn second_player(
     mut mesh: Option<&mut tokio::sync::mpsc::UnboundedReceiver<(usize, crate::nodes::NodeMsg)>>,
 ) -> (usize, GobId) {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (raw_tx, _raw_rx) = tokio::sync::mpsc::channel(512);
+    let (raw_tx, _raw_rx) = tokio::sync::mpsc::channel::<crate::state::BlockBytes>(512);
     g.session_connected(2, "acct2".to_owned(), tx, raw_tx);
     let wid = g
         .sessions

@@ -718,24 +718,25 @@ impl Game {
     ) {
         const UNACKED_CAP: usize = 4;
         let now = Instant::now();
-        let per = out.unacked.entry(id).or_default();
-        per.insert(
+        let per = out
+            .unacked
+            .entry(id)
+            .or_insert_with(|| crate::state::PerGobPending::with_capacity(UNACKED_CAP));
+        // Sorted insert (tail push in practice - frames grow
+        // monotonically); the bytes move into the inline buffer, no
+        // heap node is allocated for the entry itself.
+        per.insert_sorted(crate::state::UnackedBlock {
             frame,
-            crate::state::UnackedBlock {
-                bytes: block,
-                last_sent: now,
-                born: now,
-                tries: 0,
-                critical,
-            },
-        );
-        while per.len() > UNACKED_CAP {
-            // BTreeMap: the first key IS the min frame - no O(n) scan
+            bytes: crate::state::BlockBytes::from_vec(block),
+            last_sent: now,
+            born: now,
+            tries: 0,
+            critical,
+        });
+        while per.blocks.len() > UNACKED_CAP {
+            // Ordered vector: blocks[0] IS the min frame - no O(n) scan
             // the HashMap version paid.
-            let Some(min) = per.keys().copied().next() else {
-                break;
-            };
-            per.remove(&min);
+            per.blocks.remove(0);
         }
     }
 

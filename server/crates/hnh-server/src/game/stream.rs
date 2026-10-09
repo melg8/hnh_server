@@ -316,7 +316,7 @@ impl Game {
             let pending_max = out
                 .unacked
                 .get(&id)
-                .and_then(|per| per.keys().next_back().copied())
+                .and_then(|per| per.last_frame())
                 .unwrap_or(0);
             let rem_frame = frame.max(acked_frame).max(pending_max).saturating_add(1);
             let mut m = MessageBuf::new();
@@ -813,7 +813,7 @@ impl Game {
                 // to twice the running average so batched acks never make
                 // in-flight blocks look lost.
                 if newly_confirmed {
-                    if let Some((_, block)) = per_gob.range(..=frame).next_back() {
+                    if let Some(block) = per_gob.at_or_below(frame) {
                         let sample = now
                             .duration_since(block.last_sent)
                             .as_millis()
@@ -825,8 +825,8 @@ impl Game {
                         };
                     }
                 }
-                per_gob.retain(|f, _| *f > frame);
-                if per_gob.is_empty() {
+                per_gob.retain_above(frame);
+                if per_gob.blocks.is_empty() {
                     out.unacked.remove(&id);
                     // The mark only gates pending blocks; a gob with
                     // nothing pending drops it (new frames are always
@@ -943,9 +943,9 @@ impl Game {
                 // Ordered walk: `blocked` latches while the lowest
                 // unconfirmed frame is still inside its delay window.
                 let mut blocked = false;
-                for (frame, block) in per.iter_mut() {
+                for block in per.blocks.iter_mut() {
                     pending_n += 1;
-                    if blocked || acked.is_some_and(|a| *frame <= a) {
+                    if blocked || acked.is_some_and(|a| block.frame <= a) {
                         continue;
                     }
                     if block.expired(now) {
@@ -992,6 +992,9 @@ impl Game {
                     // firing retries into a saturated channel measured
                     // 85% refusals and a 426 ms sweep at the 1000-bot
                     // scale.
+                    // Session 78: the inline buffer clones without
+                    // touching the allocator; the channel ships it
+                    // end to end (the receiver sends as_slice()).
                     if raw.try_send(block.bytes.clone()).is_ok() {
                         block.last_sent = now;
                         block.tries += 1;
@@ -1049,8 +1052,8 @@ impl Game {
                     continue;
                 }
                 out.unacked.retain(|_, per| {
-                    per.retain(|_, block| !block.expired(now));
-                    !per.is_empty()
+                    per.retain_unexpired(now);
+                    !per.blocks.is_empty()
                 });
             }
         }

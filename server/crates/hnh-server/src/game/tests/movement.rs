@@ -196,7 +196,7 @@ async fn batch_linbeg_fans_out_once_per_tick() {
     assert!(
         out.unacked
             .get(&pgob)
-            .is_some_and(|m| m.contains_key(&frame)),
+            .is_some_and(|m| m.contains_frame(frame)),
         "LINBEG frame {frame} recorded for OBJACK"
     );
 }
@@ -264,8 +264,8 @@ async fn batch_fx_patches_session_wire_id() {
     let rec = out
         .unacked
         .get(&pgob)
-        .and_then(|m| m.get(&frame))
-        .map(|b| &b.bytes);
+        .and_then(|m| m.block(frame))
+        .map(|b| b.bytes.as_slice());
     assert!(rec.is_some(), "FX block recorded for OBJACK");
     assert_eq!(
         rec.unwrap()[14..16],

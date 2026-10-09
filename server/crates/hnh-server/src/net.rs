@@ -39,7 +39,7 @@ pub enum NetCmd {
     Accept {
         username: String,
         game_tx: mpsc::UnboundedSender<Vec<u8>>,
-        raw_tx: mpsc::Sender<Vec<u8>>,
+        raw_tx: mpsc::Sender<crate::state::BlockBytes>,
         reply: oneshot::Sender<SessionId>,
     },
     Wdgmsg {
@@ -344,7 +344,7 @@ async fn finish_accept(
     // behind a starved sender task OOM-killed the process at the 1000-
     // session scale (measured: 3.8 GB RSS before the kill).
     let (gameq_tx, gameq_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>(128);
+    let (raw_tx, raw_rx) = mpsc::channel::<crate::state::BlockBytes>(128);
     let (reply_tx, reply_rx) = oneshot::channel();
     if game_tx
         .send(NetCmd::Accept {
@@ -397,7 +397,7 @@ struct Driver {
     rel_rx: RelReceiver,
     dgram_rx: mpsc::Receiver<Vec<u8>>,
     game_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    raw_rx: mpsc::Receiver<Vec<u8>>,
+    raw_rx: mpsc::Receiver<crate::state::BlockBytes>,
     cmd_tx: mpsc::UnboundedSender<NetCmd>,
     last_recv: Instant,
     closed: bool,
@@ -408,7 +408,7 @@ async fn run_session(
     sid: SessionId,
     dgram_rx: mpsc::Receiver<Vec<u8>>,
     game_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    raw_rx: mpsc::Receiver<Vec<u8>>,
+    raw_rx: mpsc::Receiver<crate::state::BlockBytes>,
     cmd_tx: mpsc::UnboundedSender<NetCmd>,
     sock: Arc<UdpSocket>,
 ) {
@@ -464,7 +464,7 @@ async fn run_session(
                     Some(p) => {
                         // Raw datagrams (MAPDATA / OBJDATA) bypass the
                         // reliable stream by protocol design.
-                        let _ = sock.send_to(&p, d.addr).await;
+                        let _ = sock.send_to(p.as_slice(), d.addr).await;
                     }
                     None => break,
                 }

@@ -244,7 +244,7 @@ async fn guest_pose_finalizer_fans_out_patched_layers() {
     }
     let rec = out.unacked.get(&gid);
     assert!(
-        rec.is_some() && !rec.unwrap().is_empty(),
+        rec.is_some() && !rec.unwrap().blocks.is_empty(),
         "the guest pose block must be retransmittable"
     );
 }

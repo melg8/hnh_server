@@ -21,7 +21,7 @@ impl Game {
         sid: SessionId,
         account: String,
         tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-        raw_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+        raw_tx: tokio::sync::mpsc::Sender<crate::state::BlockBytes>,
     ) {
         let mut out = SessionOut {
             sid,

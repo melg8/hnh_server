@@ -6,7 +6,7 @@
 //! from AGENTS.md: mem-/perf-/coll-). Networking tasks never touch these
 //! tables; they exchange encoded `RMSG` payloads through per-session queues.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
@@ -73,10 +73,85 @@ pub(crate) const RETRANS_SWEEP_BUDGET: usize = 8_192;
 /// cohort shares the ring (the global budget still caps the sum).
 pub(crate) const RETRANS_SESSION_SHARE_MIN: usize = 64;
 
-/// One recorded OBJDATA block awaiting its OBJACK.
+/// Inline byte budget for ONE recorded OBJDATA block (session 78).
+/// The entry-burst blocks are small: an OD_REM is ~13 bytes, a static
+/// spawn ~25, an animal spawn ~30, a player spawn with a full doll
+/// rides ~90. Oversize blocks (long names + heavy equipment) spill to
+/// the heap and pay the old clone cost - the profile showed none of
+/// them in the pending table's hot path.
+pub(crate) const UNACKED_INLINE: usize = 144;
+
+/// OBJDATA block bytes that keep the retransmit hot path out of the
+/// allocator (session 78). Every resend used to deep-clone a `Vec<u8>`
+/// (malloc + copy + free on the tick thread); the inline variant turns
+/// that into a single memcpy, and the raw UDP channel now ships this
+/// enum end to end so the copy is the ONLY wire-side work left.
 #[derive(Debug)]
+pub enum BlockBytes {
+    Inline { len: u16, buf: [u8; UNACKED_INLINE] },
+    Heap(Vec<u8>),
+}
+
+impl BlockBytes {
+    /// Take ownership of an encoded datagram. Small payloads move into
+    /// the inline buffer (the source allocation is dropped), large ones
+    /// keep their heap buffer by value.
+    pub fn from_vec(v: Vec<u8>) -> Self {
+        if v.len() <= UNACKED_INLINE {
+            let mut buf = [0u8; UNACKED_INLINE];
+            buf[..v.len()].copy_from_slice(&v);
+            BlockBytes::Inline {
+                len: v.len() as u16,
+                buf,
+            }
+        } else {
+            BlockBytes::Heap(v)
+        }
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            BlockBytes::Inline { len, buf } => &buf[..*len as usize],
+            BlockBytes::Heap(v) => v,
+        }
+    }
+}
+
+/// Block bytes read like a byte slice (`msg.len()`, `msg[off]`,
+/// `msg.first()`, `msg.windows(..)`) - the UDP sender task and the
+/// test harness walk the payload the same way they walked the old
+/// `Vec<u8>`.
+impl std::ops::Deref for BlockBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl Clone for BlockBytes {
+    fn clone(&self) -> Self {
+        match self {
+            BlockBytes::Inline { len, buf } => BlockBytes::Inline {
+                len: *len,
+                buf: {
+                    let mut copy = [0u8; UNACKED_INLINE];
+                    copy[..*len as usize].copy_from_slice(&buf[..*len as usize]);
+                    copy
+                },
+            },
+            BlockBytes::Heap(v) => BlockBytes::Heap(v.clone()),
+        }
+    }
+}
+
+/// One recorded OBJDATA block awaiting its OBJACK.
+#[derive(Debug, Clone)]
 pub struct UnackedBlock {
-    pub bytes: Vec<u8>,
+    /// Wire frame the block carries. Was the BTreeMap key before
+    /// session 78; the flat per-gob vector orders blocks by it.
+    pub frame: u32,
+    pub bytes: BlockBytes,
     /// Last transmit instant (initial send or a retransmission); the
     /// sweep compares its age against the schedule delay.
     pub last_sent: Instant,
@@ -89,6 +164,82 @@ pub struct UnackedBlock {
     /// Critical-loss block: the client cannot recover it any other way
     /// (spawn, retract, full re-render).
     pub critical: bool,
+}
+
+/// Pending OBJDATA blocks of ONE gob, ordered by frame ascending - the
+/// order the original sends had on the wire (session 78). Replaces
+/// `BTreeMap<u32, UnackedBlock>`: with the per-gob cap of 4 entries the
+/// tree paid a heap node per block and a pointer chase per walk step;
+/// the flat vector keeps the identical ordered walk over contiguous
+/// memory and allocates ONCE per gob (capacity reserved for the cap).
+/// Frames grow monotonically, so inserts are tail pushes in practice.
+#[derive(Debug, Default)]
+pub struct PerGobPending {
+    pub blocks: Vec<UnackedBlock>,
+}
+
+impl PerGobPending {
+    pub(super) fn with_capacity(cap: usize) -> Self {
+        PerGobPending {
+            blocks: Vec::with_capacity(cap),
+        }
+    }
+
+    /// Sorted insert; the frame sequence grows monotonically per gob,
+    /// so the common case is a push at the tail. An equal frame
+    /// REPLACES the stored block - the BTreeMap insert semantics the
+    /// FX-overlay path relies on (an overlay block carries the gob's
+    /// CURRENT frame and may re-record it).
+    pub(super) fn insert_sorted(&mut self, block: UnackedBlock) {
+        let pos = self.blocks.partition_point(|b| b.frame < block.frame);
+        if pos < self.blocks.len() && self.blocks[pos].frame == block.frame {
+            self.blocks[pos] = block;
+        } else if pos == self.blocks.len() {
+            self.blocks.push(block);
+        } else {
+            self.blocks.insert(pos, block);
+        }
+    }
+
+    /// Lowest pending frame (the old `keys().next()`); test-only, the
+    /// production paths read `blocks[0]` directly.
+    #[cfg(test)]
+    pub(super) fn first_frame(&self) -> Option<u32> {
+        self.blocks.first().map(|b| b.frame)
+    }
+
+    /// Highest pending frame (the old `keys().next_back()`).
+    pub(super) fn last_frame(&self) -> Option<u32> {
+        self.blocks.last().map(|b| b.frame)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_frame(&self, frame: u32) -> bool {
+        self.blocks.iter().any(|b| b.frame == frame)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn block(&self, frame: u32) -> Option<&UnackedBlock> {
+        self.blocks.iter().find(|b| b.frame == frame)
+    }
+
+    /// The highest pending frame `<= acked` (the ack-lag sample reads
+    /// its `last_sent`; the old `range(..=frame).next_back()`).
+    pub(super) fn at_or_below(&self, frame: u32) -> Option<&UnackedBlock> {
+        let above = self.blocks.partition_point(|b| b.frame <= frame);
+        above.checked_sub(1).map(|i| &self.blocks[i])
+    }
+
+    /// Drop every block the ack covers (the old `retain(|f, _| f >
+    /// frame)`); keeps its allocation for the next spawn wave.
+    pub(super) fn retain_above(&mut self, frame: u32) {
+        self.blocks.retain(|b| b.frame > frame);
+    }
+
+    /// Drop every block past its retransmit schedule (the retire pass).
+    pub(super) fn retain_unexpired(&mut self, now: Instant) {
+        self.blocks.retain(|b| !b.expired(now));
+    }
 }
 
 impl UnackedBlock {
@@ -1174,8 +1325,11 @@ pub struct SessionOut {
     pub account: String,
     pub queue: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     /// Bounded unreliable datagram fan-out (MAPDATA / OBJDATA); send_raw
-    /// drops on a full queue exactly like a lost UDP datagram.
-    pub raw: tokio::sync::mpsc::Sender<Vec<u8>>,
+    /// drops on a full queue exactly like a lost UDP datagram. Session
+    /// 78: ships `BlockBytes` so retransmit resends enqueue the inline
+    /// buffer with no allocation on the tick thread; the receiver sends
+    /// `as_slice()` to the socket.
+    pub raw: tokio::sync::mpsc::Sender<crate::state::BlockBytes>,
     pub player_gob: Option<GobId>,
     /// Gobs currently streamed to this client. Keys are server-allocated
     /// gob ids -> fxhash id hasher (hot per-candidate membership checks).
@@ -1201,12 +1355,15 @@ pub struct SessionOut {
     /// resent 73K not-yet-lost blocks per pass because the schedule
     /// expired before the ack landed. 0 = no sample yet (legacy delays).
     pub ack_lag_ema_ms: u32,
-    /// Unacked OBJDATA blocks per gob, ordered by frame (BTreeMap: the
+    /// Unacked OBJDATA blocks per gob, ordered by frame ascending (the
     /// retransmit sweep walks frames ASCENDING so resent datagrams keep
     /// the wire order a spawn -> move -> retract sequence had on the
     /// socket; a resent stale frame must never overtake a newer one).
-    /// Capped per gob (see `record_unacked`).
-    pub unacked: crate::fxhash::FxHashMap<GobId, BTreeMap<u32, UnackedBlock>>,
+    /// Session 78: flat `Vec` per gob (was `BTreeMap` - a heap node per
+    /// block with the per-gob cap of 4) over inline `BlockBytes` (was
+    /// `Vec<u8>` deep-cloned on every resend). Capped per gob (see
+    /// `record_unacked`).
+    pub unacked: crate::fxhash::FxHashMap<GobId, PerGobPending>,
     /// Retransmit backpressure (session 65): while a raw-queue refusal is
     /// recent, the sweep skips this session entirely - retries never fire
     /// into a saturated channel and the walk spends its budget elsewhere.
@@ -1350,7 +1507,7 @@ impl SessionOut {
     /// the newest datagram matches the protocol's UDP semantics (the client
     /// re-requests lost grids; LINSTEP progress self-heals next tick).
     pub fn send_raw(&self, datagram: Vec<u8>) {
-        let _ = self.raw.try_send(datagram);
+        let _ = self.raw.try_send(BlockBytes::from_vec(datagram));
     }
 }
 
@@ -1936,6 +2093,114 @@ pub fn path_clear(world: &mut World, sx: i32, sy: i32, tx: i32, ty: i32) -> bool
         }
     }
     true
+}
+
+#[cfg(test)]
+mod unacked_tests {
+    use super::*;
+
+    fn block(frame: u32, len: usize) -> UnackedBlock {
+        let v = vec![0xABu8; len];
+        UnackedBlock {
+            frame,
+            bytes: BlockBytes::from_vec(v),
+            last_sent: Instant::now(),
+            born: Instant::now(),
+            tries: 0,
+            critical: false,
+        }
+    }
+
+    /// Session 78: small blocks stay out of the heap, oversize ones
+    /// spill, clones keep the payload, and Deref reads like a slice.
+    #[test]
+    fn block_bytes_inline_spill_and_clone() {
+        assert!(matches!(
+            BlockBytes::from_vec(vec![1u8; UNACKED_INLINE]),
+            BlockBytes::Inline { .. }
+        ));
+        assert!(matches!(
+            BlockBytes::from_vec(vec![1u8; UNACKED_INLINE + 1]),
+            BlockBytes::Heap(_)
+        ));
+        let original = BlockBytes::from_vec(vec![7u8; 40]);
+        let copy = original.clone();
+        assert_eq!(copy.as_slice(), &[7u8; 40][..]);
+        assert_eq!(copy.len(), 40, "Deref Target = [u8]");
+    }
+
+    /// The flat per-gob table keeps the BTreeMap contract: ascending
+    /// order, equal-frame replace (the FX-overlay re-record), min/max
+    /// accessors, the ack-coverage retain and the ack-lag lookup.
+    #[test]
+    fn per_gob_pending_keeps_the_ordered_contract() {
+        let mut per = PerGobPending::with_capacity(4);
+        for f in [30u32, 10, 20] {
+            per.insert_sorted(block(f, 12));
+        }
+        assert_eq!(
+            per.blocks.iter().map(|b| b.frame).collect::<Vec<_>>(),
+            vec![10, 20, 30],
+            "inserts land sorted by frame"
+        );
+        assert_eq!(per.first_frame(), Some(10));
+        assert_eq!(per.last_frame(), Some(30));
+
+        // Equal frame replaces the stored block (BTreeMap::insert did).
+        per.insert_sorted(block(20, 24));
+        assert_eq!(
+            per.blocks.iter().map(|b| b.frame).collect::<Vec<_>>(),
+            vec![10, 20, 30]
+        );
+        assert_eq!(per.block(20).map(|b| b.bytes.as_slice().len()), Some(24));
+
+        // The ack-lag sample: the highest frame at or below the ack.
+        assert_eq!(per.at_or_below(25).map(|b| b.frame), Some(20));
+        assert_eq!(per.at_or_below(10).map(|b| b.frame), Some(10));
+        assert!(per.at_or_below(9).is_none());
+
+        per.retain_above(15);
+        assert_eq!(
+            per.blocks.iter().map(|b| b.frame).collect::<Vec<_>>(),
+            vec![20, 30]
+        );
+        assert!(per.contains_frame(20));
+        assert!(!per.contains_frame(10));
+    }
+
+    /// The cap trim drops the LOWEST frame (the BTreeMap keys().next()
+    /// removal) and the retire pass drops expired blocks in place.
+    #[test]
+    fn per_gob_pending_cap_and_retire() {
+        let mut per = PerGobPending::with_capacity(4);
+        for f in [40u32, 10, 30, 20] {
+            per.insert_sorted(block(f, 8));
+            while per.blocks.len() > 4 {
+                per.blocks.remove(0);
+            }
+        }
+        assert_eq!(per.blocks.len(), 4);
+        assert_eq!(per.first_frame(), Some(10));
+        per.insert_sorted(block(50, 8));
+        assert_eq!(
+            per.blocks.len(),
+            5,
+            "trim is the caller's job (record_unacked)"
+        );
+        per.blocks.remove(0);
+        assert_eq!(per.first_frame(), Some(20), "the min frame is blocks[0]");
+
+        // Retire: a block born 2x the age ceiling ago must drop, a
+        // fresh one stays.
+        let stale = block(60, 8);
+        per.insert_sorted(UnackedBlock {
+            born: Instant::now() - Duration::from_millis(RETRANS_MAX_AGE_MS + 1_000),
+            ..stale
+        });
+        per.retain_unexpired(Instant::now());
+        assert!(!per.contains_frame(60), "past the age ceiling: retired");
+        assert!(per.contains_frame(50), "fresh block stays");
+    }
 }
 
 #[cfg(test)]
