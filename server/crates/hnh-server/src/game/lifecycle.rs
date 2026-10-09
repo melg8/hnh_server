@@ -327,6 +327,8 @@ impl Game {
             retx_resent = self.world.perf.retx_resent,
             retx_queue_full = self.world.perf.retx_queue_full,
             retx_busy_sessions = self.world.perf.retx_busy_sessions,
+            tail_us = self.world.perf.tail_us,
+            startbat_fanout_us = self.world.perf.startbat_fanout_us,
             grid_gens = self.world.grids.gen_count,
             grid_hits = self.world.grids.hit_count,
             wmax_mvbat_fanout_us = self.world.perf.wmax_mvbat_fanout_us,

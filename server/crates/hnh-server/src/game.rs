@@ -876,6 +876,16 @@ impl Game {
         let t8 = Instant::now();
         self.tick_guests();
         phase_us[8] = t8.elapsed().as_micros();
+        // Tail attribution (session 82): everything below runs OUTSIDE
+        // the nine phase timers - the retransmit sweep, the rare-event
+        // sweeps, the dirty-index clear, and the tick-end start/FX batch
+        // fan-out. The S82 baseline measured 45-70 ms of unattributed
+        // tick time on burst ticks; `tail_us` names that gap, and
+        // `startbat_fanout_us` splits the start/FX fan-out out of
+        // mvbat_fanout_us (which sums both batch fan-outs).
+        self.world.perf.tail_us = 0;
+        self.world.perf.startbat_fanout_us = 0;
+        let t9 = Instant::now();
         // OBJDATA retransmission sweep (session 64): every 3rd tick the
         // unacked table is walked in frame order and unconfirmed blocks
         // past their schedule delay are resent (stream::retransmit_unacked).
@@ -1079,13 +1089,16 @@ impl Game {
         if !self.start_scratch.is_empty() {
             self.world.perf.start_blocks = self.start_scratch.len() as u64;
             let mut batch = std::mem::take(&mut self.start_scratch);
+            let t_sf = Instant::now();
             self.broadcast_batch(&mut batch);
+            self.world.perf.startbat_fanout_us = t_sf.elapsed().as_micros() as u64;
             batch.clear();
             self.start_scratch = batch;
         }
         let perf = &mut self.world.perf;
         perf.active_sessions = self.sessions.len();
         perf.phase_us = phase_us;
+        perf.tail_us = t9.elapsed().as_micros() as u64;
         // Exponential moving average keeps a stable steady-state number.
         perf.mean_tick_us = if perf.mean_tick_us == 0 {
             perf.last_tick_us as u64

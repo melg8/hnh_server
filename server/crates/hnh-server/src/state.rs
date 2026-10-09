@@ -1888,6 +1888,19 @@ pub struct Perf {
     /// Sessions whose unacked table was non-empty during the last sweep
     /// (the real walk depth; total sessions is a misleading denominator).
     pub retx_busy_sessions: u64,
+    /// Last-tick tail attribution (session 82): wall time of everything
+    /// AFTER the nine phase timers - the retransmit sweep, the criminal/
+    /// leash/production sweeps, the dirty-index clear, the tick-end
+    /// start/FX batch fan-out, and the perf bookkeeping. Closes the
+    /// attribution gap between sum(phase_us) + mvbat_fanout_us +
+    /// retx_sweep_us and last_tick_us; the S82 baseline measured that
+    /// gap at 45-70 ms on burst ticks (wmax 105-181 ms over budget).
+    pub tail_us: u64,
+    /// Last-tick fan-out share of the tick-end start/FX batch alone
+    /// (`broadcast_batch` called from `tick`, not from `tick_movement`).
+    /// mvbat_fanout_us accumulates BOTH batch fan-outs, so this field
+    /// splits the movement-batch cost from the start/FX-batch cost.
+    pub startbat_fanout_us: u64,
 }
 
 impl World {
