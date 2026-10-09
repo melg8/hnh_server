@@ -4400,3 +4400,377 @@ NEXT (handoff):
 - Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
   (no display host), multi-machine cluster profile, CI push when the
   token gets the workflow scope.
+
+---
+## 2026-10-08 - Session 65 (type 5: performance)
+
+SESSION TYPE ROTATION LOG: 61=2, 62=3, 63=4, 64=1, 65=5. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the S64 handoff named the one unverified perf claim - "the
+retransmit sweep is O(pending) per ~300 ms; expect near-zero in the
+steady state - verify, do not assume". First step was honesty
+instrumentation: the sweep had no perf attribution at all, only a
+debug! line that fires on resend work.
+
+MEASURED (1000 bots, saturated world, release build, `--perf`):
+
+- `retx_pending` 1 616 372 - NOT near-zero. `retx_sweep_us` 426 860 -
+  the sweep alone cost more than four ticks of budget.
+- `retx_queue_full` 1 382 303 of ~1.6M attempts (85% refusals);
+  `mean_tick_us` 226 529 - the tick budget was broken 2.2x over.
+- Root cause chain: the load-bot cohort never echoed MSG_OBJACK
+  (grep bots.rs: zero hits), so every spawn/finalizer block lived in
+  its session's unacked table until the try-count retirement; BUT the
+  S64 no-burn rule on queue-full refusals meant a saturated session's
+  blocks never retired at all (positive feedback: more pending ->
+  bigger walk -> more refusals -> still no retirement). The S64
+  "near-zero" assumption held for acking clients only.
+
+FIX (one change set, measured first, re-measured after):
+
+- Perf attribution: `retx_sweep_us / retx_pending / retx_resent /
+  retx_queue_full / retx_busy_sessions` per sweep in the perf report -
+  the sweep's cost is now a first-class number, not an inference.
+- Hard age ceiling `RETRANS_MAX_AGE_MS` (10 s from first send): every
+  block retires deterministically regardless of send attempts. A
+  throttled or dead session drains its table; the sweep walk is bounded
+  by the recent past.
+- Per-session backpressure throttle: after a raw-queue-full refusal the
+  session's retransmit pass is skipped for 1 s (`retx_throttle_until`);
+  retries stop firing into a saturated channel, and the walk skips the
+  session wholesale (`busy_sessions` count shows the real depth).
+- Expired blocks latch the gob's in-order walk (`blocked = true`), so
+  no later frame of that gob escapes through the retirement hole.
+- Load bots mirror the real client's SWorker: `parse_objdata` tracks
+  the max decoded frame per gob and the bot echoes one batched
+  MSG_OBJACK datagram every 200 ms (the wire shape the sweep is keyed
+  on). The load cohort now exercises the same retransmission contract
+  the wire harness does - which is what a 1k-player load test MEANS.
+
+POST-FIX (same 1000-bot scenario):
+
+- `retx_pending` 10 010-47 782 (~30x down); `retx_sweep_us`
+  3 355-41 063 (~10-100x down); `retx_queue_full` 98-12 446 (~200x
+  down, and the throttle keeps refusals from compounding).
+- `mean_tick_us` 30 808-86 092 - back INSIDE the 100 ms budget
+  (window max spikes 62-283 ms are the bot-entry spawn burst, already
+  known and windowed by `wmax_tick_us`).
+- `WORLD ENTRY: OK` python probe green against the new binary.
+
+VERIFIED (fresh runs): fmt --check clean; clippy -D warnings clean;
+cargo test --workspace 300 green (11 proto + 274 unit + 6 wire +
+9 world, gathering scenario #[ignore]d as documented). The
+`lost_static_spawn_wave_is_retransmitted` probe still passes - the age
+ceiling (10 s) sits an order above the test's 1.2 s loss window, and
+the throttle cannot fire on a single session with an empty queue.
+
+NOT DONE (deliberate): `Arc<Vec<u8>>` for block bytes would remove the
+deep clone on resend - deferred until the retx_* fields show the clone
+matters (post-fix resends are ~1-20k per sweep, not 114k; verify first,
+do not optimize on vibes).
+
+NEXT (handoff):
+- Type-3 candidates: metal chain groundwork (ore + smelter), flower
+  pick verbs, per-animal breed stat rows.
+- Type-5 candidates: mvbat_fanout_us remains the top single phase at
+  1000 sessions (14-38 ms in the post-fix run) - profile the
+  per-session fan-out walk; entry-burst wmax (283 ms) attribution.
+- Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
+  (no display host), multi-machine cluster profile, CI push when the
+  token gets the workflow scope.
+
+---
+## 2026-10-08 - Session 66 (type 3: new functionality)
+
+SESSION TYPE ROTATION LOG: 62=3, 63=4, 64=1, 65=5, 66=3. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the S64/S65 handoffs named "metal chain groundwork (ore +
+smelter)" as the first type-3 candidate. The smelter had stood as a
+plain structure since session 15 ("until the metal chain exists"), and
+no metal item could enter the economy. TWO implementation waves landed
+under this session number (the second rebased on the first's push).
+
+WAVE 1 (d91dcb0): ore deposits + a working smelter.
+
+- ORE DEPOSITS: MOUNTAIN/CAVE tiles with a walkable 4-neighbor spawn
+  gfx/terobjs/mining/heap ore deposits (3% roll), each carrying
+  Copper/Tin/Iron (OreKind::from_roll, 5:3:2 per-tile mix), ORE_PICKS
+  = 4 picks of the ore item (display label), ORE_PICK_LP per pick.
+  Deposits are pure seed-derived statics; hnh-world gained find_tile +
+  GridStore::terrain_at and pins the dev-seed rocky belt within ~26
+  tiles of the spawn area.
+- SMELTER STATION: StationSpec.kind: StationKind (Oven/Smelter)
+  dispatches itemact input matching, refusals and the job output;
+  tick_stations drops whatever the kind rolls (the hardcoded meat drop
+  is gone). craft::SMELT_MAP melts ore labels: copper nugget ->
+  bar-copper, tin nugget -> bar-tin, iron ore -> bar-castiron. Branch
+  fuel, one ore per 30-tick job (server policy; legacy ~55 min per
+  25-ore load), station quality formula on the output.
+  DROP_WORLD_ALIASES renders pack-missing tin/cast-iron world shapes
+  through sibling metals. Station wording neutralized on ALL paths
+  (local, relay-ack, menu) to "The station ...".
+
+WAVE 2 (this session's commit): the refinement tier.
+
+- The SHIPPED paginae come alive: bloom2wrought (ad "wroughtiron")
+  refines bar-castiron x1 -> bar-wroughtiron x1 (the finery-forge leg
+  stand-in, tanhide pattern), shammer makes the smithy's hammer
+  (bar-wroughtiron + branch -> hammer-smithys), the first metal tool.
+  Unit counts are server policy; both paginae and both items ship in
+  the pack.
+- Unit pins: wrought_iron_and_hammer_recipes_are_wired (pack-aware),
+  metal_refinement_chain_crafts_bar_and_hammer (craft_once end to
+  end: q40 cast iron -> 25 wrought -> 13 hammer through the str
+  softcap).
+- Wire probe fix: test_smelt.py missed the second pickup hop of the
+  gathering shape (click the deposit -> the ORE DROP spawns -> click
+  the drop -> the inventory stack) and matched tin's aliased world
+  shape wrong; both fixed (ORE_WORLD mapping + nearest-few deposit
+  approach retries). SMELT: OK green (copper leg measured; the iron
+  leg is probabilistic - 2/10 deposits are iron).
+
+VERIFIED (fresh runs): cargo fmt --all -- --check clean; clippy
+--all-targets -D warnings clean; cargo test --workspace 306 green
+(11 proto + 279 unit + 6 wire + 10 world, 1 gathering #[ignore]).
+oven regression STATION FLOW: OK and WORLD ENTRY: OK re-proved on the
+wave-1 binary; SMELT: OK on the wave-2 binary.
+
+PROCESS NOTE: this session initially rebuilt the whole metal chain
+independently (ore boulders + sdt flag + its own StationKind + probe)
+without noticing the parallel push until the non-fast-forward reject;
+the local duplicate work was discarded at reset and re-based as the
+smaller refinement wave. Lesson: re-check origin/master right before
+pushing ANY session-shaped work - the repo has parallel writers.
+
+WAVE 3 (a second rebased writer under the same session number): the
+Alloying Crucible completes the bronze leg:
+
+- StationKind::Alloyer + the BUILDABLES entry (gfx/terobjs/alloyer,
+  stone x4 + branch x4 demand, branch fuel, 30-tick jobs).
+- StationState.aux: the crucible splits the bronze charge across the
+  input (Bar of Copper) and aux (Bar of Tin) slots; the Light act is
+  refused until BOTH slots are loaded. The local menu path, the relay
+  light/item paths, and the StationView readiness snapshot (has_input
+  keys on both slots for the crucible) agree.
+- Output: ALLOY_OUT_COUNT = 2 Bar of Bronze per charge. The legacy
+  Ring of Brodgar charge (2 copper + 1 tin -> 3 bronze) is a 1:1
+  metal-to-bronze MASS balance; the two-slot policy realizes the same
+  balance as 1+1 -> 2 (craft.rs documents the derivation).
+- Persistence: the additive SavedStructure.aux field round-trips the
+  tin charge; the restore re-validates the label against
+  ALLOY_INPUT_TIN.
+- The trough build test resolves its spec via buildable_by_ad now
+  (the alloyer insertion shifted the positional registry indices -
+  the second latent-index bug the positional style caused).
+- Verified: fmt + clippy -D warnings clean; cargo test --workspace
+  307 green (11 proto + 280 unit + 6 wire + 10 world).
+
+NEXT (handoff):
+- Bronze live probe (first candidate): test_smelt.py needs a
+  crucible phase - the starter kit (stone x6 + branch x10) covers
+  the smelter OR the crucible, so the probe must boulder-pick stone
+  (BOULDER_STONES x5) before building the second station, then load
+  copper+tin and catch the TWO bronze drops.
+- Type-3 candidates: kiln + brick chain (restores the legacy
+  smelter/oven demands), anvil + smithy's-hammer tool-gated recipes,
+  flower pick verbs, per-animal breed stat rows.
+- Type-5 candidates: mvbat_fanout_us remains the top single phase at
+  1000 sessions; entry-burst wmax (283 ms) attribution.
+- Carried: test_smelt.py walk phase can exceed 2 min on unlucky
+  pathing (bounded retry, runs green on retry); GL e2e + Windows
+  smoke (no display host); multi-machine cluster profile; CI push
+  when the token gets the workflow scope.
+
+COMMITS: wave 1 = d91dcb0 (parallel writer); wave 2 = the refinement
+tier + probe fix + docs + handoff (the second writer); wave 3 = the
+alloyer + fmt (a third writer under the same session number).
+
+
+---
+## 2026-10-08 - Session 65 (type 5: performance)
+
+SESSION TYPE ROTATION LOG: 61=2, 62=3, 63=4, 64=1, 65=5. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the S64 handoff named the one unverified perf claim - "the
+retransmit sweep is O(pending) per ~300 ms; expect near-zero in the
+steady state - verify, do not assume". First step was honesty
+instrumentation: the sweep had no perf attribution at all, only a
+debug! line that fires on resend work.
+
+MEASURED (1000 bots, saturated world, release build, `--perf`):
+
+- `retx_pending` 1 616 372 - NOT near-zero. `retx_sweep_us` 426 860 -
+  the sweep alone cost more than four ticks of budget.
+- `retx_queue_full` 1 382 303 of ~1.6M attempts (85% refusals);
+  `mean_tick_us` 226 529 - the tick budget was broken 2.2x over.
+- Root cause chain: the load-bot cohort never echoed MSG_OBJACK
+  (grep bots.rs: zero hits), so every spawn/finalizer block lived in
+  its session's unacked table until the try-count retirement; BUT the
+  S64 no-burn rule on queue-full refusals meant a saturated session's
+  blocks never retired at all (positive feedback: more pending ->
+  bigger walk -> more refusals -> still no retirement). The S64
+  "near-zero" assumption held for acking clients only.
+
+FIX (one change set, measured first, re-measured after):
+
+- Perf attribution: `retx_sweep_us / retx_pending / retx_resent /
+  retx_queue_full / retx_busy_sessions` per sweep in the perf report -
+  the sweep's cost is now a first-class number, not an inference.
+- Hard age ceiling `RETRANS_MAX_AGE_MS` (10 s from first send): every
+  block retires deterministically regardless of send attempts. A
+  throttled or dead session drains its table; the sweep walk is bounded
+  by the recent past.
+- Per-session backpressure throttle: after a raw-queue-full refusal the
+  session's retransmit pass is skipped for 1 s (`retx_throttle_until`);
+  retries stop firing into a saturated channel, and the walk skips the
+  session wholesale (`busy_sessions` count shows the real depth).
+- Expired blocks latch the gob's in-order walk (`blocked = true`), so
+  no later frame of that gob escapes through the retirement hole.
+- Load bots mirror the real client's SWorker: `parse_objdata` tracks
+  the max decoded frame per gob and the bot echoes one batched
+  MSG_OBJACK datagram every 200 ms (the wire shape the sweep is keyed
+  on). The load cohort now exercises the same retransmission contract
+  the wire harness does - which is what a 1k-player load test MEANS.
+
+POST-FIX (same 1000-bot scenario):
+
+- `retx_pending` 10 010-47 782 (~30x down); `retx_sweep_us`
+  3 355-41 063 (~10-100x down); `retx_queue_full` 98-12 446 (~200x
+  down, and the throttle keeps refusals from compounding).
+- `mean_tick_us` 30 808-86 092 - back INSIDE the 100 ms budget
+  (window max spikes 62-283 ms are the bot-entry spawn burst, already
+  known and windowed by `wmax_tick_us`).
+- `WORLD ENTRY: OK` python probe green against the new binary.
+
+VERIFIED (fresh runs): fmt --check clean; clippy -D warnings clean;
+cargo test --workspace 300 green (11 proto + 274 unit + 6 wire +
+9 world, gathering scenario #[ignore]d as documented). The
+`lost_static_spawn_wave_is_retransmitted` probe still passes - the age
+ceiling (10 s) sits an order above the test's 1.2 s loss window, and
+the throttle cannot fire on a single session with an empty queue.
+
+NOT DONE (deliberate): `Arc<Vec<u8>>` for block bytes would remove the
+deep clone on resend - deferred until the retx_* fields show the clone
+matters (post-fix resends are ~1-20k per sweep, not 114k; verify first,
+do not optimize on vibes).
+
+NEXT (handoff):
+- Type-3 candidates: metal chain groundwork (ore + smelter), flower
+  pick verbs, per-animal breed stat rows.
+- Type-5 candidates: mvbat_fanout_us remains the top single phase at
+  1000 sessions (14-38 ms in the post-fix run) - profile the
+  per-session fan-out walk; entry-burst wmax (283 ms) attribution.
+- Carried: cross-node lift/transfer relays, GL e2e + Windows smoke
+  (no display host), multi-machine cluster profile, CI push when the
+  token gets the workflow scope.
+
+---
+## 2026-10-08 - Session 66 (type 3: new functionality)
+
+SESSION TYPE ROTATION LOG: 62=3, 63=4, 64=1, 65=5, 66=3. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the S64/S65 handoffs named "metal chain groundwork (ore +
+smelter)" as the first type-3 candidate. The smelter had stood as a
+plain structure since session 15 ("until the metal chain exists"), and
+no metal item could enter the economy. TWO implementation waves landed
+under this session number (the second rebased on the first's push).
+
+WAVE 1 (d91dcb0): ore deposits + a working smelter.
+
+- ORE DEPOSITS: MOUNTAIN/CAVE tiles with a walkable 4-neighbor spawn
+  gfx/terobjs/mining/heap ore deposits (3% roll), each carrying
+  Copper/Tin/Iron (OreKind::from_roll, 5:3:2 per-tile mix), ORE_PICKS
+  = 4 picks of the ore item (display label), ORE_PICK_LP per pick.
+  Deposits are pure seed-derived statics; hnh-world gained find_tile +
+  GridStore::terrain_at and pins the dev-seed rocky belt within ~26
+  tiles of the spawn area.
+- SMELTER STATION: StationSpec.kind: StationKind (Oven/Smelter)
+  dispatches itemact input matching, refusals and the job output;
+  tick_stations drops whatever the kind rolls (the hardcoded meat drop
+  is gone). craft::SMELT_MAP melts ore labels: copper nugget ->
+  bar-copper, tin nugget -> bar-tin, iron ore -> bar-castiron. Branch
+  fuel, one ore per 30-tick job (server policy; legacy ~55 min per
+  25-ore load), station quality formula on the output.
+  DROP_WORLD_ALIASES renders pack-missing tin/cast-iron world shapes
+  through sibling metals. Station wording neutralized on ALL paths
+  (local, relay-ack, menu) to "The station ...".
+
+WAVE 2 (this session's commit): the refinement tier.
+
+- The SHIPPED paginae come alive: bloom2wrought (ad "wroughtiron")
+  refines bar-castiron x1 -> bar-wroughtiron x1 (the finery-forge leg
+  stand-in, tanhide pattern), shammer makes the smithy's hammer
+  (bar-wroughtiron + branch -> hammer-smithys), the first metal tool.
+  Unit counts are server policy; both paginae and both items ship in
+  the pack.
+- Unit pins: wrought_iron_and_hammer_recipes_are_wired (pack-aware),
+  metal_refinement_chain_crafts_bar_and_hammer (craft_once end to
+  end: q40 cast iron -> 25 wrought -> 13 hammer through the str
+  softcap).
+- Wire probe fix: test_smelt.py missed the second pickup hop of the
+  gathering shape (click the deposit -> the ORE DROP spawns -> click
+  the drop -> the inventory stack) and matched tin's aliased world
+  shape wrong; both fixed (ORE_WORLD mapping + nearest-few deposit
+  approach retries). SMELT: OK green (copper leg measured; the iron
+  leg is probabilistic - 2/10 deposits are iron).
+
+VERIFIED (fresh runs): cargo fmt --all -- --check clean; clippy
+--all-targets -D warnings clean; cargo test --workspace 306 green
+(11 proto + 279 unit + 6 wire + 10 world, 1 gathering #[ignore]).
+oven regression STATION FLOW: OK and WORLD ENTRY: OK re-proved on the
+wave-1 binary; SMELT: OK on the wave-2 binary.
+
+PROCESS NOTE: this session initially rebuilt the whole metal chain
+independently (ore boulders + sdt flag + its own StationKind + probe)
+without noticing the parallel push until the non-fast-forward reject;
+the local duplicate work was discarded at reset and re-based as the
+smaller refinement wave. Lesson: re-check origin/master right before
+pushing ANY session-shaped work - the repo has parallel writers.
+
+WAVE 3 (a second rebased writer under the same session number): the
+Alloying Crucible completes the bronze leg:
+
+- StationKind::Alloyer + the BUILDABLES entry (gfx/terobjs/alloyer,
+  stone x4 + branch x4 demand, branch fuel, 30-tick jobs).
+- StationState.aux: the crucible splits the bronze charge across the
+  input (Bar of Copper) and aux (Bar of Tin) slots; the Light act is
+  refused until BOTH slots are loaded. The local menu path, the relay
+  light/item paths, and the StationView readiness snapshot (has_input
+  keys on both slots for the crucible) agree.
+- Output: ALLOY_OUT_COUNT = 2 Bar of Bronze per charge. The legacy
+  Ring of Brodgar charge (2 copper + 1 tin -> 3 bronze) is a 1:1
+  metal-to-bronze MASS balance; the two-slot policy realizes the same
+  balance as 1+1 -> 2 (craft.rs documents the derivation).
+- Persistence: the additive SavedStructure.aux field round-trips the
+  tin charge; the restore re-validates the label against
+  ALLOY_INPUT_TIN.
+- The trough build test resolves its spec via buildable_by_ad now
+  (the alloyer insertion shifted the positional registry indices -
+  the second latent-index bug the positional style caused).
+- Verified: fmt + clippy -D warnings clean; cargo test --workspace
+  307 green (11 proto + 280 unit + 6 wire + 10 world).
+
+NEXT (handoff):
+- Bronze live probe (first candidate): test_smelt.py needs a
+  crucible phase - the starter kit (stone x6 + branch x10) covers
+  the smelter OR the crucible, so the probe must boulder-pick stone
+  (BOULDER_STONES x5) before building the second station, then load
+  copper+tin and catch the TWO bronze drops.
+- Type-3 candidates: kiln + brick chain (restores the legacy
+  smelter/oven demands), anvil + smithy's-hammer tool-gated recipes,
+  flower pick verbs, per-animal breed stat rows.
+- Type-5 candidates: mvbat_fanout_us remains the top single phase at
+  1000 sessions; entry-burst wmax (283 ms) attribution.
+- Carried: test_smelt.py walk phase can exceed 2 min on unlucky
+  pathing (bounded retry, runs green on retry); GL e2e + Windows
+  smoke (no display host); multi-machine cluster profile; CI push
+  when the token gets the workflow scope.
+
+COMMITS: wave 1 = d91dcb0 (parallel writer); wave 2 = the refinement
+tier + probe fix + docs + handoff (the second writer); wave 3 = the
+alloyer + fmt (a third writer under the same session number).
+
