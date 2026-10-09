@@ -506,6 +506,15 @@ Server implementation notes (this repo, session 60):
   chosen server policy (state.rs constants); reconcile them against
   Legacy:Branch / Legacy:Stone / Legacy:Quality when reachable.
 
+- **Sausage-chain numbers (session 77).** The per-wurst meat unit
+  counts (2-5 meat + 1-2 Intestines; the blends Beef+Mutton 2+2 and
+  Bear+Deer 1+2), the equal per-type quality weights, and the
+  Perception softcap pairing are chosen server policy - the legacy
+  craft layer is not shipped in the paginae resources. Reconcile
+  against Legacy:Sausages / Legacy:Wurst pages when reachable. The
+  intestines yield per species follows the doc's butcher table
+  verbatim (see the animals doc session-77 note).
+
 ## Server implementation notes (this repo, session 71: baking chain)
 
 - **Baking chain (verified live end to end, `test_bake.py`).** Mature
@@ -552,3 +561,43 @@ Server implementation notes (this repo, session 60):
   bake contract (label gate, fuel gate, FUEL_PER_JOB burn, the
   BAKE_MAP output drop) and the quern's fuel-gate skip on the real
   itemact/menu/tick paths.
+
+## Server implementation notes (this repo, session 77: the sausage chain)
+
+- **The sausages branch (verified live, the one-off `s77_live_wurst`
+  probe).** Twelve of the thirteen shipped `paginae/craft/wurst-*` pages
+  become hand recipes (ad `craft|wurst_<id>`; the login paginae push
+  picks them up from RECIPES unchanged, the `sausages` root stays
+  server-side-only like the other category pages). Per-wurst meat
+  pairing: Fox Wurst/Fox Fuet <- Fox Meat, Boar Baloney/Boar Boudin <-
+  Boar Meat, Cow Chorizo <- Beef, Delicious Deer Dog <- Raw Deer Meat,
+  Bear Salami/Big Bear Banger <- Bear Meat, Lamb Sausages <- Raw
+  Mutton, Running Rabbit Sausage <- Rabbit Meat; Tame Game Liverwurst
+  blends Beef + Raw Mutton (the doc's "tame game"), Wonderful
+  Wilderness Wurst blends Bear + Deer (the doc's "wonderful
+  wilderness"). Softcap: Cooking caps Perception, matching the dough
+  entry; the equal per-type weights [1, 1] mirror the bow's rule.
+  fep.conf carries a FEP row for every implemented label - all twelve
+  eat (the `Chicken Chorizo` and `Bierwurst` keys have no item
+  resource in the pack and stay unimplemented).
+- **Raw meat is ONE resource; the label is the species.** Every raw
+  meat rides `gfx/invobjs/meat` and is told apart by the stack's
+  display label (`state::Species::meat_label`). The generic
+  `(resource, count)` recipe input therefore cannot express "Fox Meat
+  only" - a Fox Wurst would happily grind Beef. Fix: the wurst recipes'
+  meat inputs key on `craft::WURST_MEAT_SLOTS` (per-recipe
+  `(label, count)` slots that replace the generic meat input); both
+  validation and the lowest-quality-first consumption go per label,
+  and the refusal names the missing label ("You need the Fox Meat for
+  that."), consistent with the session-72 display-name policy. The
+  slot counts must sum to the recipe's meat input (unit-pinned).
+- **Casings enter the economy.** Intestines (`gfx/invobjs/intestines`)
+  follow the doc's butcher table verbatim: Aurochs/Cattle/Bear x4,
+  Deer x3, Boar/Sheep x2, Fox x1 (the mouflon row is undocumented -
+  policy 1; Wolf/Hare/Hen drop none per their doc rows). The bear and
+  the hen join the wild roster as the missing meat sources (Bear Meat
+  x8 + the raw bear hide; Raw Chicken Meat + Chicken Feather x3 per
+  the doc rows; the pack ships full `kritter/bear` and `kritter/hen`
+  pose sets - verified in the jar). `Piglet Wursts` stays
+  unimplemented: Raw Pork has no source until the pig morph ships
+  (the pack ships no pig kritter).

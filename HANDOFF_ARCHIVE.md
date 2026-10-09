@@ -5367,3 +5367,53 @@ smoke; the multi-machine cluster profile).
 
 COMMITS: 9ea65f8 amended to 49d7047 (the docs hygiene), this handoff.
 
+## 2026-10-09 - Session 75 (type 1: architecture review)
+
+SESSION TYPE ROTATION LOG: 70=2, 71=3, 72=4, 73=5, 74=0, 75=1. All six
+types served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the 10k-readiness audit - find the architectural risks on the
+path to the 10k-session target, verify them with measurements, land one
+structural fix.
+
+FOUND (measured, not guessed):
+
+- PERSIST ON THE GAME LOOP (the landed fix): the 30 s autosave ran
+  clone + JSON serialize + write inline on the game-task select loop.
+  The new explicit bench (persist_flush_phase_bench_scales_to_10k,
+  #[ignore], realistic per-character volume + fixed world volume)
+  decomposed the flush: clone 8 ms / serialize 86 ms / write 1 ms at
+  1k players; clone 55 ms / serialize 457 ms / write 7 ms at 10k
+  (12.8 MB file). Total stall per save: 95 ms at 1k (the whole tick
+  budget), 519 ms at 10k (five ticks). load() read-back: 61/359 ms -
+  fine for startup.
+- THE FIX: flush() split into snapshot_data() (the clone; stays on
+  the loop) + write_file() (serialize + atomic rename with a unique
+  tmp suffix; blocking thread) + flush_background() wiring them via
+  tokio::task::spawn_blocking. The 30 s autosave (lifecycle.rs) and
+  the CharAck migration flush (cluster.rs) go background; the
+  shutdown path keeps the synchronous flush() (the process must
+  outlive the write). A/B on the recorded logs: the S73 sync-flush
+  runs show 87-97 ms wmax_tick spikes in the 30 s boundary windows
+  (30s=97, 60s=87, 120s=87 ms - matching the 95 ms bench estimate);
+  the S75 background run's boundary windows sit at the noise level
+  (32/57/54 ms). New pin: flush_background_matches_flush (bytes equal,
+  no tmp residue). Gate 317 green; smoke CATTR + EAT FLOW OK.
+- MEMORY FOOTPRINT (audit fact, gap #11): RSS ~830 MB at 1000
+  saturated sessions (~0.8 MB/session; 10k single-process ≈ 8 GB) -
+  fits a 16-32 GB node; the horizontal grid split stays the real
+  lever beyond that.
+- AUDIT VERDICTS (no action needed): auth spawns per connection
+  (burst-safe); net per-session driver tasks + bounded raw queues
+  (structural floor ~tens of MB at 10k); the fan-out pair walk is
+  the confirmed compute floor (S73) and the cluster pair-cap verdict
+  (S59) stands - nodes on separate machines for >1k.
+
+CI: 14th retry - the workflow file was probed via a side branch
+(ci-probe-14) to keep master's history clean; the remote rejected it
+on the same missing `workflow` PAT scope; the branch was deleted
+locally. The S74 lesson stands: no destructive rollback around
+staged work.
+
+COMMITS: 037240c (the background flush), this handoff.
+

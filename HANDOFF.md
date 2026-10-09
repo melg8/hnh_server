@@ -206,9 +206,12 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    FLOUR/BREAD CLOSED (session 71: the full grain -> bread chain driven
    live end to end - wheat harvest, quern Grind verb, hand-kneaded
    dough, oven-baked Bread q10; test_bake.py in the gate corpus).
-   Remaining dead ends: pottery beyond bricks, wurst/sausage and other
-   baking doughs (station cooking depth; BAKE_MAP has exactly one
-   entry, Bread Dough -> Bread).
+   SAUSAGES CLOSED (session 77: 12 of the 13 shipped wurst pages
+   craft over the labeled-meat-slot gate; Piglet Wursts needs the pig
+   morph, Bierwurst/Chicken Chorizo have no item resources).
+   Remaining dead ends: pottery beyond bricks and other baking doughs
+   (station cooking depth; BAKE_MAP has exactly one entry,
+   Bread Dough -> Bread).
 5. **Feeding depth**: LIFT CLOSED (session 62): the trough lift /
    place / transfer mechanic is implemented and probed; the carried
    store survives restarts and cross-node migration. Still open:
@@ -374,60 +377,14 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
   per-theme modules + common.rs (pure move, 154 tests + 35 helpers
   redistributed, the largest file now <=1091 lines); the #[path] hack
   dropped; 317 green.
-
-## 2026-10-09 - Session 75 (type 1: architecture review)
-
-SESSION TYPE ROTATION LOG: 70=2, 71=3, 72=4, 73=5, 74=0, 75=1. All six
-types served - pick freely, avoid repeating the previous session's type.
-
-GOAL: the 10k-readiness audit - find the architectural risks on the
-path to the 10k-session target, verify them with measurements, land one
-structural fix.
-
-FOUND (measured, not guessed):
-
-- PERSIST ON THE GAME LOOP (the landed fix): the 30 s autosave ran
-  clone + JSON serialize + write inline on the game-task select loop.
-  The new explicit bench (persist_flush_phase_bench_scales_to_10k,
-  #[ignore], realistic per-character volume + fixed world volume)
-  decomposed the flush: clone 8 ms / serialize 86 ms / write 1 ms at
-  1k players; clone 55 ms / serialize 457 ms / write 7 ms at 10k
-  (12.8 MB file). Total stall per save: 95 ms at 1k (the whole tick
-  budget), 519 ms at 10k (five ticks). load() read-back: 61/359 ms -
-  fine for startup.
-- THE FIX: flush() split into snapshot_data() (the clone; stays on
-  the loop) + write_file() (serialize + atomic rename with a unique
-  tmp suffix; blocking thread) + flush_background() wiring them via
-  tokio::task::spawn_blocking. The 30 s autosave (lifecycle.rs) and
-  the CharAck migration flush (cluster.rs) go background; the
-  shutdown path keeps the synchronous flush() (the process must
-  outlive the write). A/B on the recorded logs: the S73 sync-flush
-  runs show 87-97 ms wmax_tick spikes in the 30 s boundary windows
-  (30s=97, 60s=87, 120s=87 ms - matching the 95 ms bench estimate);
-  the S75 background run's boundary windows sit at the noise level
-  (32/57/54 ms). New pin: flush_background_matches_flush (bytes equal,
-  no tmp residue). Gate 317 green; smoke CATTR + EAT FLOW OK.
-- MEMORY FOOTPRINT (audit fact, gap #11): RSS ~830 MB at 1000
-  saturated sessions (~0.8 MB/session; 10k single-process ≈ 8 GB) -
-  fits a 16-32 GB node; the horizontal grid split stays the real
-  lever beyond that.
-- AUDIT VERDICTS (no action needed): auth spawns per connection
-  (burst-safe); net per-session driver tasks + bounded raw queues
-  (structural floor ~tens of MB at 10k); the fan-out pair walk is
-  the confirmed compute floor (S73) and the cluster pair-cap verdict
-  (S59) stands - nodes on separate machines for >1k.
-
-CI: 14th retry - the workflow file was probed via a side branch
-(ci-probe-14) to keep master's history clean; the remote rejected it
-on the same missing `workflow` PAT scope; the branch was deleted
-locally. The S74 lesson stands: no destructive rollback around
-staged work.
-
-COMMITS: 037240c (the background flush), this handoff.
+- S77 (type 3): the sausage chain - bear + hen join the roster,
+  Intestines enter the butcher loot, 12 of 13 wurst paginae become
+  labeled-meat-slot recipes (Piglet Wursts deferred: no pork source);
+  fep.conf reaches the unit tier; 320 green, live-verified.
 
 ## 2026-10-09 - Session 76 (type 2: refactoring)
 
-SESSION TYPE ROTATION LOG: 71=3, 72=4, 73=5, 74=0, 75=1, 76=2. All six
+SESSION TYPE ROTATION LOG: 72=4, 73=5, 74=0, 75=1, 76=2, 77=3. All six
 types served - pick freely, avoid repeating the previous session's type.
 
 GOAL: split the crate's largest file - game/tests.rs (8384 lines, 154
@@ -466,3 +423,50 @@ cluster profile; state.rs (2130) and game/cluster.rs (2054) are the
 next-largest non-test files if a future type-2 session wants them.
 
 COMMITS: 76900f0 (the test battery split), this handoff.
+
+## 2026-10-09 - Session 77 (type 3: the sausage chain)
+
+SESSION TYPE ROTATION LOG: 72=4, 73=5, 74=0, 75=1, 76=2, 77=3. All six
+types served - pick freely, avoid repeating the previous session's type.
+
+GOAL: close the last big recipe-breadth dead end - the sausage branch
+(Known gap #4's remaining cooking depth). Pure feature work on top of
+the verified station/craft infrastructure.
+
+DONE:
+
+- the roster grew to eleven: Species::Bear (hp 120, aggressive, Meat x8
+  + Raw Bear Hide + Intestines x4 per the doc butcher row) and
+  Species::Hen (the only Raw Chicken Meat source, Chicken Feather x3
+  loot) - both ship full kritter pose sets in the 2009 jar (verified
+  BEFORE landing); pose tables 9 -> 11; node-link discriminants APPEND
+  9/10 (0-8 frozen on the wire)
+- Intestines enter the butcher loot verbatim from the doc's table
+  (Aurochs/Cattle/Bear x4, Deer x3, Boar/Sheep x2, Fox x1, mouflon
+  policy 1, Wolf/Hare/Hen none) - the universal sausage casing
+- twelve of the thirteen shipped wurst paginae became hand recipes
+  (ad craft|wurst_*); Piglet Wursts stays out - Raw Pork has no source
+  until the pig morph ships (the pack ships no pig kritter)
+- the load-bearing find: every raw meat rides ONE resource
+  (gfx/invobjs/meat) and is told apart by the DISPLAY LABEL, so the
+  wurst meat inputs key on craft::WURST_MEAT_SLOTS - per-label
+  validation + lowest-quality-first consumption + a refusal that names
+  the missing label; without the gate a Fox Wurst would grind Beef
+- fep.conf boot candidates gained the cargo-test exe depth (4 hops to
+  the repo root) so unit tests parse the same 111-food table the live
+  server boots with - the FEP contract moved into the white-box tier
+- all twelve implemented wurst labels carry fep.conf rows (the
+  Chicken Chorizo and Bierwurst keys have no item resource - recorded);
+  verified live: 12 paginae served over HTTP, make window opens,
+  the label-gate refusal lands as system chat, CRAFT FLOW + EAT FLOW OK
+- pins: slot/input consistency + fep coverage, the Fox Wurst label gate
+  end to end (refuse Beef, craft from Fox Meat q30/q20 -> per-softcap
+  17, Beef untouched), the butcher-loot table; species_index_roundtrips
+  extends to 11
+
+GATE: fmt + clippy -D warnings clean; workspace 320 green (11 proto +
+290 unit [2 ign] + 7 wire [1 ign] + 12 world). Live smoke: WORLD ENTRY,
+CATTR ORDER, CRAFT FLOW, EAT FLOW all OK; no tmp residue on SIGTERM.
+
+COMMITS: a026c9e (bear + hen + intestines), 173bc4e (the sausage chain),
+this handoff.

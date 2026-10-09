@@ -614,6 +614,26 @@ required; Legacy:Hunting). Rules:
   trough's avatar render (the legacy carry pose) is client-side art
   the server does not stream yet.
 
+## Server implementation notes (this repo, session 77: bear, hen, casings)
+
+- **The roster grows to eleven.** The bear (hp 120, aggressive, speed
+  40 - all policy; the doc's creature table lists it as an
+  attacker-on-sight) and the hen (hp 10, speed 20) join the wild spawn
+  picker at the same flat weight as the original roster. Both ship
+  full kritter pose sets in the 2009 jar (`kritter/bear`, `kritter/hen`
+  - verified before landing; the pose tables extended 9 -> 11 and the
+  node-link discriminants APPEND 9/10, values 0-8 stay frozen).
+  `Raw Chicken Meat` (fep.conf HHP:5) and `Bear Meat` now have world
+  sources; the roast map already carried their keys.
+- **Intestines are the sausage casing.** The butcher loot follows the
+  doc's table verbatim: Aurochs/Cattle/Bear x4, Deer x3, Boar/Sheep
+  x2, Fox x1; the mouflon row is undocumented (policy 1); Wolf, Hare
+  and Hen drop none per their doc rows. The bear also drops the raw
+  bear hide (x1) and Meat x8 per its row (the doc's Bear Tooth has no
+  item resource in the pack - Open questions); the hen drops Chicken
+  Feather x3. Meat counts otherwise stay at this server's death-drop
+  policy scale (the note above).
+
 ## Open questions (animals)
 
 - Taming state (post session-47): the "battle intensity == 0",
