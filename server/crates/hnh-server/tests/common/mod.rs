@@ -133,6 +133,15 @@ impl ServerGuard {
         let workdir = std::env::temp_dir().join(format!("hnh_it_{tag}_{nanos}"));
         std::fs::create_dir_all(&workdir).expect("create workdir");
 
+        // The wire tier must stay green on a fresh clone that has not
+        // generated the 43 MB gameres pack yet: boot against an empty
+        // stub res dir (the real pack is only needed for the client's
+        // HTTP fetches and the pack-shape unit tests, neither of which
+        // runs here). Without this the server's fail-fast res-dir check
+        // kills the binary before the auth port ever opens.
+        let res_dir = workdir.join("res");
+        std::fs::create_dir_all(&res_dir).expect("create stub res dir");
+
         let ck =
             rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("gen test cert");
         let cert_path = workdir.join("authsrv.crt.pem");
@@ -150,6 +159,8 @@ impl ServerGuard {
             .arg(auth_port.to_string())
             .arg("--res-port")
             .arg(res_port.to_string())
+            .arg("--res-dir")
+            .arg(&res_dir)
             .arg("--cert")
             .arg(&cert_path)
             .arg("--key")
