@@ -436,6 +436,15 @@ impl Game {
         struct ScanRanges {
             ranges: Vec<(u32, u32)>,
             flat: Vec<GobId>,
+            /// Parallel to `flat`: the candidate IS new to this session
+            /// (not in its authoritative `visible` set). Computed in the
+            // same parallel pass as the scan (session 73): the per-candidate
+            // set probe used to run SERIALLY in Phase B - ~1.5M scattered
+            // HashSet probes per tick at the 1000-session scale, the
+            // dominant vis-phase cost. `stream_spawn` still re-checks the
+            // set on insert, so a stale flag can only cost one redundant
+            // call, never a wrong or missing spawn.
+            fresh: Vec<bool>,
         }
         let scanned = if self.workers > 1 && to_scan.len() > 8 {
             let nodes = std::num::NonZeroUsize::new(self.workers).expect("workers >= 1");
@@ -445,8 +454,9 @@ impl Game {
                 nodes,
             );
             // Each task: one reusable buffer pair for its whole partition,
-            // emitting (index, start, len) triples plus its flat segment.
-            type ScanSegment = (Vec<(usize, u32, u32)>, Vec<GobId>);
+            // emitting (index, start, len) triples plus its flat segment
+            // and its per-candidate fresh flags.
+            type ScanSegment = (Vec<(usize, u32, u32)>, Vec<GobId>, Vec<bool>);
             let per_task: Vec<ScanSegment> = parts
                 .par_iter()
                 .map(|part| {
@@ -456,15 +466,28 @@ impl Game {
                     let mut seg: Vec<GobId> = Vec::with_capacity(512);
                     let mut scratch: Vec<GobId> = Vec::new();
                     let mut flat: Vec<GobId> = Vec::with_capacity(part.len() * 512);
+                    let mut fresh: Vec<bool> = Vec::with_capacity(part.len() * 512);
                     let mut triples = Vec::with_capacity(part.len());
                     for &i in part {
                         self.scan_for_entry_into(&to_scan[i], &mut seg, &mut scratch);
+                        let (sid, ..) = to_scan[i];
+                        let set = self.sessions.get(&sid).map(|o| &o.visible);
                         let start = flat.len() as u32;
+                        for &id in &seg {
+                            // The authoritative-set probe rides the scan
+                            // pass (immutable, rayon-shared `&self`). The
+                            // per-slot bitset mirror is NOT used here: it
+                            // keys slots, not ids, so a reused slot could
+                            // suppress a real spawn (a false negative) -
+                            // the exact-set probe is the safe authority.
+                            let is_new = !set.is_some_and(|s| s.contains(&id));
+                            fresh.push(is_new);
+                        }
                         flat.extend_from_slice(&seg);
                         let len = flat.len() as u32 - start;
                         triples.push((i, start, len));
                     }
-                    (triples, flat)
+                    (triples, flat, fresh)
                 })
                 .collect();
             // Merge the task segments: ranges are written BY to_scan
@@ -472,17 +495,22 @@ impl Game {
             // The flat buffer holds the segments in whatever order the
             // tasks finished; each (offset, len) range is self-contained,
             // so no global reordering is needed.
-            let total: usize = per_task.iter().map(|(t, f)| t.len() + f.len()).sum();
+            let total: usize = per_task
+                .iter()
+                .map(|(t, f, fr)| t.len() + f.len() + fr.len())
+                .sum();
             let mut merged = ScanRanges {
                 ranges: vec![(0, 0); to_scan.len()],
                 flat: Vec::with_capacity(total),
+                fresh: Vec::with_capacity(total),
             };
-            for (triples, flat) in per_task {
+            for (triples, flat, fresh) in per_task {
                 for (i, start, len) in triples {
                     let start = start as usize;
                     let end = start + len as usize;
                     merged.ranges[i] = (merged.flat.len() as u32, len);
                     merged.flat.extend_from_slice(&flat[start..end]);
+                    merged.fresh.extend_from_slice(&fresh[start..end]);
                 }
             }
             merged
@@ -490,15 +518,28 @@ impl Game {
             let mut seg: Vec<GobId> = Vec::with_capacity(512);
             let mut scratch: Vec<GobId> = Vec::new();
             let mut flat: Vec<GobId> = Vec::with_capacity(to_scan.len() * 512);
+            let mut fresh: Vec<bool> = Vec::with_capacity(to_scan.len() * 512);
             let mut ranges = Vec::with_capacity(to_scan.len());
             for e in &to_scan {
                 self.scan_for_entry_into(e, &mut seg, &mut scratch);
+                let (sid, ..) = *e;
+                let set = self.sessions.get(&sid).map(|o| &o.visible);
                 let start = flat.len() as u32;
+                for &id in &seg {
+                    // Same contract as the parallel branch: the exact-set
+                    // probe decides (session 73 comment there).
+                    let is_new = !set.is_some_and(|s| s.contains(&id));
+                    fresh.push(is_new);
+                }
                 flat.extend_from_slice(&seg);
                 let len = flat.len() as u32 - start;
                 ranges.push((start, len));
             }
-            ScanRanges { ranges, flat }
+            ScanRanges {
+                ranges,
+                flat,
+                fresh,
+            }
         };
         self.world.perf.vis_gob_scans += scanned.flat.len() as u64;
         self.world.perf.vis_scan_us = scan_t.elapsed().as_micros() as u64;
@@ -515,16 +556,18 @@ impl Game {
         for (i, (sid, (px, py), cell_moved, _kind)) in to_scan.iter().enumerate() {
             let (start, len) = scanned.ranges[i];
             let cand = &scanned.flat[start as usize..start as usize + len as usize];
+            let fresh = &scanned.fresh[start as usize..start as usize + len as usize];
             let spawn_t = Instant::now();
-            for id in cand {
-                // Check-only here: stream_spawn performs the insert and
-                // skips already-present ids; inserting before calling it
-                // would suppress the spawn block entirely (the avatar
-                // bug: the client never received its own gob).
-                let is_new = !self.sessions[sid].visible.contains(id);
-                if is_new {
+            // The per-candidate set probe moved into the parallel scan
+            // pass (session 73): `fresh` pre-computes is_new, so this
+            // serial loop only touches the rare new ids (a few per tick)
+            // instead of probing ~1.5M scattered set entries. The
+            // spawn-time `visible.insert` still deduplicates, so a stale
+            // fresh flag costs one redundant call, never a wrong block.
+            for (j, &id) in cand.iter().enumerate() {
+                if fresh[j] {
                     spawn_count += 1;
-                    self.stream_spawn(*sid, *id);
+                    self.stream_spawn(*sid, id);
                 }
             }
             // Retractions use a 2x VIEW_RADIUS hysteresis (a gob between
