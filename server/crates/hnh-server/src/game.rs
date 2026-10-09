@@ -1259,12 +1259,12 @@ fn announce_res(out: &mut SessionOut, gi: u16, name: &'static str) -> i32 {
     w as i32
 }
 
-// The test module lives in its own file (game/tests.rs) - a #[path]
-// child module keeps every private item of `game` visible to the
-// tests without pub-super annotations (proj-lib-main-split: testable
-// logic; 7.4k lines of tests out of the implementation file).
+// The test battery lives in its own module file (game/tests.rs) with
+// per-theme children in game/tests/ - a child module keeps every
+// private item of `game` visible to the tests without pub-super
+// annotations (proj-lib-main-split: testable logic; the S76 split
+// arranged the 8.4k-line flat battery into per-feature files).
 #[cfg(test)]
-#[path = "game/tests.rs"]
 mod tests;
 
 // Feature submodules (proj-mod-by-feature): each carries a slice of the
