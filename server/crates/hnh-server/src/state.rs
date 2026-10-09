@@ -167,6 +167,15 @@ pub enum Species {
     Mouflon,
     /// Domestic morph of the mouflon; never spawns wild.
     Sheep,
+    /// Session 77 (the sausage chain): the apex predator of the forest
+    /// belt. Its meat feeds the Bear Salami / Big Bear Banger recipes and
+    /// its carcass carries the doc's Intestines x4 butcher yield.
+    Bear,
+    /// Session 77: the only source of Raw Chicken Meat (fep.conf
+    /// HHP:5) for the wurst-less end of the cooking economy. Spawns
+    /// wild at the same weight policy as the rest of the roster until
+    /// the Chicken Coop building exists (doc Open questions).
+    Hen,
 }
 
 impl Species {
@@ -174,7 +183,7 @@ impl Species {
     /// roster (e.g. the session-36 bone-loot consistency check in
     /// craft.rs).
     #[cfg(test)]
-    pub const ALL: [Species; 9] = [
+    pub const ALL: [Species; 11] = [
         Species::Deer,
         Species::Fox,
         Species::Wolf,
@@ -184,6 +193,8 @@ impl Species {
         Species::Aurochs,
         Species::Mouflon,
         Species::Sheep,
+        Species::Bear,
+        Species::Hen,
     ];
 
     /// Stable discriminant carried on the node link (GuestKind::Animal);
@@ -201,6 +212,8 @@ impl Species {
             Species::Aurochs => 6,
             Species::Mouflon => 7,
             Species::Sheep => 8,
+            Species::Bear => 9,
+            Species::Hen => 10,
         }
     }
 
@@ -216,6 +229,8 @@ impl Species {
             6 => Species::Aurochs,
             7 => Species::Mouflon,
             8 => Species::Sheep,
+            9 => Species::Bear,
+            10 => Species::Hen,
             _ => return None,
         })
     }
@@ -235,6 +250,8 @@ impl Species {
             Species::Aurochs => "gfx/kritter/aurochs/cdv",
             Species::Mouflon => "gfx/kritter/mufflon/cdv",
             Species::Sheep => "gfx/kritter/sheep/cdv",
+            Species::Bear => "gfx/kritter/bear/cdv",
+            Species::Hen => "gfx/kritter/hen/cdv",
         }
     }
 
@@ -249,11 +266,18 @@ impl Species {
             // the doc carries no verified numbers (server policy).
             Species::Mouflon => 45,
             Species::Sheep => 40,
+            // Apex predator: the doc's butcher list treats the bear as
+            // the heaviest common carcass (Meat x8); hp follows (policy).
+            Species::Bear => 120,
+            Species::Hen => 10,
         }
     }
 
     pub fn aggressive(self) -> bool {
-        matches!(self, Species::Wolf | Species::Boar)
+        // The bear joins the wolves and boars: the wiki's creature table
+        // lists it as an attacker-on-sight (server policy until a
+        // verified aggro table exists).
+        matches!(self, Species::Wolf | Species::Boar | Species::Bear)
     }
 
     pub fn speed(self) -> i32 {
@@ -266,6 +290,8 @@ impl Species {
             Species::Cow | Species::Aurochs => 30,
             Species::Mouflon => 50,
             Species::Sheep => 30,
+            Species::Bear => 40,
+            Species::Hen => 20,
         }
     }
 
@@ -274,25 +300,40 @@ impl Species {
     /// (craft.rs) needs gfx/invobjs/bone, and in legacy every butchered
     /// carcass yielded bones; counts are a chosen server policy recorded
     /// in animals-and-husbandry.md.
+    /// Session 77: Intestines follow the doc's butcher table verbatim
+    /// (Aurochs/Cattle x4, Bear x4, Deer x3, Boar x2, Sheep x2, Fox x1;
+    /// the mouflon row is undocumented - policy 1) - the casing item of
+    /// the sausage chain (craft.rs wurst recipes). Species whose doc row
+    /// lists no intestines (Wolf, Hare, Hen) drop none.
     pub fn loot(self) -> Vec<(&'static str, u32, &'static str)> {
         match self {
-            Species::Deer | Species::Aurochs => vec![
+            Species::Deer => vec![
                 ("gfx/invobjs/meat", 3, self.meat_label()),
                 ("gfx/invobjs/hide-raw-fox", 2, ""),
+                ("gfx/invobjs/intestines", 3, ""),
+                ("gfx/invobjs/bone", 2, ""),
+            ],
+            Species::Aurochs => vec![
+                ("gfx/invobjs/meat", 3, self.meat_label()),
+                ("gfx/invobjs/hide-raw-fox", 2, ""),
+                ("gfx/invobjs/intestines", 4, ""),
                 ("gfx/invobjs/bone", 2, ""),
             ],
             Species::Cow => vec![
                 ("gfx/invobjs/meat", 4, self.meat_label()),
                 ("gfx/invobjs/hide-raw-cow", 3, ""),
+                ("gfx/invobjs/intestines", 4, ""),
                 ("gfx/invobjs/bone", 2, ""),
             ],
             Species::Boar => vec![
                 ("gfx/invobjs/meat", 3, self.meat_label()),
+                ("gfx/invobjs/intestines", 2, ""),
                 ("gfx/invobjs/bone", 2, ""),
             ],
             Species::Fox => vec![
                 ("gfx/invobjs/meat", 1, self.meat_label()),
                 ("gfx/invobjs/hide-raw-fox", 1, ""),
+                ("gfx/invobjs/intestines", 1, ""),
                 ("gfx/invobjs/bone", 1, ""),
             ],
             Species::Wolf => vec![
@@ -309,6 +350,24 @@ impl Species {
                 ("gfx/invobjs/meat", 2, self.meat_label()),
                 ("gfx/invobjs/hide-raw-sheep", 1, ""),
                 ("gfx/invobjs/wool", 1, ""),
+                ("gfx/invobjs/intestines", if self == Species::Sheep { 2 } else { 1 }, ""),
+                ("gfx/invobjs/bone", 1, ""),
+            ],
+            // Session 77: the bear mirrors its doc butcher row (Meat x8,
+            // Intestines x4, Raw Bear Hide, bones at the heavy-carcass
+            // policy 4; the doc's Bear Tooth has no item resource in the
+            // pack - recorded in Open questions).
+            Species::Bear => vec![
+                ("gfx/invobjs/meat", 8, self.meat_label()),
+                ("gfx/invobjs/hide-raw-bear", 1, ""),
+                ("gfx/invobjs/intestines", 4, ""),
+                ("gfx/invobjs/bone", 4, ""),
+            ],
+            // The hen row: Raw Chicken Meat + Chicken Feather x3 + bones;
+            // the doc's coop-grid egg pipeline is not implemented yet.
+            Species::Hen => vec![
+                ("gfx/invobjs/meat", 1, self.meat_label()),
+                ("gfx/invobjs/feather-chicken", 3, ""),
                 ("gfx/invobjs/bone", 1, ""),
             ],
         }
@@ -326,6 +385,8 @@ impl Species {
             Species::Aurochs => "Aurochs",
             Species::Mouflon => "Mouflon",
             Species::Sheep => "Sheep",
+            Species::Bear => "Bear",
+            Species::Hen => "Hen",
         }
     }
 
@@ -344,6 +405,10 @@ impl Species {
             Species::Wolf => "",
             // fep.conf verifies "Raw Mutton" (HHP:1) for the sheep family.
             Species::Mouflon | Species::Sheep => "Raw Mutton",
+            // Session 77: both fep.conf keys - the bear meat rows (Bear
+            // Salami's source) and the only Raw Chicken Meat source.
+            Species::Bear => "Bear Meat",
+            Species::Hen => "Raw Chicken Meat",
         }
     }
 
@@ -376,6 +441,8 @@ impl Species {
             // The pack directory spelling, plus the wiki spelling.
             "mufflon" | "mouflon" => Species::Mouflon,
             "sheep" => Species::Sheep,
+            "bear" => Species::Bear,
+            "hen" => Species::Hen,
             _ => return None,
         })
     }
@@ -1767,7 +1834,7 @@ impl World {
                 if tile_speed(t).is_none() {
                     continue;
                 }
-                let species = match self.rng.next_bounded(8) {
+                let species = match self.rng.next_bounded(10) {
                     0 => Species::Deer,
                     1 => Species::Fox,
                     2 => Species::Wolf,
@@ -1778,7 +1845,14 @@ impl World {
                     // Session 46: the third tameable wild beast. Sheep
                     // NEVER spawns wild - it is reached only through the
                     // mouflon morph (animals-and-husbandry.md).
-                    _ => Species::Mouflon,
+                    7 => Species::Mouflon,
+                    // Session 77: the bear (the sausage chain's big-meat
+                    // source) and the hen (the only Raw Chicken Meat
+                    // source) join the wild roster at the same flat
+                    // weight policy - the coop will take over hens later
+                    // (doc Open questions).
+                    8 => Species::Bear,
+                    _ => Species::Hen,
                 };
                 let px = (gc.0 as i64 * 100 + x) as i32 * 11 + 5;
                 let py = (gc.1 as i64 * 100 + y) as i32 * 11 + 5;

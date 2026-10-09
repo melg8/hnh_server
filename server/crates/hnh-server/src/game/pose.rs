@@ -98,9 +98,9 @@ pub(crate) struct PoseTable {
     /// The equipment-window doll set (banzai arms, camera facing).
     doll: [&'static str; 6],
     /// [species][pose][dir], one body part per kritter pose.
-    kritter: [[[&'static str; 8]; 2]; 9],
+    kritter: [[[&'static str; 8]; 2]; 11],
     /// [species] pose-router base resources.
-    kritter_base: [&'static str; 9],
+    kritter_base: [&'static str; 11],
 }
 
 static POSES: std::sync::OnceLock<PoseTable> = std::sync::OnceLock::new();
@@ -108,8 +108,10 @@ static POSES: std::sync::OnceLock<PoseTable> = std::sync::OnceLock::new();
 /// Species index order must mirror the enum declaration order (state.rs).
 /// Session 46 appends the mufflon (the pack's directory spelling) and
 /// the sheep - both ship body pose directories like the original seven.
-const SPECIES_FOLDERS: [&str; 9] = [
-    "deer", "fox", "wolf", "boar", "cow", "hare", "aurochs", "mufflon", "sheep",
+/// Session 77 appends the bear and the hen (the sausage chain's meat
+/// sources) - both ship full walking/standing pose sets too.
+const SPECIES_FOLDERS: [&str; 11] = [
+    "deer", "fox", "wolf", "boar", "cow", "hare", "aurochs", "mufflon", "sheep", "bear", "hen",
 ];
 
 impl PoseTable {
@@ -129,7 +131,7 @@ impl PoseTable {
                 }
             }
         }
-        let mut kritter: [[[&'static str; 8]; 2]; 9] = Default::default();
+        let mut kritter: [[[&'static str; 8]; 2]; 11] = Default::default();
         for (si, sp) in SPECIES_FOLDERS.into_iter().enumerate() {
             for (pi, pose) in ["standing/standing", "walking/walking"]
                 .into_iter()
@@ -156,6 +158,8 @@ impl PoseTable {
                 "gfx/kritter/aurochs/body",
                 "gfx/kritter/mufflon/body",
                 "gfx/kritter/sheep/body",
+                "gfx/kritter/bear/body",
+                "gfx/kritter/hen/body",
             ],
         }
     }
