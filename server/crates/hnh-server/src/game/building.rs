@@ -634,11 +634,15 @@ impl Game {
             return;
         }
         // Station input dispatch: the oven roasts any raw meat label in
-        // craft::ROAST_MAP; the smelter melts any ore label in
+        // craft::ROAST_MAP and bakes any dough label in craft::BAKE_MAP
+        // (session 71 baking chain); the smelter melts any ore label in
         // craft::SMELT_MAP (session 66 metal chain); the crucible takes
         // the copper bar into the input slot and the tin bar into aux.
         let accepts = match station_spec.kind {
-            crate::build::StationKind::Oven => crate::craft::roast_result(cursor.label).is_some(),
+            crate::build::StationKind::Oven => {
+                crate::craft::roast_result(cursor.label).is_some()
+                    || crate::craft::bake_result(cursor.label).is_some()
+            }
             crate::build::StationKind::Smelter => {
                 crate::craft::smelt_result(cursor.label).is_some()
             }
@@ -652,6 +656,9 @@ impl Game {
             }
             // Session 69: the kiln takes the Clay label (craft::KILN_MAP).
             crate::build::StationKind::Kiln => crate::craft::kiln_result(cursor.label).is_some(),
+            // Session 71: the quern grinds Grist of Wheat
+            // (craft::GRIND_MAP).
+            crate::build::StationKind::Quern => crate::craft::grind_result(cursor.label).is_some(),
         };
         if !accepts {
             self.system_line(sid, "The station cannot process that.");
@@ -733,7 +740,21 @@ impl Game {
             out.player_menu = None;
         }
         let w = out.new_wid("sm");
-        let option = if lit { "Extinguish" } else { "Light" };
+        // Session 71: the quern is hand-cranked - the menu verb is
+        // Grind, not Light (the wire act semantics are the same start
+        // /cancel pair every station shares).
+        let quern = self
+            .world
+            .stations
+            .get(&target)
+            .and_then(|st| crate::build::BUILDABLES[st.spec as usize].station.as_ref())
+            .is_some_and(|s| s.kind == crate::build::StationKind::Quern);
+        let option = match (quern, lit) {
+            (true, false) => "Grind",
+            (true, true) => "Cancel",
+            (false, false) => "Light",
+            (false, true) => "Extinguish",
+        };
         out.send(wdg::new_wdg(
             w,
             "sm",
@@ -812,14 +833,6 @@ impl Game {
             info!(sid, gob, "station extinguished");
             return;
         }
-        if station.fuel < crate::build::FUEL_PER_JOB {
-            self.system_line(sid, "The station needs fuel first.");
-            return;
-        }
-        if station.input.is_none() {
-            self.system_line(sid, "The station needs an input before lighting.");
-            return;
-        }
         // The crucible needs BOTH slots loaded (copper in input, tin in
         // aux) before it can light (craft::ALLOY_* charge rule).
         let alloyer = crate::build::BUILDABLES[station.spec as usize]
@@ -828,6 +841,20 @@ impl Game {
             .is_some_and(|s| s.kind == crate::build::StationKind::Alloyer);
         if alloyer && station.aux.is_none() {
             self.system_line(sid, "The crucible needs a tin bar beside the copper.");
+            return;
+        }
+        // Session 71: the quern skips the fuel gate entirely (it turns
+        // by hand; station.fuel stays 0 forever).
+        let quern = crate::build::BUILDABLES[station.spec as usize]
+            .station
+            .as_ref()
+            .is_some_and(|s| s.kind == crate::build::StationKind::Quern);
+        if !quern && station.fuel < crate::build::FUEL_PER_JOB {
+            self.system_line(sid, "The station needs fuel first.");
+            return;
+        }
+        if station.input.is_none() {
+            self.system_line(sid, "The station needs an input before lighting.");
             return;
         }
         let station = self
@@ -903,8 +930,16 @@ impl Game {
                 crate::build::station_output_ql(q_item, station.quality, station.fuel_quality());
             match spec.kind {
                 crate::build::StationKind::Oven => {
-                    let output_label = crate::craft::roast_result(label).unwrap_or(label);
-                    finished.push((*gob, "gfx/invobjs/meat", output_label, ql));
+                    // BAKE_MAP first (session 71: dough bakes into its
+                    // own resource), then the meat roast map - a roast
+                    // output rides the meat resource by contract.
+                    match crate::craft::bake_result(label) {
+                        Some((res, output_label)) => finished.push((*gob, res, output_label, ql)),
+                        None => {
+                            let output_label = crate::craft::roast_result(label).unwrap_or(label);
+                            finished.push((*gob, "gfx/invobjs/meat", output_label, ql));
+                        }
+                    }
                 }
                 crate::build::StationKind::Smelter => match crate::craft::smelt_result(label) {
                     Some((res, output_label)) => finished.push((*gob, res, output_label, ql)),
@@ -922,6 +957,19 @@ impl Game {
                     Some((res, output_label)) => finished.push((*gob, res, output_label, ql)),
                     None => {
                         let input_res = self.world.res.name(res_idx).unwrap_or("gfx/invobjs/clay");
+                        finished.push((*gob, input_res, label, q_item));
+                    }
+                },
+                // Session 71: the quern grinds Grist of Wheat into Flour
+                // (the same map-or-re-emit contract as the kiln arm).
+                crate::build::StationKind::Quern => match crate::craft::grind_result(label) {
+                    Some((res, output_label)) => finished.push((*gob, res, output_label, ql)),
+                    None => {
+                        let input_res = self
+                            .world
+                            .res
+                            .name(res_idx)
+                            .unwrap_or("gfx/invobjs/grist-wheat");
                         finished.push((*gob, input_res, label, q_item));
                     }
                 },

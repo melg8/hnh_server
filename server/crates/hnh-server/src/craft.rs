@@ -650,6 +650,27 @@ pub const RECIPES: &[Recipe] = &[
         tool: None,
         q_weights: &[1, 1],
     },
+    // Session 71: the baking chain's hand craft - flour + water kneads
+    // into dough (paginae/craft/dough ships in the pack, ad
+    // ["craft", "dough"]; the legacy button name "Bread" covers the
+    // whole dough hand shape). The dough bakes in the oven
+    // (craft::BAKE_MAP). Water enters the economy through the
+    // bucket-fill mechanic (a Bucket itemact on a water tile,
+    // game/items.rs). The empty bucket returns alongside the dough -
+    // the recipe consumes one Bucket of Water and kneads it all in.
+    // Unit counts are server policy: 2 flour -> 2 dough keeps a flat
+    // 1:1 flour-to-dough mass balance. Softcap: Cooking caps
+    // Perception (RoB Legacy:Quality pairing).
+    Recipe {
+        id: "dough",
+        name: "Bread Dough",
+        inputs: &[("gfx/invobjs/flour", 2), ("gfx/invobjs/bucket-water", 1)],
+        outputs: &[("gfx/invobjs/dough", 2), ("gfx/invobjs/buckete", 1)],
+        pagina: "paginae/craft/dough",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[3, 1],
+    },
 ];
 
 /// Raw -> roasted meat mapping for the `roast` recipe (paginae/craft/roastmeat,
@@ -710,6 +731,41 @@ pub const KILN_MAP: &[(&str, (&str, &str))] = &[("Clay", ("gfx/invobjs/brick", "
 
 pub fn kiln_result(raw_label: &str) -> Option<(&'static str, &'static str)> {
     KILN_MAP
+        .iter()
+        .find(|(raw, _)| raw.eq_ignore_ascii_case(raw_label))
+        .map(|(_, out)| *out)
+}
+
+/// Grist -> flour mapping for the quern station (build.rs
+/// StationKind::Quern, session 71 baking chain). Legacy Quern: "grinds
+/// grain into flour"; the pack ships no grain item, so the quern takes
+/// Grist of Wheat (the farm's mature wheat product, farm.rs) and grinds
+/// it into Flour. One grist per job (the kiln's one-clay-per-brick
+/// policy carried over; the legacy page records no ratio). Output
+/// quality follows the station formula with no fuel term (a quern is
+/// hand-cranked, fuel_quality() stays 0).
+pub const GRIND_MAP: &[(&str, (&str, &str))] =
+    &[("Grist of Wheat", ("gfx/invobjs/flour", "Flour"))];
+
+pub fn grind_result(raw_label: &str) -> Option<(&'static str, &'static str)> {
+    GRIND_MAP
+        .iter()
+        .find(|(raw, _)| raw.eq_ignore_ascii_case(raw_label))
+        .map(|(_, out)| *out)
+}
+
+/// Dough -> baked goods mapping for the oven (build.rs
+/// StationKind::Oven, session 71 baking chain). The oven roasts raw
+/// meat (craft::ROAST_MAP, the output rides the meat resource) AND
+/// bakes dough: a dough label in BAKE_MAP bakes into the mapped item
+/// resource instead. Legacy Bread: flour-and-water dough baked in an
+/// oven; one dough per loaf (unit count is server policy). The
+/// recipe hand shape (Flour + Water -> Dough) is the craft.rs
+/// "dough" recipe.
+pub const BAKE_MAP: &[(&str, (&str, &str))] = &[("Bread Dough", ("gfx/invobjs/bread", "Bread"))];
+
+pub fn bake_result(raw_label: &str) -> Option<(&'static str, &'static str)> {
+    BAKE_MAP
         .iter()
         .find(|(raw, _)| raw.eq_ignore_ascii_case(raw_label))
         .map(|(_, out)| *out)
@@ -864,6 +920,67 @@ Peapod=STR:0.1 PER:0.9
         assert_eq!(roast_result("beef"), Some("Roasted Beef"));
         assert_eq!(roast_result("Raw Deer Meat"), Some("Roasted Deer Meat"));
         assert_eq!(roast_result("Stone"), None);
+    }
+
+    /// Session 71 (baking chain): the quern takes the farm's Grist of
+    /// Wheat into Flour and the oven bakes Bread Dough into Bread. The
+    /// pack-aware pins (optional like every resources-dependent test)
+    /// enforce the render path: the flour and bread invobjs must ship
+    /// (they do - no alias needed) and the dough recipe's water input
+    /// (bucket-water) plus the returned empty bucket (buckete) must
+    /// exist too. The dough recipe shape is pinned flat: 2 flour + 1
+    /// water bucket in, 2 dough + the empty bucket out (the 1:1
+    /// flour-to-dough mass balance).
+    #[test]
+    fn bake_chain_maps_and_dough_recipe() {
+        assert_eq!(
+            grind_result("Grist of Wheat"),
+            Some(("gfx/invobjs/flour", "Flour"))
+        );
+        assert_eq!(grind_result("Flour"), None);
+        assert_eq!(
+            bake_result("Bread Dough"),
+            Some(("gfx/invobjs/bread", "Bread"))
+        );
+        assert_eq!(bake_result("Beef"), None);
+        let dough = RECIPES
+            .iter()
+            .find(|r| r.id == "dough")
+            .expect("dough recipe");
+        assert_eq!(
+            dough.inputs,
+            &[("gfx/invobjs/flour", 2), ("gfx/invobjs/bucket-water", 1)]
+        );
+        assert_eq!(
+            dough.outputs,
+            &[("gfx/invobjs/dough", 2), ("gfx/invobjs/buckete", 1)]
+        );
+        // The bucket hand craft feeds the water leg (branch x3 -> empty
+        // bucket, RoB Legacy:Bucket).
+        let bucket = RECIPES
+            .iter()
+            .find(|r| r.id == "bucket")
+            .expect("bucket recipe");
+        assert_eq!(bucket.inputs, &[("gfx/invobjs/branch", 3)]);
+        assert_eq!(bucket.outputs, &[("gfx/invobjs/buckete", 1)]);
+        if crate::resources::RES_DIR.get().is_none() {
+            let pack = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../gameres");
+            if pack.is_dir() {
+                crate::resources::init_res_dir(pack);
+            }
+        }
+        if crate::resources::RES_DIR.get().is_some() {
+            for res in [
+                "gfx/invobjs/grist-wheat",
+                "gfx/invobjs/flour",
+                "gfx/invobjs/dough",
+                "gfx/invobjs/bread",
+                "gfx/invobjs/bucket-water",
+                "gfx/invobjs/buckete",
+            ] {
+                assert!(crate::resources::served(res), "{res} must ship in the pack");
+            }
+        }
     }
 
     /// Session 66 (metal chain): every smelter input the world spawns

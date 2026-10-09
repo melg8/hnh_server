@@ -357,4 +357,32 @@ mod tests {
             )
         }
     }
+
+    /// Session 71: water must sit within a playable walk of the dev
+    /// spawn - the bucket-fill mechanic (an empty bucket itemacted on a
+    /// water tile, game/items.rs) feeds the baking chain, and the bake
+    /// probe walks from the spawn to the nearest shore to fill it. The
+    /// walkable adjacence check pins a launch tile the probe can stand
+    /// on while scooping.
+    #[test]
+    fn water_is_reachable_from_spawn() {
+        let w = WorldGen::new(42);
+        let water = |t: u8| t == tile::WATER || t == tile::DEEP_WATER;
+        let ((x, y), r) = w
+            .find_tile(50, 50, 400, water)
+            .expect("no water within 400 tiles of spawn on seed 42");
+        assert!(r <= 250, "water too far from spawn: {r} tiles");
+        println!("nearest water tile on seed 42: ({x}, {y}), {r} tiles from (50, 50)");
+        // At least one 4-neighbor must be walkable: the probe needs a
+        // tile to STAND on while the bucket target lands on the water.
+        let launch = [
+            w.tile_at(x + 1, y),
+            w.tile_at(x - 1, y),
+            w.tile_at(x, y + 1),
+            w.tile_at(x, y - 1),
+        ]
+        .into_iter()
+        .any(|t| !water(t) && t != tile::MOUNTAIN && t != tile::CAVE);
+        assert!(launch, "the nearest water tile has no walkable neighbor");
+    }
 }

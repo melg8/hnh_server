@@ -1091,7 +1091,7 @@ impl Game {
 
     /// World tile at a subtile coordinate (None outside the generated
     /// area; grid loading is deterministic, see GridStore).
-    fn tile_at(&mut self, (x, y): (i32, i32)) -> Option<u8> {
+    pub(super) fn tile_at(&mut self, (x, y): (i32, i32)) -> Option<u8> {
         let gc = (x.div_euclid(1100), y.div_euclid(1100));
         let ix = (x.div_euclid(11)).rem_euclid(100) as usize;
         let iy = (y.div_euclid(11)).rem_euclid(100) as usize;

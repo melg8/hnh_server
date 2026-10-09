@@ -577,6 +577,9 @@ impl Game {
             // page - both menugrid leaves are live from this push on.
             "paginae/build/alloyer",
             "paginae/build/kiln",
+            // Session 71: the quern (the baking chain's mill) build
+            // page - the MenuGrid leaf next to the kiln's.
+            "paginae/build/quern",
         ]);
         for r in crate::craft::RECIPES {
             pages.push(r.pagina);

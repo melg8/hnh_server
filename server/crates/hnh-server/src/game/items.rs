@@ -606,6 +606,32 @@ impl Game {
             // Fall through to the map-space behaviors below for other
             // gob kinds (legacy iteminteract semantics).
         }
+        // Session 71: bucket fill (the baking chain's water leg). An
+        // empty bucket itemacted on a water tile scoops a Bucket of
+        // Water - the tile read may generate the grid on demand, the
+        // same as the walk path. The cursor stack transforms in place
+        // (buckete -> bucket-water) and the drag widget re-syncs.
+        let bucket_res = self.world.res.intern("gfx/invobjs/buckete");
+        if cursor.res == bucket_res {
+            let water = matches!(
+                self.tile_at((mx, my)),
+                Some(tile::WATER) | Some(tile::DEEP_WATER)
+            );
+            if water {
+                if let Some(out) = self.sessions.get_mut(&sid) {
+                    let mut stack = out.cursor.take().expect("checked above");
+                    stack.res = self.world.res.intern("gfx/invobjs/bucket-water");
+                    stack.label = "Bucket of Water";
+                    out.cursor = Some(stack);
+                }
+                self.sync_cursor_widget(sid);
+                self.system_line(sid, "You scoop the bucket full of water.");
+                info!(sid, mx, my, "bucket filled");
+            } else {
+                self.system_line(sid, "There is no water here to scoop.");
+            }
+            return;
+        }
         match farm::spec_by_seed_label(label) {
             Some(spec) => {
                 self.plant_seed(sid, spec, Self::tile_coord(mx, my), cursor);

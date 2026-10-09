@@ -72,6 +72,10 @@ pub enum StationKind {
     /// products beyond bricks are future work). Input dispatch keys on
     /// the Clay label (craft::KILN_MAP).
     Kiln,
+    /// Grinds Grist of Wheat into Flour (session 71 baking chain,
+    /// craft::GRIND_MAP). A hand-cranked mill: NO fuel - the fuel gate
+    /// skips this kind and the flower menu says Grind instead of Light.
+    Quern,
 }
 
 /// Station input/output policy this server: the oven roasts any raw meat
@@ -188,6 +192,34 @@ pub const BUILDABLES: &[Buildable] = &[
             kind: StationKind::Kiln,
             fuel: &["gfx/invobjs/branch"],
             job_ticks: 30,
+        }),
+    },
+    // Session 71: the quern lands LAST in the registry for the same
+    // persistence reason as the kiln - appending keeps every save-file
+    // spec index (oven 0, smelter 1, alloyer 2, trough 3, kiln 4)
+    // stable across the update.
+    Buildable {
+        id: "quern",
+        res: "gfx/terobjs/quern",
+        on_tile: true,
+        place_radius: None,
+        // Legacy demand verified against RoB (Legacy:Quern): Stone x4
+        // with the Milling skill prereq (skill gating is not enforced
+        // for stations - the established policy). Server demand keeps
+        // the stone body and adds the branch axle (2+2 keeps the build
+        // reachable straight off the starter kit).
+        demand: &[("gfx/invobjs/stone", 2), ("gfx/invobjs/branch", 2)],
+        hp: 600,
+        stages: 2,
+        // Fuel policy: NONE - the quern is hand-cranked (the fuel gate
+        // skips StationKind::Quern; station.fuel stays 0 forever).
+        // Job length: 15 ticks - between the oven's 8-tick roast and
+        // the smelter's 30-tick melt, milling is a short mechanical
+        // job, not a firing.
+        station: Some(StationSpec {
+            kind: StationKind::Quern,
+            fuel: &[],
+            job_ticks: 15,
         }),
     },
 ];

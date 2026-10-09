@@ -243,12 +243,13 @@ impl Game {
             return;
         }
         // Station input dispatch mirrors station_itemact: the oven roasts
-        // meat labels, the smelter melts ore labels, the crucible takes
-        // copper (input) and tin (aux) (session 66), the kiln takes the
-        // Clay label (session 69).
+        // meat labels and bakes dough labels (session 71), the smelter
+        // melts ore labels, the crucible takes copper (input) and tin
+        // (aux) (session 66), the kiln takes the Clay label (session 69).
         let accepts = match station_spec.kind {
             crate::build::StationKind::Oven => {
                 crate::craft::roast_result(leak_static(stack.label.as_str())).is_some()
+                    || crate::craft::bake_result(leak_static(stack.label.as_str())).is_some()
             }
             crate::build::StationKind::Smelter => {
                 crate::craft::smelt_result(leak_static(stack.label.as_str())).is_some()
@@ -263,6 +264,10 @@ impl Game {
             }
             crate::build::StationKind::Kiln => {
                 crate::craft::kiln_result(leak_static(stack.label.as_str())).is_some()
+            }
+            // Session 71: the quern grinds Grist of Wheat.
+            crate::build::StationKind::Quern => {
+                crate::craft::grind_result(leak_static(stack.label.as_str())).is_some()
             }
         };
         if !accepts {

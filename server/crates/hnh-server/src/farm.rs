@@ -86,14 +86,23 @@ const WHEAT_EARLY: Yield = Yield {
     res: "gfx/invobjs/straw",
     count: (1, 2),
 };
-// The 2009 pack carries no grain item for wheat (sprout/grist/malt only);
-// the mature harvest therefore returns seeds to keep the planting loop
-// playable. Recorded in farming-and-plants.md Open questions.
-const WHEAT_MATURE: [Yield; 1] = [Yield {
-    label: "Wheat Seeds",
-    res: "gfx/invobjs/seed-wheat",
-    count: (2, 4),
-}];
+// The 2009 pack carries no grain item for wheat (sprout/grist/malt only;
+// session 71). The mature harvest returns Grist of Wheat as the MAIN
+// product - the closest pack item to threshed grain and the input the
+// quern grinds into flour (craft::GRIND_MAP) - plus seeds to keep the
+// planting loop playable. Recorded in farming-and-plants.md.
+const WHEAT_MATURE: [Yield; 2] = [
+    Yield {
+        label: "Grist of Wheat",
+        res: "gfx/invobjs/grist-wheat",
+        count: (1, 2),
+    },
+    Yield {
+        label: "Wheat Seeds",
+        res: "gfx/invobjs/seed-wheat",
+        count: (2, 4),
+    },
+];
 
 const FLAX_EARLY: Yield = Yield {
     label: "Flax Fibres",
