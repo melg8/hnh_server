@@ -875,6 +875,15 @@ impl Game {
         let mut full_n = 0usize;
         let mut busy_sessions = 0usize;
         let mut expired_any = false;
+        // Session 82 targeted retire: the sids the walk BELOW sees expired
+        // blocks on. The untargeted retire pass rescanned every session's
+        // unacked table (all ~1000 at the load scale) while the budgeted
+        // sweep inspects only its ring share (~130) - the rescan measured
+        // 37 ms on burst ticks. A session the budget skipped gets its
+        // retire on a later sweep (the ring cursor rotates through all
+        // sessions; the 10 s age ceiling dwarfs the 3-tick sweep period).
+        let mut retire = std::mem::take(&mut self.retire_scratch);
+        retire.clear();
         // Session 68 budget: caps the clone+try_send work of ONE pass
         // (the unbudgeted sweep measured 44-73K resends = 85-107 ms of
         // the 100 ms tick budget at the 1000-bot entry burst).
@@ -1026,6 +1035,7 @@ impl Game {
             budget = budget.saturating_sub(sent_here);
             if expired_n > 0 {
                 expired_any = true;
+                retire.push(sid);
             }
             if queue_full {
                 out.retx_throttle_until = now + Duration::from_millis(RETRANS_THROTTLE_MS);
@@ -1055,24 +1065,33 @@ impl Game {
         p.retx_queue_full = full_n as u64;
         p.retx_busy_sessions = busy_sessions as u64;
         if expired_any {
-            // Session 82 attribution: this walk runs AFTER retx_sweep_us
-            // is recorded, so it is timed separately - the S82 tail
-            // analysis found burst ticks carrying up to 90 ms of tail
-            // that no counter owned, and the retire pass is the prime
-            // suspect (O(sessions x pending blocks) with retain).
+            // Session 82 attribution + targeting: this walk runs AFTER
+            // retx_sweep_us is recorded, so it is timed separately - the
+            // S82 tail analysis found burst ticks carrying up to 90 ms of
+            // tail that no counter owned, and this pass was the owner (37
+            // ms). It now walks exactly the sessions the sweep SAW expired
+            // blocks on instead of rescanning the whole session table.
             let t_retire = Instant::now();
-            for out in self.sessions.values_mut() {
+            let mut retired_gobs = 0u64;
+            for sid in &retire {
+                let Some(out) = self.sessions.get_mut(sid) else {
+                    continue;
+                };
                 if out.unacked.is_empty() {
                     continue;
                 }
+                let before = out.unacked.len() as u64;
                 out.unacked.retain(|_, per| {
                     per.retain_unexpired(now);
                     !per.blocks.is_empty()
                 });
+                retired_gobs += before - out.unacked.len() as u64;
             }
             let p2 = &mut self.world.perf;
             p2.retx_retire_us = t_retire.elapsed().as_micros() as u64;
+            p2.retx_retired_gobs = retired_gobs;
         }
+        self.retire_scratch = retire;
     }
 
     // ------------------------------------------------------------------

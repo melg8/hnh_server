@@ -106,6 +106,11 @@ pub struct Game {
     /// session-id ring reused per sweep (taken/restored; was an implicit
     /// fixed HashMap iteration order that let the budget starve the tail).
     retx_scratch: Vec<SessionId>,
+    /// Retire-pass scratch (session 82 targeted retire): the sids the
+    /// sweep SAW expired blocks on - the retire pass walks exactly these
+    /// instead of rescanning every session's unacked table (the untargeted
+    /// pass measured 37 ms on burst ticks at the 1000-bot scale).
+    retire_scratch: Vec<SessionId>,
     /// Ring start for the NEXT sweep: advances by the number of sessions
     /// seen, so budget-starved sessions go first on the next pass.
     retx_cursor: usize,
@@ -543,6 +548,7 @@ impl Game {
             mv_finished_scratch: Vec::new(),
             mv_progress_scratch: Vec::new(),
             retx_scratch: Vec::new(),
+            retire_scratch: Vec::new(),
             retx_cursor: 0,
             mv_encode_scratch: MessageBuf::new(),
             combat_ix: CombatIndex::default(),

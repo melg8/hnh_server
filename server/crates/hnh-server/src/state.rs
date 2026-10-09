@@ -1907,6 +1907,10 @@ pub struct Perf {
     /// `retx_retire_us + sweeps_us + startbat_fanout_us + retx_sweep_us`
     /// now account for the whole `tail_us`.
     pub retx_retire_us: u64,
+    /// Gob entries dropped by the targeted retire pass (session 82):
+    /// confirms the pass touches only the swept sessions instead of the
+    /// whole table (compare against retx_busy_sessions).
+    pub retx_retired_gobs: u64,
     /// Last-tick rare-event sweeps + dirty-index clear share of the tick
     /// tail: criminal expiry, leash break, tamed production, vis dirty
     /// clear. Expected near zero in the load steady state; a spike here

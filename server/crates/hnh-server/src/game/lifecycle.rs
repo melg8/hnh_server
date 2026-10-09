@@ -330,6 +330,7 @@ impl Game {
             tail_us = self.world.perf.tail_us,
             startbat_fanout_us = self.world.perf.startbat_fanout_us,
             retx_retire_us = self.world.perf.retx_retire_us,
+            retx_retired_gobs = self.world.perf.retx_retired_gobs,
             sweeps_us = self.world.perf.sweeps_us,
             grid_gens = self.world.grids.gen_count,
             grid_hits = self.world.grids.hit_count,
