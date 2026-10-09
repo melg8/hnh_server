@@ -5179,3 +5179,67 @@ COMMITS: bc84762 (quern + maps + dough + bucket + wheat), 8fa470a
 (test_bake.py + drop aliases), 58c8776 (crafted-label fix).
 
 ---
+## 2026-10-09 - Session 72 (type 4: test coverage)
+
+SESSION TYPE ROTATION LOG: 67=4, 68=5, 69=3, 70=2, 71=3, 72=4. All six
+types served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the S70/S71 live findings (the plan->station sink completion, the
+crafted-label station gate) were only caught by python probes running
+outside the cargo gate - the pyramid gap. This session moved the
+load-bearing craft + station contracts into the automated tiers.
+
+DONE (committed across this session):
+
+- wire tier 7 (0f4fa98): craft_flow_carries_the_recipe_label_and
+  _enforces_the_tool_gate - the make widget drives saw + bucket from
+  the starter kit alone over the REAL protocol. Pinned: (1) the
+  tool-gated bucket craft refuses with the exact system line BEFORE
+  the saw exists and consumes nothing; (2) the saw craft consumes
+  branch x2 + stone x1 and the primary output carries the recipe
+  display name ("Saw") - the label every station input gate matches
+  on (the S71 live finding, now a gate contract); (3) with the saw
+  present the bucket passes the gate, yields the labeled "Bucket"
+  and consumes branch x3.
+- REAL FIX surfaced by the probe: the tool-gate refusal named the
+  RESOURCE PATH ("You need the gfx/invobjs/saw to make that.") - it
+  now names the producing recipe's display name ("You need the Saw
+  to make that."), matching the S71 display-name string policy
+  (game/craft.rs craft_once).
+- unit battery +2: oven_bake_contract_label_gate_fuel_and_output
+  (the full white-box bake contract on the REAL itemact -> flower
+  menu -> tick paths: label-less dough refused + announced, one unit
+  per itemact, "The station needs fuel first." before Light, the
+  single-unit fuel delivery empties the cursor, the lit job burns
+  FUEL_PER_JOB + consumes the input after job_ticks and drops the
+  BAKE_MAP output labeled "Bread" beside the station) and
+  quern_grinds_without_the_fuel_gate (zero fuel lights anyway, the
+  input refusal precedes the fuel gate, Grist of Wheat -> Flour).
+- common.rs harness: menu_act_words (the two-word act("craft", id)
+  shape), press_make (the make widget's Craft button), item_label
+  (the item tooltip = the display label, args index 3).
+- Housekeeping: the S70 entry's COMMITS tail had been glued to the
+  end of the file after S71 (the same defect class S70 fixed for
+  S68) - re-joined; S67/S68/S70 full entries archived verbatim per
+  the session-53 policy.
+- GitNexus re-indexed on the fresh clone (10,843 nodes / 39,105
+  edges); detect-changes clean pre-commit.
+
+VERIFIED: fmt clean, clippy -D warnings clean, cargo test --workspace
+316 green (11 proto + 286 unit [1 ign] + 7 wire [1 ign] + 12 world).
+Live smoke: WORLD ENTRY: OK + CATTR ORDER: OK; NEWCRAFT: OK
+(saw/bucket crafts drive through the new refusal string).
+
+NOT DONE / next session carries:
+- The oven bake contract's wire-tier version (a real protocol bake)
+  stays open - it needs the farming leg for dough (flour x2 +
+  bucket-water), too long for the default gate; the white-box pin +
+  the craft-flow label pin cover the gate halves.
+- Carried from S70/S71: GL e2e + Windows smoke; CI push (the PAT
+  still lacks the workflow scope); multi-machine cluster profile;
+  the itemact reach policy question; NEWWDG bundled-frame decode
+  monitor.
+
+COMMITS: 0f4fa98 (the craft/station contracts + the tool-gate fix),
+this handoff.
+
