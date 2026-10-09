@@ -807,6 +807,106 @@ pub const RECIPES: &[Recipe] = &[
         tool: None,
         q_weights: &[1, 1],
     },
+    // Session 79: the pottery branch (paginae/craft/ceramics parents the
+    // four molding pages; ad args extracted from the action layers:
+    // mug->mugdough, jar->jardough, teapot->teapotdough, treepot->
+    // treepotdough). Clay is obtainable (shore clay deposits, session 69);
+    // RoB Legacy pins Jar = Clay x3 and Treeplanter's Pot = Clay x10, the
+    // Mug x2 / Teapot x5 counts are server policy (the legacy pages record
+    // no ratios - Open questions). The outputs are the UNBURNT wares
+    // (tooltips read from the dough-*.res resources); they fire in the
+    // kiln through craft::KILN_MAP - the same station path the brick leg
+    // drives since session 70. Softcap: molding is a Dexterity job
+    // (ceramics-adjacent crafting; RoB pairs Pottery with DEX/PSY - the
+    // doc records the policy).
+    Recipe {
+        id: "mugdough",
+        name: "Unburnt Clay Mug",
+        inputs: &[("gfx/invobjs/clay", 2)],
+        outputs: &[("gfx/invobjs/dough-mug", 1)],
+        pagina: "paginae/craft/mug",
+        softcap_attr: "dex",
+        tool: None,
+        q_weights: &[1],
+    },
+    Recipe {
+        id: "jardough",
+        name: "Unburnt Jar",
+        inputs: &[("gfx/invobjs/clay", 3)],
+        outputs: &[("gfx/invobjs/dough-jar", 1)],
+        pagina: "paginae/craft/jar",
+        softcap_attr: "dex",
+        tool: None,
+        q_weights: &[1],
+    },
+    Recipe {
+        id: "teapotdough",
+        name: "Unburnt Teapot",
+        inputs: &[("gfx/invobjs/clay", 5)],
+        outputs: &[("gfx/invobjs/dough-pot-tea", 1)],
+        pagina: "paginae/craft/teapot",
+        softcap_attr: "dex",
+        tool: None,
+        q_weights: &[1],
+    },
+    Recipe {
+        id: "treepotdough",
+        name: "Unburnt Treeplanter's Pot",
+        inputs: &[("gfx/invobjs/clay", 10)],
+        outputs: &[("gfx/invobjs/dough-treeplanterspot", 1)],
+        pagina: "paginae/craft/treepot",
+        softcap_attr: "dex",
+        tool: None,
+        q_weights: &[1],
+    },
+    // Session 79: the butter leg (paginae/craft/butter, ad
+    // ["craft", "butter"], parent paginae/craft/cooking). Milk rides the
+    // bucket-grant flow (game/animals.rs milking, session 47); one filled
+    // bucket churns into one Butter and returns the empty bucket - the
+    // same bucket-return shape the dough recipe runs under. The legacy
+    // Churn is a buildable terobj (paginae/build/churn ships in the pack)
+    // but the hand shape keeps the chain playable without a new station
+    // kind; the deviation is recorded in mechanics/crafting-and-building.md.
+    // Softcap: Cooking caps Perception (the dough recipe's pairing).
+    Recipe {
+        id: "butter",
+        name: "Butter",
+        inputs: &[("gfx/invobjs/bucket-milk", 1)],
+        outputs: &[("gfx/invobjs/butter", 1), ("gfx/invobjs/buckete", 1)],
+        pagina: "paginae/craft/butter",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[1],
+    },
+    // Session 79: the baking breadth lands through Carrot Cake - the ONE
+    // pie whose every ingredient the economy reaches today (Carrot from
+    // the carrot crop, Butter from the butter leg above, Flour/Water from
+    // the session-71 chain). The remaining five dough pages ship their
+    // oven mappings (craft::BAKE_MAP) but stay recipe-less: Apple /
+    // Blueberries / Honey / Raisins / Chanterelles have no production
+    // source yet (the Piglet Wursts policy - no dead recipes). Unit
+    // counts are server policy: one dough per cake (the legacy 0.5 L
+    // water dough batch), Carrot x2 per the RoB Legacy page. The page's
+    // ad name is "Carrot Cake" (paginae/craft/ccdough); the crafted
+    // stack label carries the dough name the oven dispatch keys on.
+    Recipe {
+        id: "ccdough",
+        name: "Carrot Cake Dough",
+        inputs: &[
+            ("gfx/invobjs/flour", 2),
+            ("gfx/invobjs/bucket-water", 1),
+            ("gfx/invobjs/carrot", 2),
+            ("gfx/invobjs/butter", 1),
+        ],
+        outputs: &[
+            ("gfx/invobjs/dough-cake-carrot", 2),
+            ("gfx/invobjs/buckete", 1),
+        ],
+        pagina: "paginae/craft/ccdough",
+        softcap_attr: "per",
+        tool: None,
+        q_weights: &[3, 1, 2, 2],
+    },
 ];
 
 /// The one inventory resource every raw meat rides on; the species is
@@ -890,16 +990,25 @@ pub fn smelt_result(raw_label: &str) -> Option<(&'static str, &'static str)> {
         .map(|(_, out)| *out)
 }
 
-/// Clay -> brick mapping for the kiln station (build.rs
-/// StationKind::Kiln, session 69). Legacy:Brick: "Bricks are produced
-/// by burning Clay in a Kiln" - one clay burns into one brick (unit
-/// count is server policy; the legacy page records no ratio). Output
-/// quality follows the station formula (2*q_item + q_kiln + q_fuel)/4,
-/// the same rule the RoB forum's brick quality rearrangement implies
-/// (BrickQ*4 = 2*ClayQ + KilnQ + FuelQ). The world shapes ship in the
-/// pack (gfx/terobjs/items/clay, gfx/terobjs/items/brick) so the drops
-/// render without an alias.
-pub const KILN_MAP: &[(&str, (&str, &str))] = &[("Clay", ("gfx/invobjs/brick", "Brick"))];
+/// Clay -> fired wares mapping for the kiln station (build.rs
+/// StationKind::Kiln). Session 69 fired the brick leg; session 79 adds
+/// the pottery legs - the unburnt wares molded by the hand recipes
+/// (mugdough/jardough/teapotdough/treepotdough) fire into their finished
+/// forms. Keys are the unburnt display labels (the dough-*.res tooltips;
+/// the treeplanterspot dough ships no tooltip layer, so its label is the
+/// recipe's server policy name), values are (inventory resource, display
+/// label). One ware per firing, the brick unit policy. Fired wares ride
+/// the station quality formula (2*q_item + q_kiln + q_fuel)/4.
+pub const KILN_MAP: &[(&str, (&str, &str))] = &[
+    ("Clay", ("gfx/invobjs/brick", "Brick")),
+    ("Unburnt Clay Mug", ("gfx/invobjs/mug", "Clay Mug")),
+    ("Unburnt Jar", ("gfx/invobjs/jar", "Clay Jar")),
+    ("Unburnt Teapot", ("gfx/invobjs/pot-tea", "Teapot")),
+    (
+        "Unburnt Treeplanter's Pot",
+        ("gfx/invobjs/treeplanterspot", "Treeplanter's Pot"),
+    ),
+];
 
 pub fn kiln_result(raw_label: &str) -> Option<(&'static str, &'static str)> {
     KILN_MAP
@@ -927,14 +1036,44 @@ pub fn grind_result(raw_label: &str) -> Option<(&'static str, &'static str)> {
 }
 
 /// Dough -> baked goods mapping for the oven (build.rs
-/// StationKind::Oven, session 71 baking chain). The oven roasts raw
-/// meat (craft::ROAST_MAP, the output rides the meat resource) AND
-/// bakes dough: a dough label in BAKE_MAP bakes into the mapped item
-/// resource instead. Legacy Bread: flour-and-water dough baked in an
-/// oven; one dough per loaf (unit count is server policy). The
-/// recipe hand shape (Flour + Water -> Dough) is the craft.rs
-/// "dough" recipe.
-pub const BAKE_MAP: &[(&str, (&str, &str))] = &[("Bread Dough", ("gfx/invobjs/bread", "Bread"))];
+/// StationKind::Oven). Session 71 shipped the Bread leg; session 79 adds
+/// the full dough set the pack ships - apple/blueberry pies, carrot cake,
+/// raisin butter-cake, honeybun and the pirozhki. The output LABELS are
+/// the fep.conf keys (eating resolves through FepTable::get), not
+/// necessarily the resource tooltips: pie-blueberry.res carries the
+/// legacy "Bluberry Pie" typo and honeybun.res says "Honeybun" while
+/// fep.conf keys "Blueberry Pie" and "Honey Bun" - the server label
+/// wins, so both bake AND eat. Five of the six doughs still have no
+/// production source (see the RECIPES session-79 note) - the mappings
+/// make the oven ready the moment their gathering chains land.
+///
+/// (StationKind::Oven; the session-71 chain: the oven roasts raw meat
+/// through craft::ROAST_MAP AND bakes dough - a dough label in BAKE_MAP
+/// bakes into the mapped item resource instead. Legacy Bread:
+/// flour-and-water dough baked in an oven; one dough per loaf, unit
+/// count is server policy. The recipe hand shape (Flour + Water ->
+/// Dough) is the craft.rs "dough" recipe.)
+pub const BAKE_MAP: &[(&str, (&str, &str))] = &[
+    ("Bread Dough", ("gfx/invobjs/bread", "Bread")),
+    ("Apple Pie Dough", ("gfx/invobjs/pie-apple", "Apple Pie")),
+    (
+        "Blueberry Pie Dough",
+        ("gfx/invobjs/pie-blueberry", "Blueberry Pie"),
+    ),
+    (
+        "Carrot Cake Dough",
+        ("gfx/invobjs/cake-carrot", "Carrot Cake"),
+    ),
+    (
+        "Raisin Butter-cake Dough",
+        ("gfx/invobjs/cake-raisinbutter", "Raisin Butter-Cake"),
+    ),
+    ("Honeybun Dough", ("gfx/invobjs/honeybun", "Honey Bun")),
+    (
+        "Pirozhki Dough",
+        ("gfx/invobjs/feast-pirozhki", "Chantrelle & Onion Pirozhki"),
+    ),
+];
 
 pub fn bake_result(raw_label: &str) -> Option<(&'static str, &'static str)> {
     BAKE_MAP
@@ -1273,6 +1412,168 @@ Peapod=STR:0.1 PER:0.9
                 crate::resources::served("gfx/terobjs/items/brick"),
                 "the brick world shape must exist in the served pack"
             );
+        }
+    }
+
+    /// Session 79: the pottery legs fire the molded unburnt wares into
+    /// their finished forms. Every output resource AND its world shape
+    /// must ship in the pack (the drop-render rule the alloy/smelt pins
+    /// run under), and every unburnt key must match a registered molding
+    /// recipe's output label - a kiln key no recipe produces would be a
+    /// dead station leg.
+    #[test]
+    fn kiln_map_pottery_legs_are_wired() {
+        if crate::resources::RES_DIR.get().is_none() {
+            let pack = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../gameres");
+            if pack.is_dir() {
+                crate::resources::init_res_dir(pack);
+            }
+        }
+        let molding_labels: Vec<&str> = RECIPES
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.id,
+                    "mugdough" | "jardough" | "teapotdough" | "treepotdough"
+                )
+            })
+            .map(|r| r.name)
+            .collect();
+        for (key, (res, label)) in KILN_MAP {
+            if *key == "Clay" {
+                continue; // the session-69 brick leg, pinned separately
+            }
+            assert!(
+                molding_labels.contains(key),
+                "{key}: the kiln key must be a molding recipe's output label"
+            );
+            if crate::resources::RES_DIR.get().is_some() {
+                assert!(
+                    crate::resources::served(res),
+                    "{res} must exist in the served pack"
+                );
+                let base = res.rsplit('/').next().unwrap_or(res);
+                let own = format!("gfx/terobjs/items/{base}");
+                assert!(
+                    crate::resources::served(&own),
+                    "{own}: the fired ware's world shape must exist in the pack"
+                );
+            }
+            let _ = label; // the fired label rides the stack to the eat/look flow
+        }
+    }
+
+    /// Session 79: every BAKE_MAP output label must resolve its
+    /// fep.conf row - the label is the eat key (FepTable::get through
+    /// the Item.name() precedence), so a mapped label without a row
+    /// would bake into an uneatable item. The fep.conf ships with the
+    /// repo (etc/needed/fep.conf); the test reads the same file the
+    /// live server boots with (game.rs's candidate list, repo-root
+    /// depth first).
+    #[test]
+    fn bake_map_outputs_carry_fep_rows() {
+        let conf =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../etc/needed/fep.conf");
+        let text = std::fs::read_to_string(&conf)
+            .unwrap_or_else(|e| panic!("fep.conf must ship with the repo ({conf:?}): {e}"));
+        let fep = FepTable::parse(&text).expect("the shipped fep.conf must parse");
+        for (dough, (_, label)) in BAKE_MAP {
+            assert!(
+                fep.get(label).is_some(),
+                "{dough}: baked label {label:?} must resolve its fep.conf row"
+            );
+        }
+    }
+
+    /// Session 79: the six new recipes are wired end to end - the
+    /// pottery moldings (clay -> unburnt ware), the butter churn leg
+    /// (milk bucket -> butter + empty bucket back) and the carrot-cake
+    /// dough (the one pie the economy reaches). Pins: pagina and output
+    /// resources ship in the pack, the bucket-return legs match the
+    /// dough recipe's shape, and the cake dough's output label keys the
+    /// BAKE_MAP oven dispatch.
+    #[test]
+    fn pottery_butter_and_cake_recipes_are_wired() {
+        if crate::resources::RES_DIR.get().is_none() {
+            let pack = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../gameres");
+            if pack.is_dir() {
+                crate::resources::init_res_dir(pack);
+            }
+        }
+        let clay_ladder: &[(&str, u32, &str)] = &[
+            ("mugdough", 2, "Unburnt Clay Mug"),
+            ("jardough", 3, "Unburnt Jar"),
+            ("teapotdough", 5, "Unburnt Teapot"),
+            ("treepotdough", 10, "Unburnt Treeplanter's Pot"),
+        ];
+        for (id, clay, label) in clay_ladder {
+            let r = RECIPES
+                .iter()
+                .find(|r| r.id == *id)
+                .unwrap_or_else(|| panic!("{id}: the molding recipe must be registered"));
+            assert_eq!(
+                r.inputs,
+                &[("gfx/invobjs/clay", *clay)],
+                "{id}: clay ladder"
+            );
+            assert_eq!(r.outputs.len(), 1, "{id}: one ware per molding");
+            assert_eq!(r.name, *label, "{id}: the label keys the kiln dispatch");
+            assert_eq!(r.softcap_attr, "dex", "{id}: molding is a dexterity job");
+        }
+        let butter = RECIPES
+            .iter()
+            .find(|r| r.id == "butter")
+            .expect("the butter recipe must be registered");
+        assert_eq!(butter.inputs, &[("gfx/invobjs/bucket-milk", 1)]);
+        assert_eq!(
+            butter.outputs,
+            &[("gfx/invobjs/butter", 1), ("gfx/invobjs/buckete", 1)],
+            "the filled bucket must return its empty bucket"
+        );
+        let cake = RECIPES
+            .iter()
+            .find(|r| r.id == "ccdough")
+            .expect("the carrot cake dough recipe must be registered");
+        assert_eq!(
+            cake.inputs,
+            &[
+                ("gfx/invobjs/flour", 2),
+                ("gfx/invobjs/bucket-water", 1),
+                ("gfx/invobjs/carrot", 2),
+                ("gfx/invobjs/butter", 1),
+            ]
+        );
+        assert_eq!(
+            cake.outputs,
+            &[
+                ("gfx/invobjs/dough-cake-carrot", 2),
+                ("gfx/invobjs/buckete", 1),
+            ],
+            "the water bucket returns alongside the dough"
+        );
+        // The baked dough's label must key the oven dispatch (the
+        // primary output carries recipe.name as its stack label).
+        let baked = bake_result(cake.name).expect("the cake dough must bake");
+        assert_eq!(baked.1, "Carrot Cake");
+        if crate::resources::RES_DIR.get().is_some() {
+            for r in RECIPES.iter().filter(|r| {
+                matches!(
+                    r.id,
+                    "mugdough" | "jardough" | "teapotdough" | "treepotdough" | "butter" | "ccdough"
+                )
+            }) {
+                assert!(
+                    crate::resources::served(r.pagina),
+                    "{}: the craft pagina must exist in the served pack",
+                    r.pagina
+                );
+                for (res, _) in r.outputs {
+                    assert!(
+                        crate::resources::served(res),
+                        "{res}: the output resource must exist in the served pack"
+                    );
+                }
+            }
         }
     }
 

@@ -49,6 +49,7 @@ taming) that are easier to drive from python.
 | test_smelt.py | metal chain: ore deposit mine -> smelter build/fuel/light -> bar pickup (session 66) | `SMELT: OK` |
 | test_kiln.py | clay chain: shore clay picks -> kiln build -> brick fired (session 70) | `KILN: OK` |
 | test_bake.py | baking chain: saw+bucket crafts, wheat farm, bucket fill, quern grind, dough craft, oven bake (session 71; fast-crop isolated server) | `BAKE: OK` |
+| test_pottery.py | pottery chain: shore clay picks -> kiln build -> jar + mug molded -> both fired into wares (session 79) | `POTTERY: OK` |
 | load43.sh | 1000-bot duel cohort perf window | p95 histograms |
 
 ## Utilities

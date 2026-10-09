@@ -621,9 +621,15 @@ class WireClient:
             t = data[off]
             off += 1
             if t & 0x80:
+                # Bundled (non-last) sub-message: the server writes
+                # type|0x80, uint16 body-length, body (rel.rs
+                # poll_transmit) - the same shape Session.java reads.
+                # The body starts AFTER the 2 length bytes; the old
+                # data[off:off+ln] slice swallowed them and shifted
+                # every mid-bundle widget parse by 2 bytes.
                 ln = struct.unpack("<H", data[off:off + 2])[0]
-                body = data[off:off + ln]
-                off += ln
+                body = data[off + 2:off + 2 + ln]
+                off += 2 + ln
             else:
                 body = data[off:]
                 off = len(data)
