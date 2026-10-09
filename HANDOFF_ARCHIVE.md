@@ -5243,3 +5243,77 @@ NOT DONE / next session carries:
 COMMITS: 0f4fa98 (the craft/station contracts + the tool-gate fix),
 this handoff.
 
+## 2026-10-09 - Session 73 (type 5: performance)
+
+SESSION TYPE ROTATION LOG: 68=5, 69=3, 70=2, 71=3, 72=4, 73=5. All six
+types served - pick freely, avoid repeating the previous session's type.
+
+GOAL: a fresh 1000-bot saturated profile on current master, pick the
+measured dominant, optimize it data-oriented, prove the effect A/B.
+
+BASELINE (1000 saturated bots, 2 cores, workers=auto): stationary
+tick 78-150 ms in the warm-up windows, settling near 30 ms mean once
+the population stabilized; per-phase the old suspects re-confirmed
+(mvbat_fanout 16-84 ms at 204-234k pairs/tick, phase_vis 8-40 ms with
+vis_spawn_us spikes 27-30 ms, retx_sweep 5-27 ms).
+
+FINDINGS (measured, not guessed):
+
+- Fan-out sub-attribution (probe/append/unacked/send + the send tail)
+  was INSTRUMENTED FIRST and its verdict was negative in the most
+  useful way: the four stages together account for 3-8 ms of the
+  27-38 ms fan-out - the rest is the pair walk itself, i.e. the
+  structural lower bound (~150-250 ns per (session, block) pair at
+  204-288k pairs: one aligned bitset word + one authoritative-set
+  probe + a 30-60 B memcpy). The dense-cell/bitset/lazy-datagram
+  cuts from S57/S68 already banked the available wins; no further
+  single-index work is justified. The instrumentation itself was
+  REMOVED after measurement: three Instant::now() calls per pair cost
+  ~150-200 ns x 270k pairs (~40 ms/tick) - the probe out-weighed every
+  stage it measured at that scale. Do not re-add per-pair timers.
+- vis Phase B (serial spawn application) probed the authoritative
+  visible set for EVERY scanned candidate - ~1.5M scattered HashSet
+  probes per tick at the 1000-session scale (vis_spawn_us 27-30 ms
+  spikes; the 20ns/probe cache-miss price times the candidate volume
+  matched the measured wall time exactly).
+
+THE FIX (d22f590): the is-new probe moved into the parallel Phase A
+scan pass (rayon already shares &self immutably): each candidate lands
+with a pre-computed `fresh` flag (ScanRanges gained a parallel
+Vec<bool>), and the serial Phase B loop only touches the rare new ids
+(a few per tick) instead of probing the whole candidate volume. The
+exact-set probe stays the sole authority - the per-slot bitset mirror
+is deliberately NOT used here: it keys slots, not ids, so a reused
+slot could suppress a real spawn (a false negative forever until the
+next rescan). stream_spawn still dedupes on insert, so a stale flag
+costs one redundant call, never a wrong or missing block.
+
+VERIFIED A/B (both sides 200 s, 1000 saturated bots, last 20 windows,
+full population):
+
+- tick mean 30.1 -> 25.6 ms (-15%); vis spawn tail 4.1 -> 1.9 ms
+  (-54%); phase_vis 10.2 -> 8.6 ms; vis_scan absorbed the probes
+  (4.7 -> 6.0 ms, parallel).
+- Gate: fmt + clippy -D warnings clean; cargo test --workspace 316
+  green (11 proto + 286 unit [1 ign] + 7 wire [1 ign] + 12 world) -
+  the first workspace run had a wire flake (two concurrent boots on
+  the 2-core sandbox, the known S64 pattern), clean on rerun x2.
+- Live smoke: WORLD ENTRY: OK + CATTR ORDER: OK + EAT FLOW: OK.
+
+NOT DONE / next session carries:
+
+- retx_sweep 5-27 ms is now the clearest remaining serial cost: 12-37k
+  pending blocks x (2-3 hash probes + BTreeMap walk + a deep clone per
+  resend). A cache-friendly unacked layout (inline block bytes, no
+  BTreeMap node per insert) is the natural type-5 follow-up.
+- vis: the full rescan per moving session is the remaining scan cost
+  (a session crossing a cell re-scans its whole rectangle). A
+  delta-scan (new cell strip only) is a bigger refactor - measure
+  first whether it still pays after this session's move.
+- Carried: GL e2e + Windows smoke; CI push (the PAT still lacks the
+  workflow scope); multi-machine cluster profile; the itemact reach
+  policy question; NEWWDG bundled-frame decode monitor.
+
+COMMITS: d22f590 (the vis is-new probe rides the parallel scan pass),
+this handoff.
+

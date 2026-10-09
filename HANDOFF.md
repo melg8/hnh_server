@@ -153,7 +153,9 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
   bound) plus per-phase sub-attribution (mv scan 22-40 us, encode
   3-14 us, fan-out the rest) and a dense-vs-full-scan micro-bench
   (324 vs 472 ns per fan-out scan, ratio before counting the HashMap
-  cache misses the old walk also paid).
+  cache misses the old walk also paid); session-75: RSS ~830 MB at
+  1000 saturated sessions (~0.8 MB/session, 10k ≈ 8 GB) and the
+  autosave boundary spikes gone after the background-flush move.
 - Real-client e2e: scripts/jogl/ boots the real GL client under Xvfb
   (login, Robot map clicks, MOVEMENT/portrait/equipment verdicts;
   sessions 21/25/45). Windows: windows/ one-command scripts (fix log
@@ -248,6 +250,10 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    re-scans the whole rectangle) - a delta-scan (new cell strip only)
    is a bigger refactor; re-measure whether it still pays after the
    S73 parallel-probe move.
+11. **10k memory footprint** (S75 measured): ~0.8 MB RSS per saturated
+   session (830 MB at 1000) - the 10k single-process extrapolation is
+   ~8 GB plus the per-node game/world overhead. Fits a 16-32 GB node;
+   the horizontal split stays the real lever beyond that (gap 2).
 
 ## Session type rotation log (consolidated)
 
@@ -257,7 +263,7 @@ logged. All six types have been served - pick freely, but avoid serving
 the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
 48=3, 49=2, 50=4, 51=3, 52=5, 53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5,
 60=3, 61=2, 62=3, 63=4, 64=1, 65=5, 66=3, 67=4, 68=5, 69=3, 70=2, 71=3,
-72=4, 73=5, 74=0.
+72=4, 73=5, 74=0, 75=1.
 
 ## Session index (one line each; full entries in the archive)
 
@@ -358,80 +364,12 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
   debug diagnostics attic'ed; Known gaps consolidated with the S73
   verdicts + the named perf follow-ups; CLAUDE.md index numbers
   refreshed; the 13th CI push retry failed on the PAT scope.
-
-## 2026-10-09 - Session 73 (type 5: performance)
-
-SESSION TYPE ROTATION LOG: 68=5, 69=3, 70=2, 71=3, 72=4, 73=5. All six
-types served - pick freely, avoid repeating the previous session's type.
-
-GOAL: a fresh 1000-bot saturated profile on current master, pick the
-measured dominant, optimize it data-oriented, prove the effect A/B.
-
-BASELINE (1000 saturated bots, 2 cores, workers=auto): stationary
-tick 78-150 ms in the warm-up windows, settling near 30 ms mean once
-the population stabilized; per-phase the old suspects re-confirmed
-(mvbat_fanout 16-84 ms at 204-234k pairs/tick, phase_vis 8-40 ms with
-vis_spawn_us spikes 27-30 ms, retx_sweep 5-27 ms).
-
-FINDINGS (measured, not guessed):
-
-- Fan-out sub-attribution (probe/append/unacked/send + the send tail)
-  was INSTRUMENTED FIRST and its verdict was negative in the most
-  useful way: the four stages together account for 3-8 ms of the
-  27-38 ms fan-out - the rest is the pair walk itself, i.e. the
-  structural lower bound (~150-250 ns per (session, block) pair at
-  204-288k pairs: one aligned bitset word + one authoritative-set
-  probe + a 30-60 B memcpy). The dense-cell/bitset/lazy-datagram
-  cuts from S57/S68 already banked the available wins; no further
-  single-index work is justified. The instrumentation itself was
-  REMOVED after measurement: three Instant::now() calls per pair cost
-  ~150-200 ns x 270k pairs (~40 ms/tick) - the probe out-weighed every
-  stage it measured at that scale. Do not re-add per-pair timers.
-- vis Phase B (serial spawn application) probed the authoritative
-  visible set for EVERY scanned candidate - ~1.5M scattered HashSet
-  probes per tick at the 1000-session scale (vis_spawn_us 27-30 ms
-  spikes; the 20ns/probe cache-miss price times the candidate volume
-  matched the measured wall time exactly).
-
-THE FIX (d22f590): the is-new probe moved into the parallel Phase A
-scan pass (rayon already shares &self immutably): each candidate lands
-with a pre-computed `fresh` flag (ScanRanges gained a parallel
-Vec<bool>), and the serial Phase B loop only touches the rare new ids
-(a few per tick) instead of probing the whole candidate volume. The
-exact-set probe stays the sole authority - the per-slot bitset mirror
-is deliberately NOT used here: it keys slots, not ids, so a reused
-slot could suppress a real spawn (a false negative forever until the
-next rescan). stream_spawn still dedupes on insert, so a stale flag
-costs one redundant call, never a wrong or missing block.
-
-VERIFIED A/B (both sides 200 s, 1000 saturated bots, last 20 windows,
-full population):
-
-- tick mean 30.1 -> 25.6 ms (-15%); vis spawn tail 4.1 -> 1.9 ms
-  (-54%); phase_vis 10.2 -> 8.6 ms; vis_scan absorbed the probes
-  (4.7 -> 6.0 ms, parallel).
-- Gate: fmt + clippy -D warnings clean; cargo test --workspace 316
-  green (11 proto + 286 unit [1 ign] + 7 wire [1 ign] + 12 world) -
-  the first workspace run had a wire flake (two concurrent boots on
-  the 2-core sandbox, the known S64 pattern), clean on rerun x2.
-- Live smoke: WORLD ENTRY: OK + CATTR ORDER: OK + EAT FLOW: OK.
-
-NOT DONE / next session carries:
-
-- retx_sweep 5-27 ms is now the clearest remaining serial cost: 12-37k
-  pending blocks x (2-3 hash probes + BTreeMap walk + a deep clone per
-  resend). A cache-friendly unacked layout (inline block bytes, no
-  BTreeMap node per insert) is the natural type-5 follow-up.
-- vis: the full rescan per moving session is the remaining scan cost
-  (a session crossing a cell re-scans its whole rectangle). A
-  delta-scan (new cell strip only) is a bigger refactor - measure
-  first whether it still pays after this session's move.
-- Carried: GL e2e + Windows smoke; CI push (the PAT still lacks the
-  workflow scope); multi-machine cluster profile; the itemact reach
-  policy question; NEWWDG bundled-frame decode monitor.
-
-COMMITS: d22f590 (the vis is-new probe rides the parallel scan pass),
-this handoff.
+- S75 (type 1): 10k-readiness audit - the blocking world flush found
+  on the game loop and moved to a blocking thread (bench: 95 ms stall
+  per autosave at 1k players, 519 ms at 10k; after: clone-only 8/55
+  ms); live A/B confirmed the boundary spikes gone; RSS footprint
+  ~0.8 MB/session (10k ≈ 8 GB); the 14th CI push retry failed on the
+  same PAT scope (probed via a side branch, master untouched).
 
 ## 2026-10-09 - Session 74 (type 0: docs hygiene)
 
@@ -482,3 +420,53 @@ the vis delta-scan are the named type-5 candidates; GL e2e + Windows
 smoke; the multi-machine cluster profile).
 
 COMMITS: 9ea65f8 amended to 49d7047 (the docs hygiene), this handoff.
+
+## 2026-10-09 - Session 75 (type 1: architecture review)
+
+SESSION TYPE ROTATION LOG: 70=2, 71=3, 72=4, 73=5, 74=0, 75=1. All six
+types served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the 10k-readiness audit - find the architectural risks on the
+path to the 10k-session target, verify them with measurements, land one
+structural fix.
+
+FOUND (measured, not guessed):
+
+- PERSIST ON THE GAME LOOP (the landed fix): the 30 s autosave ran
+  clone + JSON serialize + write inline on the game-task select loop.
+  The new explicit bench (persist_flush_phase_bench_scales_to_10k,
+  #[ignore], realistic per-character volume + fixed world volume)
+  decomposed the flush: clone 8 ms / serialize 86 ms / write 1 ms at
+  1k players; clone 55 ms / serialize 457 ms / write 7 ms at 10k
+  (12.8 MB file). Total stall per save: 95 ms at 1k (the whole tick
+  budget), 519 ms at 10k (five ticks). load() read-back: 61/359 ms -
+  fine for startup.
+- THE FIX: flush() split into snapshot_data() (the clone; stays on
+  the loop) + write_file() (serialize + atomic rename with a unique
+  tmp suffix; blocking thread) + flush_background() wiring them via
+  tokio::task::spawn_blocking. The 30 s autosave (lifecycle.rs) and
+  the CharAck migration flush (cluster.rs) go background; the
+  shutdown path keeps the synchronous flush() (the process must
+  outlive the write). A/B on the recorded logs: the S73 sync-flush
+  runs show 87-97 ms wmax_tick spikes in the 30 s boundary windows
+  (30s=97, 60s=87, 120s=87 ms - matching the 95 ms bench estimate);
+  the S75 background run's boundary windows sit at the noise level
+  (32/57/54 ms). New pin: flush_background_matches_flush (bytes equal,
+  no tmp residue). Gate 317 green; smoke CATTR + EAT FLOW OK.
+- MEMORY FOOTPRINT (audit fact, gap #11): RSS ~830 MB at 1000
+  saturated sessions (~0.8 MB/session; 10k single-process ≈ 8 GB) -
+  fits a 16-32 GB node; the horizontal grid split stays the real
+  lever beyond that.
+- AUDIT VERDICTS (no action needed): auth spawns per connection
+  (burst-safe); net per-session driver tasks + bounded raw queues
+  (structural floor ~tens of MB at 10k); the fan-out pair walk is
+  the confirmed compute floor (S73) and the cluster pair-cap verdict
+  (S59) stands - nodes on separate machines for >1k.
+
+CI: 14th retry - the workflow file was probed via a side branch
+(ci-probe-14) to keep master's history clean; the remote rejected it
+on the same missing `workflow` PAT scope; the branch was deleted
+locally. The S74 lesson stands: no destructive rollback around
+staged work.
+
+COMMITS: 037240c (the background flush), this handoff.
