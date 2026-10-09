@@ -220,7 +220,38 @@ public class Resource implements Comparable<Resource>, Prioritized,
                                 }
                         };
                 }
-                chainloader(new Loader(src));
+                chainloader_before_jar(new Loader(src));
+        }
+
+        /**
+         * Chain a server-supplied loader ahead of the offline JarSource.
+         *
+         * The jar carries the upstream server's historical resource files,
+         * whose embedded AButton parent_ver values disagree with this
+         * server's pack (e.g. the jar's paginae/atk/dodge requests its
+         * parent paginae/atk/blk at ver 28484, while this server's pack
+         * ships blk at ver 1). Decoding the jar copy therefore asks for a
+         * parent version the pack never had and kills the menu with
+         * "Wrong res version (1 != 28484)" on world entry. The remote pack
+         * is self-consistent by construction (fix_gameres_parent_refs.py),
+         * so it must win; resources absent from the pack still fall
+         * through to the jar via the normal Loader chain.
+         */
+        private static void chainloader_before_jar(Loader nl) {
+                synchronized (Resource.class) {
+                        if (loader == null) {
+                                loader = nl;
+                        } else if (loader.src instanceof JarSource) {
+                                nl.next = loader;
+                                loader = nl;
+                        } else {
+                                Loader l = loader;
+                                while ((l.next != null) && !(l.next.src instanceof JarSource))
+                                        l = l.next;
+                                nl.next = l.next;
+                                l.next = nl;
+                        }
+                }
         }
 
         private static void chainloader(Loader nl) {

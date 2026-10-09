@@ -27,4 +27,5 @@ chats/
 server/save/
 build-classes8/
 scripts/jogl/agent/*.class
+client-probe/*.class
 save/e2e_*.json
