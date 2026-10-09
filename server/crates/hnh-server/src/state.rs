@@ -109,6 +109,26 @@ impl BlockBytes {
         }
     }
 
+    /// Copy shared encoded bytes (session 82). The fan-out hot path
+    /// records finalizer blocks whose bytes live in the batch's packed
+    /// `data` buffer - `record_unacked` used to take them as `to_vec()`
+    /// (malloc + copy on the tick thread, then a second copy into this
+    /// inline buffer and a free), ~24k times per tick at the 1000-bot
+    /// scale. This constructor copies straight into the inline variant;
+    /// only oversize blocks pay one heap allocation.
+    pub fn from_slice(s: &[u8]) -> Self {
+        if s.len() <= UNACKED_INLINE {
+            let mut buf = [0u8; UNACKED_INLINE];
+            buf[..s.len()].copy_from_slice(s);
+            BlockBytes::Inline {
+                len: s.len() as u16,
+                buf,
+            }
+        } else {
+            BlockBytes::Heap(s.to_vec())
+        }
+    }
+
     pub fn as_slice(&self) -> &[u8] {
         match self {
             BlockBytes::Inline { len, buf } => &buf[..*len as usize],
@@ -2330,6 +2350,25 @@ mod unacked_tests {
         let copy = original.clone();
         assert_eq!(copy.as_slice(), &[7u8; 40][..]);
         assert_eq!(copy.len(), 40, "Deref Target = [u8]");
+    }
+
+    /// Session 82: `from_slice` copies borrowed bytes straight into the
+    /// inline variant (zero allocation for blocks within the inline
+    /// width) and spills oversize slices to one heap buffer - the same
+    /// layout contract `from_vec` keeps.
+    #[test]
+    fn block_bytes_from_slice_matches_from_vec() {
+        for n in [0usize, 1, 8, UNACKED_INLINE, UNACKED_INLINE + 1] {
+            let src: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+            let borrowed = BlockBytes::from_slice(&src);
+            let owned = BlockBytes::from_vec(src.clone());
+            assert_eq!(borrowed.as_slice(), owned.as_slice(), "n={}", n);
+            match (n <= UNACKED_INLINE, &borrowed) {
+                (true, BlockBytes::Inline { .. }) => {}
+                (false, BlockBytes::Heap(_)) => {}
+                _ => panic!("n={} took the wrong variant", n),
+            }
+        }
     }
 
     /// The flat per-gob table keeps the BTreeMap contract: ascending

@@ -848,7 +848,7 @@ impl Game {
                             m.bytes(bytes);
                             if fin {
                                 perf.fanout_fin += 1;
-                                Self::record_unacked(out, id, frame, bytes.to_vec(), false);
+                                Self::record_unacked_slice(out, id, frame, bytes);
                             }
                         }
                     }
@@ -877,6 +877,39 @@ impl Game {
         block: Vec<u8>,
         critical: bool,
     ) {
+        Self::record_unacked_inner(
+            out,
+            id,
+            frame,
+            crate::state::BlockBytes::from_vec(block),
+            critical,
+        );
+    }
+
+    /// Same record, bytes borrowed from the batch's packed `data`
+    /// buffer (session 82). The fan-out's shared-block path called
+    /// `record_unacked(.., bytes.to_vec(), ..)`: one malloc + copy on
+    /// the tick thread per finalizer hit (~24k/tick at 1000 saturated
+    /// bots) whose only destination was the inline buffer anyway.
+    /// `from_slice` copies straight in; oversize blocks pay one
+    /// allocation, same as before.
+    pub(super) fn record_unacked_slice(out: &mut SessionOut, id: GobId, frame: u32, bytes: &[u8]) {
+        Self::record_unacked_inner(
+            out,
+            id,
+            frame,
+            crate::state::BlockBytes::from_slice(bytes),
+            false,
+        );
+    }
+
+    fn record_unacked_inner(
+        out: &mut SessionOut,
+        id: GobId,
+        frame: u32,
+        bytes: crate::state::BlockBytes,
+        critical: bool,
+    ) {
         const UNACKED_CAP: usize = 4;
         let now = Instant::now();
         let per = out
@@ -888,7 +921,7 @@ impl Game {
         // heap node is allocated for the entry itself.
         per.insert_sorted(crate::state::UnackedBlock {
             frame,
-            bytes: crate::state::BlockBytes::from_vec(block),
+            bytes,
             last_sent: now,
             born: now,
             tries: 0,
