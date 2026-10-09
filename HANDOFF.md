@@ -191,11 +191,11 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    the leather tier (via the tanhide/string fork pages) now craft.
    WORLD GATHERING CLOSED (session 60). METAL GATHERING CLOSED
    (session 66: ore deposits + a working smelter; the tin leg of
-   test_smelt.py still has the S67 reach oscillation). KILN BUILT,
-   NOT VERIFIED (session 69): clay -> kiln -> brick committed
-   (d4b965a) but never driven on a live server - test_kiln.py hits a
-   suspected sink_demand bug ("the second sink round loses the
-   clay"); debug_kiln_sink.py is the unfinished investigation.
+   test_smelt.py still has the S67 reach oscillation). KILN CHAIN
+   CLOSED (session 70: driven end to end on a live server - shore clay
+   pick, kiln build, brick fired; the S69 "second sink round loses the
+   clay" suspicion was a real plan -> station sink gap, fixed with the
+   completion sysline 'The <id> is finished.').
    Remaining dead ends: pottery beyond bricks, wurst/sausage and
    baking doughs (station cooking depth), flour/bread (the 2009 pack
    has no grain item - sprout/grist only, see farm.rs).
@@ -236,7 +236,7 @@ Per the alternating-goal rule (one goal per session; the user prompt
 re-lists it every time). Sessions 1-44 predate the rule and were not
 logged. Recorded tail: 45=3, 46=3, 47=3, 48=3, 49=2, 50=4, 51=3, 52=5,
 53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5, 60=3, 61=2, 62=3, 63=4, 64=1, 65=5,
-66=3, 67=4, 68=5, 69=3. All six
+66=3, 67=4, 68=5, 69=3, 70=2. All six
 types have been served - pick freely, but avoid serving the same type as
 the previous session.
 
@@ -310,12 +310,16 @@ the previous session.
   layer (mapdata reassembly, BFS find_tile_path, nav_walk); MAPDATA pktid fix
   (monotonic mapdata_seq); test_smelt.py rewrite (copper leg stable, tin reach
   oscillation open); 307 green.
-- S68 (type 5): fan-out pair attribution + wmax phase snapshot instrumented
+- S68 (type 5): fan-out pair attribution + wmax phase snapshot instrumented;
+  the two named S65 candidates identified and fixed (visible bitset fast
+  path, ack-lag adaptive retx RTO, conditional retire pass).
 - S69 (type 3, record reconstructed by S70): clay deposits + kiln station
   committed (d4b965a, 311 green); the clay -> brick chain was never
   verified live - test_kiln.py + a suspected sink_demand bug left behind.
-  the two named S65 candidates and fixed them (visible bitset fast path,
-  ack-lag adaptive retx RTO, conditional retire pass) - see the S68 entry.
+- S70 (type 2): game.rs split wave 2 - pose/lifecycle/entry/social/relay
+  children (3634 -> 1287 lines, pure move, pub(super) parent-only
+  methods); the S69 kiln debt closed - chain driven live end to end,
+  the "lost clay" sink bug fixed (completion sysline) + probe hardening.
 
 ## 2026-10-08 - Session 67 (type 4: test coverage)
 
@@ -566,3 +570,61 @@ NOT DONE (the debt session 70 inherits):
 - The HANDOFF record (this entry) and the rotation-log/index updates.
 
 COMMITS: d4b965a (clay deposits + kiln station, wave 1).
+
+## 2026-10-09 - Session 70 (type 2: refactoring / tech debt)
+
+SESSION TYPE ROTATION LOG: 65=5, 66=3, 67=4, 68=5, 69=3, 70=2.
+
+GOAL: game.rs had regrown to 3634 lines after the S49/S55 splits (every
+feature wave S58-S68 landed in the parent) - the top type-2 debt.
+Secondary: the inherited S69 debt (the kiln chain committed but never
+driven live).
+
+DONE (committed across this session):
+
+- Wave 1 (d1ae3ab): game.rs split into five adjacent-file child
+  modules, a pure move on the S49/S55 pattern (proj-mod-by-feature;
+  methods only the parent calls are pub(super), proj-pub-super-parent;
+  no signatures changed):
+  - game/pose.rs (190): pose layer tables, move_dir/art_dir. The pub
+    use re-export keeps crate::game::move_dir/art_dir reachable for
+    the state.rs/nodes.rs doc references; the table accessors ride a
+    pub(super) re-export into the sibling stream/interact/cluster
+    globs (a glob only pulls items declared in game itself).
+  - game/lifecycle.rs (430): autosave + save_all_and_flush, handle_cmd,
+    report_perf, persist_player, on_session_closed.
+  - game/entry.rs (633): session_connected, char_attr_snapshot,
+    enter_world/enter_world_inner, find_spawn_position.
+  - game/social.rs (631): chat relay, party invite/join/leave/sync, LP
+    skill shop, chr/mapview/speedget widgets.
+  - game/relay.rs (540): the authority-side legs applying guest-node
+    relayed interactions (plant/plow/station/static/harvest/pickup/
+    swing); the wire contracts stay in game/cluster.rs.
+  game.rs: 3634 -> 1287 lines (the Game struct, constructors, run
+  loop, tick, on_wdgmsg dispatch, shared wire helpers). GitNexus
+  impact (enter_world) flagged HIGH pre-edit - compensated by the
+  full gate; detect-changes run pre-commit. VERIFIED: fmt clean,
+  clippy -D warnings clean, 311 green.
+- Wave 2 (222a9ad): the S69 kiln debt closed. The chain was driven
+  end to end on a live server (shore clay pick 46/48, kiln built from
+  one merged 45-unit delivery, brick fired through fuel + input +
+  Light, Brick q10 in the inventory) and surfaced two real bugs:
+  - The plan -> station conversion keeps the gob id, so a deliverer
+    that keeps sinking to the old plan target fed the new STATION's
+    input slot - the S69 "second sink round loses the clay" suspicion
+    confirmed as a real plan/station sink contract gap. Server policy:
+    sink_material now announces completion with the system line
+    'The <id> is finished.' (recorded in crafting-and-building.md).
+  - test_kiln.walk_to_shore started walking before the shore grid
+    (gc 1,0) streamed in - BFS only walks loaded tiles. The probe
+    now waits for the grid (debug_kiln_nav*.py keep the record).
+  test_kiln.py hardened: sink_demand stops on the completion line
+  (chat lines cleared per build), build_kiln asserts the announcement
+  + the station re-render (a full-demand delivery never shows an
+  intermediate stage byte). VERIFIED LIVE: KILN: OK. Gate: fmt +
+  clippy -D warnings clean, 311 green.
+- Housekeeping: debug_kiln_sink.py dropped - its investigation is
+  closed by the wave-2 finding.
+
+COMMITS: d1ae3ab (the split), 222a9ad (kiln verified + fixes), this
+handoff + the sink-probe removal.
