@@ -273,7 +273,7 @@ logged. All six types have been served - pick freely, but avoid serving
 the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
 48=3, 49=2, 50=4, 51=3, 52=5, 53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5,
 60=3, 61=2, 62=3, 63=4, 64=1, 65=5, 66=3, 67=4, 68=5, 69=3, 70=2, 71=3,
-72=4, 73=5, 74=0, 75=1, 76=2, 77=3, 78=5, 79=3, 80=4, 81=3.
+72=4, 73=5, 74=0, 75=1, 76=2, 77=3, 78=5, 79=3, 80=4, 81=3, 82=5.
 
 ## Session index (one line each; full entries in the archive)
 
@@ -406,90 +406,16 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
   ver 1, killed the menu on world entry); the stale tracked
   server/gameres snapshot dropped (43 MB, outdated overlay, the
   fresh-clone landmine); UiProbe tri-mode green, 326 green.
-## 2026-10-09 - Session 80 (type 4: the client resource-source order fix)
 - S81 (type 3): the dough ingredient chains - five forageable
   kinds + apple trees + wild hives + raisins hand recipe close
   the S79 baking dead ends; multi-unit Drop stacks; the fork
   pagina generator learns real parent versions; test_dough.py
   live probe.
-
-SESSION TYPE ROTATION LOG: 74=0, 75=1, 76=2, 77=3, 78=5, 79=3, 80=4.
-All six types served - pick freely, avoid repeating the previous session's
-type.
-
-GOAL: the session opened on the S79 working-tree leftovers (debug prints
-in the client tree, uncommitted diagnostics) and immediately hit a hard
-client blocker: UiProbe died on world entry with a MenuGrid
-PaginaException - the same "Wrong res version (1 != 28484)" an S40-era
-note had attributed to an in-frame pagina desync. Chasing it consumed the
-session; the root cause and a two-commit fix landed.
-
-DONE:
-
-- ROOT CAUSE (client resource-source order): the static Resource loader
-  chain ends with JarSource (lib/haven-res.jar) and addurl() chained the
-  server's HTTP pack AFTER it, so every resource present in both was
-  decoded from the jar's historical copy. The jar's paginae/atk/dodge
-  embeds AButton parent "paginae/atk/blk" at pver 28484 (the upstream
-  server's version of that file), while this server's pack ships blk at
-  ver 1 (the fix_gameres_parent_refs.py alignment). Decoding the jar copy
-  asked for a parent version the pack never had: the load died with
-  "Wrong res version (1 != 28484)", MenuGrid.getSubResources threw
-  PaginaException, the RemoteUI thread died - the reported black screen
-  after entering the world. Latent since S40 (dodge entered the PAGINAE
-  push then); UiProbe simply had not been run against the full page set
-  since.
-- FIX (Resource.addurl): the server source is now inserted AHEAD of the
-  JarSource entry (new chainloader_before_jar). The self-consistent
-  remote pack wins; resources absent from the pack still fall through to
-  the jar via the normal Loader chain. Verified against the live server
-  with HAVEN_RESDIR unset - exactly the real user's classpath.
-- MINE #2 (stale tracked pack): server/gameres/ was a 43 MB tracked pack
-  snapshot frozen around S40 - missing the five later overlay resources
-  (paginae/craft/string + tanhide, gfx/hud/vilind, gfx/borka hair/head)
-  and still carrying the unaligned dodge parent_ver. default_repo_dir's
-  exe-anchored fallback picks it whenever the generated repo-root
-  gameres/ is absent, so a fresh clone that skipped make-gameres silently
-  served a menu-killing pack (reproduced: UiProbe against it died on
-  paginae/craft/string). The snapshot is deleted; the generated
-  repo-root gameres/ is the single source of truth (start-server.bat and
-  run-client.bat auto-generate it; a missing pack fails fast with the
-  generation instructions). fix_gameres_parent_refs.py --check gameres:
-  stale=0.
-- DEBUG PRINTS RETIRED: the temporary PAGDBG (Glob), BLKLOAD trace
-  (Resource.load) and RESIDDBG (Session) inserts never existed in master
-  (uncommitted working-tree edits only) and are gone; the tree is clean.
-- client-probe/ResLayers.java: tiny CLI that loads a res from the served
-  pack and prints its Image/AButton/Code layers - the tool that nailed
-  the diagnosis (blk HAS an action layer; the failure was purely the
-  version mismatch). Committed for future res debugging.
-- Diagnostics deleted: server/scripts/diag_nav.py (S79 shore-BFS helper,
-  superseded by the NAV DIAG inside test_pottery.py) and sniff_paginae.py
-  (pre-fix paginae sniffer). client-probe/*.class added to .gitignore.
-- Repro tool kept OUT of the repo: /home/z/my-project/scripts/pver_recon.py
-  raw-scans a pack root for paginae/ parent links and diffs the embedded
-  pver against the parent file's real version (PACK=<root> env).
-
-MEASURED/EVIDENCE: UiProbe run/equip/charlist all green post-fix (run
-built the full widget set - MapView, SlenHud, MenuGrid, Speedget,
-Bufflist, ChatHW, VMeter x3, Equipory, CharWnd - with zero version
-errors); python test_client WORLD ENTRY: OK + CATTR ORDER: OK; cargo gate
-untouched green: fmt + clippy clean, 326 workspace tests (11 proto +
-296 unit [2 ign] + 7 wire [1 ign] + 12 world).
-
-NOT DONE / next session carries: everything the S79 record lists (butter
-+ carrot-cake live chain drive, the five dough ingredient chains, the
-vis delta-scan re-measure, multi-machine cluster profile, CI push retry)
-plus the new client tail: stand the UiProbe tri-mode up as a gate script
-(the attic verify_ui_probe.sh predates the JDK layout; its java -m
-jdk.compiler path cannot compile --release 8 without ct.sym - use a full
-JDK's javac as windows/run-client.bat does via ant) and consider wiring
-fix_gameres_parent_refs.py --check into make-gameres so a freshly
-generated pack is self-verified.
-
-COMMITS: 4a35d9d (client: serve the remote pack before the offline jar),
-e5c933b (repo: drop the stale server/gameres snapshot), this handoff.
-
+- S82 (type 5): the tick tail fully attributed (tail_us +
+  startbat_fanout_us + retx_retire_us + retx_retired_gobs), the
+  targeted retire pass (37 -> 7 ms max), zero-alloc finalizer
+  records in the fan-out; the dough pie cycle driven live end to
+  end; load82.sh A/B harness.
 ## 2026-10-09/10 - Session 81 (type 3: the dough ingredient chains)
 
 SESSION TYPE ROTATION LOG: 77=3, 78=5, 79=3, 80=4, 81=3. All six types
@@ -569,3 +495,91 @@ scope as of S74/S75 retries).
 
 COMMITS: a3c3394 (world: the five dough ingredient chains close the
 baking breadth), this handoff.
+
+## 2026-10-10 - Session 82 (type 5: the tick-tail attribution and retirement)
+
+SESSION TYPE ROTATION LOG: 79=3, 80=4, 81=3, 82=5. All six types served -
+pick freely, avoid repeating the previous session's type.
+
+GOAL: close the S81 PIE tail first (the dough->bake->eat pie cycle), then
+serve type 5 against the named gap: the perf log carried 45-70 ms of
+tick time on burst ticks that no phase counter owned. The session was
+interrupted twice by context loss mid-measurement; the final
+continuation verified the tree, committed, measured, and closed.
+
+DONE:
+
+- PIE LEG LIVE (the S81 NOT-DONE tail): test_dough.py grew
+  blueberry_pie_leg - branches -> bucket (craft) -> water fill ->
+  walk_to_grass ring scan -> farm wheat -> grind flour -> knead
+  blueberry dough -> oven pie -> EAT. Two probe bugs fixed on the
+  way: gather_branches waited for the whole want in one pickup
+  (inventory grows one pick at a time - incremental before/after
+  wait) and the farm leg ran deep in the broadleaf forest where
+  plow_tile refuses everything but grass (farming.rs) - a
+  TILE_SPAN ring scan now walks to a real grass field first.
+  DOUGHPIE: OK live, committed 18adc43.
+- TAIL ATTRIBUTION: tail_us now names the post-phase gap (the
+  retransmit sweep's retire walk, the rare sweeps, the dirty-index
+  clear, the tick-end start/FX batch fan-out), and
+  startbat_fanout_us splits the start/FX batch share out of
+  mvbat_fanout_us (which sums both fan-outs). retx_retire_us is
+  timed separately because the retire walk runs AFTER
+  retx_sweep_us is recorded. The four counters now own the whole
+  tail (worst steady tick: owned 100-111%, >100% is cross-tick
+  boundary wrap). Committed f18aac8 + 1df83e0.
+- TARGETED RETIRE: the untargeted expire-retire pass rescanned
+  EVERY session's unacked table after each sweep (O(sessions x
+  pending), retain) and measured 37 ms max on burst ticks at 1000
+  bots. The sweep already knows which sessions it saw expired
+  blocks on, so the pass now walks that sid list
+  (retire_scratch, a session-id ring like retx_scratch). A
+  budget-skipped session retires on a later sweep - the ring
+  cursor rotates through all sessions and the 10 s age ceiling
+  dwarfs the 3-tick sweep period. retx_retired_gobs confirms the
+  scope. Measured (load82.sh, 1000 saturated walking bots,
+  steady): retire max 37013 -> 6964 us (-81%), tail max 61258 ->
+  43947 (-28%), wmax p50 89811 -> 68178 (-24%), mean tick 49070 ->
+  37961 (-23%). Committed 6caa31f.
+- ZERO-ALLOC FINALIZER RECORDS: the fan-out's shared-block path
+  recorded finalizer hits with bytes.to_vec() (malloc + copy on
+  tick thread, then a second copy into BlockBytes' inline buffer
+  and a free) - ~24k hits/tick at the 1000-bot scale, movement
+  finalizer blocks are ~24 bytes, well inside the 144-byte inline
+  width. BlockBytes::from_slice copies straight in; oversize
+  re-render blocks pay one allocation, same as before.
+  record_unacked split into owned/slice wrappers over one inner.
+  Unit pin block_bytes_from_slice_matches_from_vec (0/1/8/144/145
+  boundary + variant choice). Measured honestly: the tick-level
+  effect is BELOW the sandbox run-to-run noise (three post-fix
+  runs: startbat p50 11.7/11.7/15.2 vs 11.7 pre-fix; identical
+  code spreads tick p50 27-64 ms across runs) - the malloc is
+  gone by construction, structural relief in the S78 family.
+  Committed fe9388d.
+- load82.sh: the A/B harness - boots the release binary with 1000
+  in-process saturated walking bots, holds the steady state
+  (DUR=90 default), summarizes tail attribution + tick budget
+  and the worst-tick ownership check from the perf log.
+- scripts/analyze_perf.py kept OUT of the repo (session-local log
+  comparison helper) in /home/z/my-project/scripts/.
+
+MEASURED/EVIDENCE: gate green throughout - fmt, clippy -D
+warnings, 328 workspace tests (11 proto + 298 unit [2 ign] + 7
+wire [1 ign] + 12 world; one wire run flaked on the documented
+2-core concurrent-boot starvation, rerun green); DOUGHPIE live;
+load82.sh A/B numbers above. GitNexus: the AGENTS.md record
+stands (deployed S67); no local .gitnexus index in this sandbox -
+impact analysis done by grep + reading, per the standing note.
+
+NOT DONE / next session carries: the vis delta-scan re-measure
+(gap #10b) - untouched this session, the time went to the
+tail-attribution family; butter + carrot-cake live chain drive
+(milk needs a tamed cow, carrots need the crop walk); no dough
+OTHER than Bread and the blueberry pie oven-fired live yet;
+multi-machine cluster profile; GL e2e + Windows smoke; CI push
+retry (the PAT still lacks the workflow scope).
+
+COMMITS: 18adc43 (dough: the pie leg live end to end), f18aac8
+(perf: tail attribution), 1df83e0 (perf: retire pass and start
+batch own the tail), 6caa31f (perf: targeted retire), fe9388d
+(perf: zero-alloc finalizer records), this handoff.

@@ -5642,3 +5642,82 @@ GL e2e + Windows smoke; multi-machine cluster profile; CI push retry.
 
 COMMITS: b1423e6 (the pottery/butter/cake legs + harness fix + probe),
 this handoff.
+
+## 2026-10-09 - Session 80 (type 4: the client resource-source order fix)
+
+SESSION TYPE ROTATION LOG: 74=0, 75=1, 76=2, 77=3, 78=5, 79=3, 80=4.
+All six types served - pick freely, avoid repeating the previous session's
+type.
+
+GOAL: the session opened on the S79 working-tree leftovers (debug prints
+in the client tree, uncommitted diagnostics) and immediately hit a hard
+client blocker: UiProbe died on world entry with a MenuGrid
+PaginaException - the same "Wrong res version (1 != 28484)" an S40-era
+note had attributed to an in-frame pagina desync. Chasing it consumed the
+session; the root cause and a two-commit fix landed.
+
+DONE:
+
+- ROOT CAUSE (client resource-source order): the static Resource loader
+  chain ends with JarSource (lib/haven-res.jar) and addurl() chained the
+  server's HTTP pack AFTER it, so every resource present in both was
+  decoded from the jar's historical copy. The jar's paginae/atk/dodge
+  embeds AButton parent "paginae/atk/blk" at pver 28484 (the upstream
+  server's version of that file), while this server's pack ships blk at
+  ver 1 (the fix_gameres_parent_refs.py alignment). Decoding the jar copy
+  asked for a parent version the pack never had: the load died with
+  "Wrong res version (1 != 28484)", MenuGrid.getSubResources threw
+  PaginaException, the RemoteUI thread died - the reported black screen
+  after entering the world. Latent since S40 (dodge entered the PAGINAE
+  push then); UiProbe simply had not been run against the full page set
+  since.
+- FIX (Resource.addurl): the server source is now inserted AHEAD of the
+  JarSource entry (new chainloader_before_jar). The self-consistent
+  remote pack wins; resources absent from the pack still fall through to
+  the jar via the normal Loader chain. Verified against the live server
+  with HAVEN_RESDIR unset - exactly the real user's classpath.
+- MINE #2 (stale tracked pack): server/gameres/ was a 43 MB tracked pack
+  snapshot frozen around S40 - missing the five later overlay resources
+  (paginae/craft/string + tanhide, gfx/hud/vilind, gfx/borka hair/head)
+  and still carrying the unaligned dodge parent_ver. default_repo_dir's
+  exe-anchored fallback picks it whenever the generated repo-root
+  gameres/ is absent, so a fresh clone that skipped make-gameres silently
+  served a menu-killing pack (reproduced: UiProbe against it died on
+  paginae/craft/string). The snapshot is deleted; the generated
+  repo-root gameres/ is the single source of truth (start-server.bat and
+  run-client.bat auto-generate it; a missing pack fails fast with the
+  generation instructions). fix_gameres_parent_refs.py --check gameres:
+  stale=0.
+- DEBUG PRINTS RETIRED: the temporary PAGDBG (Glob), BLKLOAD trace
+  (Resource.load) and RESIDDBG (Session) inserts never existed in master
+  (uncommitted working-tree edits only) and are gone; the tree is clean.
+- client-probe/ResLayers.java: tiny CLI that loads a res from the served
+  pack and prints its Image/AButton/Code layers - the tool that nailed
+  the diagnosis (blk HAS an action layer; the failure was purely the
+  version mismatch). Committed for future res debugging.
+- Diagnostics deleted: server/scripts/diag_nav.py (S79 shore-BFS helper,
+  superseded by the NAV DIAG inside test_pottery.py) and sniff_paginae.py
+  (pre-fix paginae sniffer). client-probe/*.class added to .gitignore.
+- Repro tool kept OUT of the repo: /home/z/my-project/scripts/pver_recon.py
+  raw-scans a pack root for paginae/ parent links and diffs the embedded
+  pver against the parent file's real version (PACK=<root> env).
+
+MEASURED/EVIDENCE: UiProbe run/equip/charlist all green post-fix (run
+built the full widget set - MapView, SlenHud, MenuGrid, Speedget,
+Bufflist, ChatHW, VMeter x3, Equipory, CharWnd - with zero version
+errors); python test_client WORLD ENTRY: OK + CATTR ORDER: OK; cargo gate
+untouched green: fmt + clippy clean, 326 workspace tests (11 proto +
+296 unit [2 ign] + 7 wire [1 ign] + 12 world).
+
+NOT DONE / next session carries: everything the S79 record lists (butter
++ carrot-cake live chain drive, the five dough ingredient chains, the
+vis delta-scan re-measure, multi-machine cluster profile, CI push retry)
+plus the new client tail: stand the UiProbe tri-mode up as a gate script
+(the attic verify_ui_probe.sh predates the JDK layout; its java -m
+jdk.compiler path cannot compile --release 8 without ct.sym - use a full
+JDK's javac as windows/run-client.bat does via ant) and consider wiring
+fix_gameres_parent_refs.py --check into make-gameres so a freshly
+generated pack is self-verified.
+
+COMMITS: 4a35d9d (client: serve the remote pack before the offline jar),
+e5c933b (repo: drop the stale server/gameres snapshot), this handoff.
