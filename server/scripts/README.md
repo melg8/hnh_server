@@ -51,8 +51,19 @@ taming) that are easier to drive from python.
 ## Utilities
 
 - `make-gameres.sh` - build the `gameres/` pack (jar extract + fork
-  overlay); the Windows twin is `windows/make-gameres.ps1`, which
-  additionally calls `fix_gameres_versions.py`.
+  overlay) and run BOTH resource-version repair passes
+  (`fix_gameres_versions.py`, `fix_gameres_parent_refs.py`) over the
+  generated pack and the `res/compiled` overlay source; the Windows
+  twin is `windows/make-gameres.ps1`, which does the same.
+- `fix_gameres_parent_refs.py` - align every action-layer parent_ver
+  with the parent resource's real file version (--check = report only,
+  `--using DIR` resolves parent versions against a full pack when
+  scanning a partial overlay like res/compiled). The legacy jar ships
+  stale references (string.res -> clothmat ver 1 vs the real ver 3,
+  tanhide.res -> leather ver 1 vs ver 2): a strict client requests the
+  stale version over HTTP, rejects the served file, and MenuGrid
+  throws PaginaException on world entry. Idempotent; exit 1 when
+  anything remains stale.
 - `scan_paginae.py` - static AButton decode of every
   paginae/craft/*.res (offline; needs `unzip -o -q lib/haven-res.jar
   'res/paginae/craft/*' -d /tmp/hx` first). Session-58 recipe

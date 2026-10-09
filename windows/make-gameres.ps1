@@ -53,3 +53,13 @@ Write-Host "gameres ready: $count files in $out"
 # entry). Repair them in place; idempotent, no-op when the pack is
 # already consistent.
 python (Join-Path $root "server\scripts\fix_gameres_versions.py") $out
+
+# Second pass: stale parent_ver REFERENCES (the version bytes are
+# present but predate the parent file's real version - e.g. string.res
+# referencing paginae/craft/clothmat ver 1 while the shipped file is
+# ver 3). A strict client requests the stale version over HTTP,
+# rejects the served file, and MenuGrid throws PaginaException on
+# world entry. Fix both the generated pack AND the res/compiled
+# overlay source (the client loads fork paginae from it locally).
+python (Join-Path $root "server\scripts\fix_gameres_parent_refs.py") $out
+python (Join-Path $root "server\scripts\fix_gameres_parent_refs.py") (Join-Path $root "res\compiled") --using $out

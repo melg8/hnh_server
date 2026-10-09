@@ -206,9 +206,11 @@ unzip -o -q lib/haven-res.jar 'res/*' -d /tmp/hx && cp -rn /tmp/hx/res/* gameres
    constants), the cross-node lift/transfer relays (a peer node's
    trough offers no Lift petal to a guest), and the carried-trough
    avatar render.
-6. **Real-client e2e**: GL production walkthrough (tame, wait out the
-   milk meter, milk on screen) and Windows smoke when a display host
-   exists (carried).
+6. **Real-client e2e**: the headless REAL-client path is VERIFIED
+   (session 70: UiProbe run/equip/charlist green against a live
+   server, after the stale parent_ver pack fix). Still open: GL
+   production walkthrough (tame, wait out the milk meter, milk on
+   screen) and Windows smoke when a display host exists (carried).
 7. **Guest GC at scale**: CLOSED by measurement (session 59): the
    50-tick GC walk inside phase_cluster measured p50 73-98 us and
    p95 <= 314 us with 646-984 guests per node at 2x300 - two orders
@@ -625,6 +627,25 @@ DONE (committed across this session):
   clippy -D warnings clean, 311 green.
 - Housekeeping: debug_kiln_sink.py dropped - its investigation is
   closed by the wave-2 finding.
+- Java client headless verification (post-gate budget): the full
+  client source (223 .java files) compiles against the live protocol
+  and the REAL client classes drove auth -> charlist -> play -> world
+  entry -> UI widgets headlessly - UI PROBE run/equip/charlist all OK
+  (MapView, MenuGrid, Equipory, CharWnd, ...). The first run exposed a
+  REAL pack defect: MenuGrid died with PaginaException on
+  paginae/craft/clothmat - the legacy jar ships STALE parent_ver
+  references (string.res -> clothmat ver 1 vs the real file ver 3;
+  tanhide.res -> leather ver 1 vs ver 2), a second corruption class
+  the existing fix_gameres_versions.py pass does not cover. New
+  server/scripts/fix_gameres_parent_refs.py aligns every action-layer
+  parent_ver with the parent's real file version (--check/--using for
+  the partial res/compiled overlay); both make-gameres generators
+  (sh + ps1) now run it over the generated pack AND res/compiled.
+  gameres/ regenerated from scratch: WORLD ENTRY OK + all three UI
+  PROBE modes green. debug_pagina_announce.py added (a wire probe
+  asserting every RMSG_PAGINAE add matches the served file version -
+  the differential that located the defect server-side vs pack-side).
 
 COMMITS: d1ae3ab (the split), 222a9ad (kiln verified + fixes), this
-handoff + the sink-probe removal.
+handoff + the sink-probe removal + the Java-client pack fix
+(fix_gameres_parent_refs.py, res/compiled repairs, UiProbe green).

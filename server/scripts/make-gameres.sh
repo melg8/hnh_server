@@ -38,3 +38,14 @@ echo "gameres ready: $COUNT files in $OUT"
 # entry). Repair them in place; idempotent, no-op when the pack is
 # already consistent.
 python3 "$REPO/server/scripts/fix_gameres_versions.py" "$OUT"
+
+# Second pass: stale parent_ver REFERENCES (the version bytes are
+# present but predate the parent file's real version - e.g.
+# string.res referencing paginae/craft/clothmat ver 1 while the shipped
+# file is ver 3). A strict client requests the stale version over HTTP,
+# rejects the served file, and MenuGrid throws PaginaException on world
+# entry. Fix both the generated pack AND the res/compiled overlay
+# source (the client and UiProbe load fork paginae from it locally).
+python3 "$REPO/server/scripts/fix_gameres_parent_refs.py" "$OUT"
+python3 "$REPO/server/scripts/fix_gameres_parent_refs.py" \
+  "$REPO/res/compiled" --using "$OUT"
