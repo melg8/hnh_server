@@ -644,7 +644,14 @@ class WireClient:
         if t == RMSG_NEWWDG:
             wid = struct.unpack("<H", body[0:2])[0]
             nend = body.index(0, 2)
-            name = body[2:nend].decode()
+            try:
+                name = body[2:nend].decode()
+            except UnicodeDecodeError:
+                # Diagnostic: a widget name that is not UTF-8 points at
+                # a bundling/parsing drift - dump the body and skip the
+                # widget so the probe can keep driving.
+                print("NEWWDG PARSE: t=%d body=%r" % (t, body[:48]))
+                return
             self.widgets[wid] = name
             aoff = nend + 1 + 10  # skip x, y, parent
             args = list(self.parse_args(body[aoff:]))

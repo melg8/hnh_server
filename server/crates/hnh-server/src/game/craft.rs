@@ -274,13 +274,23 @@ impl Game {
             q = (attr_val + q) / 2;
         }
         let out_q = q.clamp(1, 255) as u8;
-        for (resname, count) in recipe.outputs {
+        for (oi, (resname, count)) in recipe.outputs.iter().enumerate() {
             let gidx = self.world.res.intern(resname);
+            // Session 71 (bake chain): crafted stacks carry the recipe's
+            // display name as the stack label. The station input gates
+            // match on the display label (craft::BAKE_MAP /
+            // GRIND_MAP / SMELT_MAP / KILN_MAP keys are display names),
+            // and a label-less crafted stack made every hand-crafted
+            // station input - the Bread Dough leg - unprocessable
+            // ("The station cannot process that."). Multi-output
+            // recipes label only the PRIMARY output (the byproducts -
+            // the dough recipe's returned bucket - keep the empty
+            // label, the client falls back to the resource name).
             let out = InvStack {
                 res: gidx,
                 count: *count,
                 ql: out_q,
-                label: "",
+                label: if oi == 0 { recipe.name } else { "" },
             };
             // Merge into an existing same-resource stack (absorb policy)
             // so repeat crafts fill one stack, not one slot per craft.

@@ -229,46 +229,11 @@ def find_and_fill_water(c):
             break
     assert water is not None, "no water tile within ring 80"
     print("water tile found: %s" % (water,))
-    # Walk to a WALKABLE launch tile beside the water (the hnh-world
-    # water_is_reachable_from_spawn contract pins at least one 4-neighbor
-    # to exist). Aiming at the water itself makes nav_walk depend on the
-    # impassable-goal retarget, which oscillates on the shore rim (the
-    # S67 finding); a land goal is deterministic. Retry: the player
-    # moves between attempts, so re-scan the launch each time.
-    launch = None
-    for attempt in range(3):
-        for tx, ty in (
-            (water[0] + 1, water[1]), (water[0] - 1, water[1]),
-            (water[0], water[1] + 1), (water[0], water[1] - 1),
-        ):
-            if c._tile_walkable((tx, ty)):
-                launch = (tx, ty)
-                break
-        assert launch is not None, "the water tile %s has no walkable neighbor" % (water,)
-        mc = (launch[0] * TILE_SPAN + 5, launch[1] * TILE_SPAN + 5)
-        if c.nav_walk(mc, stop=30, max_clicks=350, log=lambda m: print("  " + m)):
-            break
-        print("water walk attempt %d stalled; retrying" % (attempt + 1,))
-        # The stall may have moved us closer: re-scan from the new spot.
-        ppos = c.gobs[c.player_gob]["pos"] or (0, 0)
-        px, py = ppos[0] // TILE_SPAN, ppos[1] // TILE_SPAN
-        water = None
-        for r in range(0, 80, 2):
-            for dy in range(-r, r + 1, 2):
-                for dx in range(-r, r + 1, 2):
-                    if max(abs(dx), abs(dy)) != r:
-                        continue
-                    t = c.tile_at(
-                        (px + dx) * TILE_SPAN + 5, (py + dy) * TILE_SPAN + 5
-                    )
-                    if t in (DEEP_WATER_TILE, WATER_TILE):
-                        water = (px + dx, py + dy)
-                        break
-                if water:
-                    break
-            if water:
-                break
-        assert water is not None, "no water tile within ring 80 on retry"
+    # The scoop: itemact the water tile with the empty bucket in the
+    # cursor. The bucket-fill contract (game/items.rs) keys on the TILE
+    # under the click, not on the player's distance - the same wire
+    # shape the real client drives from the shore, without the
+    # shore-rim nav oscillation in the probe path.
     mc = (water[0] * TILE_SPAN + 5, water[1] * TILE_SPAN + 5)
 
     bucket_wid = c.find_item_by_res(BUCKETE_INV)
@@ -416,6 +381,8 @@ def bake_bread(c, oven, mc):
     c.pump(0.3)
     c.map_itemact(mc, oven)
     c.pump(0.5)
+    assert c.return_cursor(), "cursor return after the dough load"
+    c.pump(0.3)
 
     # Baseline BEFORE lighting: any bread-shaped drop that already
     # exists must not satisfy the appearance wait.
@@ -426,6 +393,10 @@ def bake_bread(c, oven, mc):
     assert ok, "oven Light menu missing (opts=%s)" % (c.sm_opts,)
     c.flower_choice(c.sm_wid, 0)
     ok = c.wait_for(lambda: c.gobs[oven]["sdt"] == b"\x01", 4)
+    if not ok:
+        # Refusal diagnosis: start_job answers with a system line.
+        print("LIT DEBUG: sdt=%r lines=%r" % (
+            c.gobs[oven]["sdt"], c.chat_lines[-6:],))
     assert ok, "oven never re-rendered as lit (sdt=%r)" % (c.gobs[oven]["sdt"],)
     print("oven lit; waiting out the 8-tick bake...")
 
