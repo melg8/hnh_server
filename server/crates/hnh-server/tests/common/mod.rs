@@ -817,11 +817,43 @@ impl Session {
 
     /// Menugrid `act(<word>)` on the scm widget (build pagina arming).
     pub fn menu_act(&mut self, word: &str) {
+        self.menu_act_words(&[word]);
+    }
+
+    /// MenuGrid act with one or more words: the build paginae send
+    /// act("<word>") while the craft paginae send the two-word
+    /// act("craft", "<recipe-id>") (game/craft.rs on_menu_action).
+    pub fn menu_act_words(&mut self, words: &[&str]) {
         let wid = self.widgets_by_name["scm"];
-        let mut args = vec![2u8]; // arg tag: string
-        args.extend_from_slice(&nul_str(word));
+        let mut args = Vec::new();
+        for word in words {
+            args.push(2u8); // arg tag: string
+            args.extend_from_slice(&nul_str(word));
+        }
         args.push(0);
         self.send_wdgmsg(wid, "act", &args);
+    }
+
+    /// The make widget's Craft button: `wdgmsg(wid, "make", [mode])`
+    /// (mode 0 = craft once, 1 = craft all; game/craft.rs on_make_cmd).
+    /// The make widget must already be open (menu_act_words above).
+    pub fn press_make(&mut self, mode: i32) {
+        let wid = self.widgets_by_name["make"];
+        let mut args = vec![1u8]; // arg tag: int
+        args.extend_from_slice(&le32(mode));
+        args.push(0);
+        self.send_wdgmsg(wid, "make", &args);
+    }
+
+    /// The tooltip text (args index 3) of an inventory item widget -
+    /// the DISPLAY LABEL the station input gates match on (session 71).
+    pub fn item_label(&self, name: &str) -> Option<String> {
+        let wid = self.item_by_res(name)?;
+        self.items
+            .get(&wid)?
+            .get(3)
+            .and_then(ArgVal::as_str)
+            .map(str::to_owned)
     }
 
     /// MapView `place(coord, button, modflags)`: the ghost commit.

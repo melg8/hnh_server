@@ -1122,3 +1122,105 @@ fn trough_lift_place_back_and_fodder_transfer_contract() {
         sess.chat_lines
     );
 }
+
+// ---------------------------------------------------------------------------
+// Session 72: the craft-flow wire contract
+// ---------------------------------------------------------------------------
+
+/// One make-window cycle: arm the craft pagina (act("craft", id)),
+/// wait for the make widget, press Craft once.
+fn craft_once(sess: &mut Session, recipe_id: &str, tag: &str) {
+    sess.menu_act_words(&["craft", recipe_id]);
+    assert!(
+        sess.pump_until(|s| s.widgets_by_name.contains_key("make"), 8),
+        "{tag}: no make widget for {recipe_id}\nchat={:?}",
+        sess.chat_lines
+    );
+    sess.press_make(0);
+}
+
+/// Contract: the make widget consumes the real inventory stacks, the
+/// tool-gated recipe refuses with the exact system line BEFORE the saw
+/// exists, and the crafted PRIMARY output carries the recipe display
+/// name - the label every station input gate matches on (session 71's
+/// live finding, now pinned on the wire). The saw/bucket pair walks
+/// the whole shape from the starter kit alone.
+#[test]
+fn craft_flow_carries_the_recipe_label_and_enforces_the_tool_gate() {
+    let _slot = common::acquire_test_slot();
+    let server = ServerGuard::boot("craftflow");
+    let (mut sess, _player) = enter_world(&server, "craftsman");
+
+    let branch_count = |s: &Session| stack_count(s, "gfx/invobjs/branch");
+    let stone_count = |s: &Session| stack_count(s, "gfx/invobjs/stone");
+    let starter_branch = branch_count(&sess).expect("starter branch");
+    let starter_stone = stone_count(&sess).expect("starter stone");
+
+    // Act 1: the bucket pagina WITHOUT the saw - the tool gate refuses
+    // with the exact line and nothing is consumed or produced.
+    craft_once(&mut sess, "bucket", "toolgate");
+    let refused = sess.pump_until(
+        |s| s.chat_lines.iter().any(|l| l.contains("You need the Saw")),
+        8,
+    );
+    assert!(
+        refused,
+        "no tool-gate refusal line\nchat={:?}",
+        sess.chat_lines
+    );
+    assert!(
+        sess.item_by_res("gfx/invobjs/buckete").is_none(),
+        "the refused craft must not produce a bucket"
+    );
+    assert_eq!(
+        branch_count(&sess),
+        Some(starter_branch),
+        "the refused craft must not consume ingredients"
+    );
+
+    // Act 2: the saw craft - the primary output carries the recipe
+    // display name "Saw" (the station-gate label contract) and the
+    // inputs (branch x2 + stone x1) leave the inventory.
+    craft_once(&mut sess, "saw", "saw");
+    let saw_ready = |s: &Session| stack_count(s, "gfx/invobjs/saw") == Some(1);
+    assert!(
+        sess.pump_until(saw_ready, 8),
+        "the saw never appeared\nchat={:?}",
+        sess.chat_lines
+    );
+    assert_eq!(
+        sess.item_label("gfx/invobjs/saw"),
+        Some("Saw".to_owned()),
+        "the crafted primary output must carry the recipe display name"
+    );
+    let saw_ready2 = |s: &Session| {
+        branch_count(s) == Some(starter_branch - 2) && stone_count(s) == Some(starter_stone - 1)
+    };
+    assert!(
+        sess.pump_until(saw_ready2, 8),
+        "the saw inputs were not consumed (branch {:?}, stone {:?})",
+        branch_count(&sess),
+        stone_count(&sess)
+    );
+
+    // Act 3: with the saw in the inventory the bucket craft passes the
+    // tool gate and yields the labeled "Bucket" from branch x3.
+    craft_once(&mut sess, "bucket", "bucket");
+    let bucket_ready = |s: &Session| stack_count(s, "gfx/invobjs/buckete") == Some(1);
+    assert!(
+        sess.pump_until(bucket_ready, 8),
+        "the bucket never appeared\nchat={:?}",
+        sess.chat_lines
+    );
+    assert_eq!(
+        sess.item_label("gfx/invobjs/buckete"),
+        Some("Bucket".to_owned()),
+        "the bucket output must carry its recipe display name"
+    );
+    let branch_spent = |s: &Session| branch_count(s) == Some(starter_branch - 5);
+    assert!(
+        sess.pump_until(branch_spent, 8),
+        "the bucket inputs were not consumed (branch {:?})",
+        branch_count(&sess)
+    );
+}

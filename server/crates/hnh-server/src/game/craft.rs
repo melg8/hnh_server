@@ -183,7 +183,15 @@ impl Game {
                 .flatten()
                 .any(|s| s.res == tool_gidx);
             if !inv_has && !equip_has {
-                let tool_name = self.world.res.name(tool_gidx).unwrap_or(tool);
+                // Session 72: the refusal names the tool's DISPLAY name
+                // (the recipe that produces it), not the resource path -
+                // every other user-facing string keys on display names
+                // since the session-71 label contract.
+                let tool_name = crate::craft::RECIPES
+                    .iter()
+                    .find(|r| r.outputs.iter().any(|(res, _)| *res == tool))
+                    .map(|r| r.name)
+                    .unwrap_or(tool);
                 let msg = format!("You need the {} to make that.", tool_name);
                 self.chat_line(sid, &msg, Some((255, 128, 128)));
                 return false;

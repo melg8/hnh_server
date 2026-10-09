@@ -8073,3 +8073,312 @@ async fn visible_bitset_mirror_tracks_the_set() {
         );
     }
 }
+
+// ------------------------------------------------------------------
+// Session 72: the station input/lit/output contract as white-box pins.
+// Both S70/S71 live findings (the plan->station sink completion and
+// the crafted-label gate) were only caught by python probes outside
+// the cargo gate - these tests move the load-bearing halves in.
+// ------------------------------------------------------------------
+
+/// A finished station beside the player for any BUILDABLES spec index
+/// (the built_oven generalization; the same rows place_buildable's
+/// completion would have produced).
+fn built_station(g: &mut Game, spec_index: usize) -> GobId {
+    let pslot = g.world.gobs.get(pgob_of(g)).unwrap();
+    let (px, py) = g.world.gobs.pos[pslot];
+    let res = g.world.res.intern(crate::build::BUILDABLES[spec_index].res);
+    let gob = g.world.gobs.spawn(
+        Kind::Station {
+            spec: spec_index as u8,
+            lit: false,
+        },
+        (px + 30, py),
+        res,
+        1,
+        0,
+    );
+    g.world.stations.insert(
+        gob,
+        crate::build::StationState {
+            spec: spec_index as u8,
+            fuel: 0,
+            fuel_ql_sum: 0,
+            fuel_seen: 0,
+            input: None,
+            aux: None,
+            lit: false,
+            progress: 0,
+            quality: 10,
+        },
+    );
+    gob
+}
+
+fn station_spec_idx(id: &str) -> usize {
+    crate::build::BUILDABLES
+        .iter()
+        .position(|b| b.id == id)
+        .unwrap_or_else(|| panic!("{id} must be a BUILDABLES spec"))
+}
+
+/// The REAL station itemact path: the stack rides the session cursor
+/// and the click targets the station gob (items.rs station dispatch -
+/// the same entry the wire client's MapView.iteminteract produces).
+fn click_station_with_cursor(g: &mut Game, gob: GobId, stack: InvStack) {
+    let slot = g.world.gobs.get(gob).unwrap();
+    let pos = g.world.gobs.pos[slot];
+    g.sessions.get_mut(&1).unwrap().cursor = Some(stack);
+    let args = vec![
+        hnh_proto::ListArg::Coord(0, 0),
+        hnh_proto::ListArg::Coord(pos.0, pos.1),
+        hnh_proto::ListArg::Int(0),
+        hnh_proto::ListArg::Int(gob),
+        hnh_proto::ListArg::Int(0),
+    ];
+    g.on_map_itemact(1, &args);
+}
+
+/// The full oven bake contract on the REAL itemact -> menu -> tick
+/// paths:
+/// 1. the input gate matches the DISPLAY LABEL, not the resource - a
+///    label-less dough stack (the S71 live finding: crafted stacks
+///    shipped empty labels) is refused and never consumed;
+/// 2. the labeled hand craft ("Bread Dough" = recipe.name) is
+///    accepted and exactly ONE unit leaves the cursor;
+/// 3. Light refuses while the fuel store is empty;
+/// 4. one branch fills the fuel store (FUEL_PER_JOB accounting);
+/// 5. the lit job consumes fuel + input after job_ticks and drops
+///    the BAKE_MAP output ("Bread") beside the station.
+#[tokio::test]
+async fn oven_bake_contract_label_gate_fuel_and_output() {
+    let (mut g, mut rx, _raw) = entered_game("bakecontract");
+    let oven_idx = station_spec_idx("oven");
+    let oven = built_oven(&mut g, 0, None);
+    let job_ticks = crate::build::BUILDABLES[oven_idx]
+        .station
+        .as_ref()
+        .unwrap()
+        .job_ticks;
+    let dough_res = g.world.res.intern("gfx/invobjs/dough");
+
+    // (1) The label gate: the resource alone is not enough.
+    click_station_with_cursor(
+        &mut g,
+        oven,
+        InvStack {
+            res: dough_res,
+            count: 2,
+            ql: 10,
+            label: "",
+        },
+    );
+    assert!(
+        g.world.stations[&oven].input.is_none(),
+        "a label-less dough stack must be refused (BAKE_MAP keys are display names)"
+    );
+    assert_eq!(
+        g.sessions.get(&1).unwrap().cursor.as_ref().map(|c| c.count),
+        Some(2),
+        "the refused stack stays on the cursor untouched"
+    );
+    let lines = drain_chat(&mut rx);
+    assert!(
+        lines.iter().any(|l| l.contains("cannot process that.")),
+        "the refusal must be announced in chat, got {lines:?}"
+    );
+
+    // (2) The labeled hand craft is accepted; one unit moves.
+    click_station_with_cursor(
+        &mut g,
+        oven,
+        InvStack {
+            res: dough_res,
+            count: 2,
+            ql: 10,
+            label: "Bread Dough",
+        },
+    );
+    let st = &g.world.stations[&oven];
+    assert_eq!(
+        st.input.as_ref().map(|(_, _, l)| *l),
+        Some("Bread Dough"),
+        "the labeled dough enters the input slot"
+    );
+    assert_eq!(
+        g.sessions.get(&1).unwrap().cursor.as_ref().map(|c| c.count),
+        Some(1),
+        "the station takes exactly one unit per itemact"
+    );
+
+    // (3) Light refuses without fuel.
+    g.open_station_menu(1, oven);
+    let (menu_wid, _, _) = g
+        .sessions
+        .get(&1)
+        .unwrap()
+        .station_menu
+        .expect("the station click opens the flower menu");
+    g.apply_station_choice(1, menu_wid, 0);
+    assert!(
+        !g.world.stations[&oven].lit,
+        "an unfueled station must refuse to light"
+    );
+    let lines = drain_chat(&mut rx);
+    assert!(
+        lines.iter().any(|l| l.contains("needs fuel")),
+        "the fuel refusal must be announced, got {lines:?}"
+    );
+
+    // (4) One branch fills the fuel store (FUEL_PER_JOB = 1).
+    let branch = g.world.res.intern("gfx/invobjs/branch");
+    click_station_with_cursor(
+        &mut g,
+        oven,
+        InvStack {
+            res: branch,
+            count: 1,
+            ql: 10,
+            label: "",
+        },
+    );
+    assert_eq!(g.world.stations[&oven].fuel, 1);
+    assert!(
+        g.sessions.get(&1).unwrap().cursor.is_none(),
+        "the single-unit fuel delivery empties the cursor"
+    );
+
+    // (5) Light starts the job; job_ticks later the mapped output
+    // drops beside the station with the BAKE_MAP label.
+    g.open_station_menu(1, oven);
+    let (menu_wid, _, _) = g
+        .sessions
+        .get(&1)
+        .unwrap()
+        .station_menu
+        .expect("the second station click opens the flower menu");
+    g.apply_station_choice(1, menu_wid, 0);
+    assert!(
+        g.world.stations[&oven].lit,
+        "fuel + input + Light must start the job"
+    );
+    for _ in 0..job_ticks {
+        g.tick();
+    }
+    let st = &g.world.stations[&oven];
+    assert!(!st.lit, "the job auto-extinguishes on completion");
+    assert!(st.input.is_none(), "the job consumes the input");
+    assert_eq!(st.fuel, 0, "the job burns FUEL_PER_JOB fuel");
+    let bread = g.world.res.intern("gfx/invobjs/bread");
+    let mut found_bread = false;
+    for kind in g
+        .world
+        .gobs
+        .kind
+        .iter()
+        .zip(g.world.gobs.alive.iter())
+        .filter(|(_, a)| **a)
+        .map(|(k, _)| k)
+    {
+        if let Kind::Drop {
+            inv_res_idx, label, ..
+        } = kind
+        {
+            if *inv_res_idx == bread && *label == "Bread" {
+                found_bread = true;
+            }
+        }
+    }
+    assert!(
+        found_bread,
+        "the finished job must drop Bread beside the station"
+    );
+}
+
+/// The quern skips the fuel gate (session 71: it turns by hand) - a
+/// zero-fuel station still lights and grinds the GRIND_MAP input into
+/// flour after job_ticks, and its menu verb is "Grind", not "Light".
+#[tokio::test]
+async fn quern_grinds_without_the_fuel_gate() {
+    let (mut g, mut rx, _raw) = entered_game("quernnofuel");
+    let quern_idx = station_spec_idx("quern");
+    let quern = built_station(&mut g, quern_idx);
+    let job_ticks = crate::build::BUILDABLES[quern_idx]
+        .station
+        .as_ref()
+        .unwrap()
+        .job_ticks;
+
+    // The menu verb for an unlit hand-cranked station is "Grind".
+    g.open_station_menu(1, quern);
+    let (menu_wid, _, _) = g
+        .sessions
+        .get(&1)
+        .unwrap()
+        .station_menu
+        .expect("the quern click opens the flower menu");
+    // (The sm widget's verb text is asserted on the wire tier; the
+    // state contract here is the refusal order.)
+    g.apply_station_choice(1, menu_wid, 0);
+    assert!(
+        !g.world.stations[&quern].lit,
+        "no input yet - the grind must refuse"
+    );
+    let lines = drain_chat(&mut rx);
+    assert!(
+        lines.iter().any(|l| l.contains("needs an input")),
+        "the input refusal must come BEFORE the fuel gate, got {lines:?}"
+    );
+
+    // Load the grist; the zero-fuel station lights anyway.
+    let grist_res = g.world.res.intern("gfx/invobjs/grist-wheat");
+    click_station_with_cursor(
+        &mut g,
+        quern,
+        InvStack {
+            res: grist_res,
+            count: 1,
+            ql: 10,
+            label: "Grist of Wheat",
+        },
+    );
+    assert_eq!(
+        g.world.stations[&quern].input.as_ref().map(|(_, _, l)| *l),
+        Some("Grist of Wheat")
+    );
+    g.open_station_menu(1, quern);
+    let (menu_wid, _, _) = g
+        .sessions
+        .get(&1)
+        .unwrap()
+        .station_menu
+        .expect("the loaded quern opens the flower menu");
+    g.apply_station_choice(1, menu_wid, 0);
+    let st = &g.world.stations[&quern];
+    assert!(st.lit, "the hand-cranked quern must light with zero fuel");
+    assert_eq!(st.fuel, 0, "the quern never burns fuel");
+    for _ in 0..job_ticks {
+        g.tick();
+    }
+    let flour = g.world.res.intern("gfx/invobjs/flour");
+    let mut found_flour = false;
+    for kind in g
+        .world
+        .gobs
+        .kind
+        .iter()
+        .zip(g.world.gobs.alive.iter())
+        .filter(|(_, a)| **a)
+        .map(|(k, _)| k)
+    {
+        if let Kind::Drop {
+            inv_res_idx, label, ..
+        } = kind
+        {
+            if *inv_res_idx == flour && *label == "Flour" {
+                found_flour = true;
+            }
+        }
+    }
+    assert!(found_flour, "the grind must drop Flour beside the quern");
+}
