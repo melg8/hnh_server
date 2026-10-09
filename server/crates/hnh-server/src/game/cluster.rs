@@ -550,9 +550,10 @@ impl Game {
                 }
                 info!(%name, "char ack: dropping migrated snapshot");
                 self.save.players.remove(&name);
-                if let Err(e) = self.save.flush(self.world.seed) {
-                    tracing::warn!(error = %e, "char migration flush failed");
-                }
+                // Background write: the migration flush pays the same
+                // serialize+write bulk as the autosave; keep it off the
+                // game loop (S75).
+                self.save.flush_background(self.world.seed);
             }
             NodeMsg::CharNack { to, from, name } => {
                 if self.cluster.is_none() || to != self.cluster_me() || from == self.cluster_me() {

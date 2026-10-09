@@ -362,11 +362,10 @@ impl SaveStore {
         );
     }
 
-    /// Atomically write the current snapshots to disk.
-    pub fn flush(&self, seed: u64) -> anyhow::Result<()> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
+    /// Snapshot the current state into an owned `SaveData` (the clone
+    /// phase of a flush). Measured (S75 bench): 8 ms at 1k players, 55 ms
+    /// at 10k - the only part of a save the game loop ever pays.
+    pub fn snapshot_data(&self, seed: u64) -> SaveData {
         let mut data = SaveData::new(seed);
         data.players = self.players.values().cloned().collect();
         data.players.sort_by(|a, b| a.name.cmp(&b.name));
@@ -380,11 +379,54 @@ impl SaveStore {
         // now round-trip.
         data.tile_overrides = self.world_state.tile_overrides.clone();
         data.animals = self.world_state.animals.clone();
-        let bytes = serde_json::to_vec(&data)?;
-        let tmp = self.path.with_extension("json.tmp");
+        data
+    }
+
+    /// Pure blocking writer: serialize + atomic tmp+rename. Measured
+    /// (S75 bench): 87 ms at 1k players, 464 ms at 10k - the 86%+ bulk
+    /// of every save. Must run on a blocking thread (see
+    /// `flush_background`), never on the game loop. A unique tmp suffix
+    /// keeps overlapping background writes from sharing a partial file;
+    /// the final rename is still atomic.
+    pub fn write_file(path: &Path, data: &SaveData) -> anyhow::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let bytes = serde_json::to_vec(data)?;
+        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = PathBuf::from(format!(
+            "{}.tmp{}",
+            path.display(),
+            TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::write(&tmp, &bytes)?;
-        std::fs::rename(&tmp, &self.path)?;
+        std::fs::rename(&tmp, path)?;
         Ok(())
+    }
+
+    /// Atomically write the current snapshots to disk (blocking). The
+    /// shutdown-path and test entry point: the process is going away, so
+    /// the write must be synchronous. On the live game loop use
+    /// `flush_background` instead.
+    pub fn flush(&self, seed: u64) -> anyhow::Result<()> {
+        let data = self.snapshot_data(seed);
+        Self::write_file(&self.path, &data)
+    }
+
+    /// flush() for the live game loop: the snapshot clone happens inline
+    /// (cheap, measured above), then the serialize+write tail - the bulk
+    /// of the stall - runs on a blocking thread. Without this the 30 s
+    /// autosave froze every tick for the full serialize+write time (S75
+    /// bench: 95 ms per save at 1k players, 519 ms at 10k, against the
+    /// 100 ms tick budget). Errors are logged inside the blocking task.
+    pub fn flush_background(&self, seed: u64) -> tokio::task::JoinHandle<()> {
+        let data = self.snapshot_data(seed);
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = Self::write_file(&path, &data) {
+                tracing::warn!(error = %e, "background save write failed");
+            }
+        })
     }
 }
 
@@ -507,6 +549,61 @@ mod tests {
         assert_ne!(save_key("a:b", "Player"), save_key("a", "b:Player"));
     }
 
+    /// Session-75 pin: the game-loop save path. The blocking-thread
+    /// write must produce exactly what the synchronous flush produces
+    /// (same file content contract, atomic rename included).
+    #[tokio::test]
+    async fn flush_background_matches_flush() {
+        let dir = std::env::temp_dir().join(format!("hnh-persist-bg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.json");
+        let mut store = SaveStore::load(&path, 42);
+        store.snapshot(
+            &Player {
+                account: "bg".to_owned(),
+                name: "bg".to_owned(),
+                equip: Vec::new(),
+                gob: 1,
+                session: 1,
+                hp: 42,
+                energy: 10,
+                stamina: 10,
+                lp: 5,
+                gait: 1,
+                criminal_until_ms: None,
+                lp_carry_ms: 0,
+                skills: std::collections::HashSet::new(),
+                attrs: HashMap::new(),
+                inv: Vec::new(),
+                fep: crate::craft::FepState::default(),
+                fight_target: None,
+                atk_cd: 0,
+                aim: None,
+                carried_trough: None,
+            },
+            (7, 9),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        store.flush_background(42).await.unwrap();
+        let reloaded = SaveStore::load(&path, 42);
+        assert_eq!(reloaded.players.len(), 1);
+        let p = reloaded
+            .players
+            .get(&save_key("bg", "bg"))
+            .expect("background-written character persisted");
+        assert_eq!(p.pos, (7, 9));
+        // No tmp residue from the unique-suffix rename.
+        let residue: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.unwrap().file_name().into_string().ok())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(residue.is_empty(), "tmp files left behind: {residue:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn seed_mismatch_starts_fresh() {
         let dir = std::env::temp_dir().join(format!("hnh-persist-seed-{}", std::process::id()));
@@ -544,6 +641,183 @@ mod tests {
         store.flush(42).unwrap();
         let reloaded = SaveStore::load(&path, 43);
         assert!(reloaded.players.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Session-75 architecture bench (explicit run, never in the gate):
+    /// how expensive is the blocking world flush against the 10k-session
+    /// target. Builds synthetic saves at the 1k and 10k player marks with
+    /// realistic per-character volume (12 inventory stacks + labels, 20
+    /// skills, 8 attrs, 3 equipped slots) and a fixed world-state volume,
+    /// then times the three flush phases separately (the value clone, the
+    /// JSON serialize, the file write), the full flush() as a checksum and
+    /// the full load() read-back. The game loop currently runs flush()
+    /// inline every 30 s, so the total is the per-30 s tick stall.
+    ///   cargo test -p hnh-server --bin hnh-server persist_flush_phase_bench \
+    ///     -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn persist_flush_phase_bench_scales_to_10k() {
+        fn synth_player(i: usize) -> SavedPlayer {
+            SavedPlayer {
+                name: save_key(&format!("user{i}"), "Player"),
+                pos: (i as i32 * 11, (i as i32 % 97) * 11),
+                hp: 100,
+                energy: 90,
+                stamina: 80,
+                lp: 1000 + i as i32,
+                attrs: (0..8).map(|k| (format!("attr{k}"), 10 + k)).collect(),
+                inv: (0..12)
+                    .map(|k| {
+                        (
+                            format!("gfx/invobjs/bench-item-{}", k % 6),
+                            10 + k as u32,
+                            10 + k as u8,
+                        )
+                    })
+                    .collect(),
+                inv_labels: (0..12).map(|k| format!("Bench Item {k}")).collect(),
+                skills: (0..20).map(|k| format!("skill-{k}")).collect(),
+                equip: (0..3)
+                    .map(|k| {
+                        (
+                            k,
+                            format!("gfx/armors/bench-{}", k),
+                            1,
+                            10,
+                            format!("Bench {k}"),
+                        )
+                    })
+                    .collect(),
+                criminal_until_ms: None,
+                carried_trough: None,
+            }
+        }
+
+        fn synth_world_state() -> WorldState {
+            WorldState {
+                crops: (0..5_000)
+                    .map(|i| SavedCrop {
+                        res: format!("gfx/terobjs/plants/crop-{}", i % 7),
+                        tile: (i % 300, i / 300),
+                        spec: (i % 5) as u8,
+                        stage: (i % 4) as u8,
+                        seed_ql: 10,
+                        soil_ql: 10,
+                        next_stage_at: i as u64,
+                    })
+                    .collect(),
+                tilth: (0..3_000).map(|i| ((i % 300, i / 300), i as u64)).collect(),
+                tile_overrides: (0..5_000)
+                    .map(|i| ((i % 300, i / 300), (i % 8) as u8))
+                    .collect(),
+                plans: (0..1_000)
+                    .map(|i| SavedPlan {
+                        spec: (i % 8) as u8,
+                        tile: (i % 300, i / 300),
+                        credited: (0..4)
+                            .map(|k| (format!("gfx/invobjs/mat-{}", k), 10, 100))
+                            .collect(),
+                    })
+                    .collect(),
+                structures: (0..800)
+                    .map(|i| SavedStructure {
+                        spec: (i % 8) as u8,
+                        tile: (i % 300, i / 300),
+                        quality: 10,
+                        fuel: 5,
+                        fuel_ql_sum: 50,
+                        fuel_seen: 5,
+                        input: Some(("gfx/invobjs/input".into(), 10, "Input".into())),
+                        aux: None,
+                        progress: 100,
+                        fodder_units: 0,
+                        fodder_ql_sum: 0,
+                        fodder_seen: 0,
+                    })
+                    .collect(),
+                animals: (0..2_000)
+                    .map(|i| SavedAnimal {
+                        species: (i % 10) as u8,
+                        tile: (i % 300, i / 300),
+                        hp: 50,
+                        tameness: 40,
+                        tamer_key: save_key(&format!("user{}", i % 900), "Player"),
+                        milk_units: 0,
+                        wool: 0,
+                        prod_acc: 0,
+                        feed_acc_nano: 0,
+                        hunger: 0,
+                    })
+                    .collect(),
+            }
+        }
+
+        fn timed<T>(label: &str, f: impl FnOnce() -> T) -> (T, u128) {
+            let t = std::time::Instant::now();
+            let out = f();
+            let ms = t.elapsed().as_millis();
+            println!("    {label}: {ms} ms");
+            (out, ms)
+        }
+
+        let dir = std::env::temp_dir().join(format!("hnh-persist-bench-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.json");
+
+        for count in [1_000usize, 10_000] {
+            println!("  players = {count} (+ fixed world-state volume)");
+            let store = SaveStore {
+                path: path.clone(),
+                players: (0..count)
+                    .map(synth_player)
+                    .map(|p| (p.name.clone(), p))
+                    .collect(),
+                world_state: synth_world_state(),
+            };
+            // Phase decomposition mirrors flush()'s own steps.
+            let mut data = SaveData::new(42);
+            let clone_ms = timed("clone (players+world_state -> SaveData)", || {
+                data.players = store.players.values().cloned().collect();
+                data.players.sort_by(|a, b| a.name.cmp(&b.name));
+                data.crops = store.world_state.crops.clone();
+                data.tilth = store.world_state.tilth.clone();
+                data.plans = store.world_state.plans.clone();
+                data.structures = store.world_state.structures.clone();
+                data.tile_overrides = store.world_state.tile_overrides.clone();
+                data.animals = store.world_state.animals.clone();
+            })
+            .1;
+            let (bytes, ser_ms) = timed("serialize (serde_json::to_vec)", || {
+                serde_json::to_vec(&data).unwrap()
+            });
+            let size_mb = bytes.len() as f64 / (1024.0 * 1024.0);
+            println!("    file size: {size_mb:.1} MB");
+            let write_ms = timed("write (tmp + rename)", || {
+                let tmp = path.with_extension("json.tmp");
+                std::fs::write(&tmp, &bytes).unwrap();
+                std::fs::rename(&tmp, &path).unwrap();
+            })
+            .1;
+            println!(
+                "    total stall (clone+ser+write): {} ms",
+                clone_ms + ser_ms + write_ms
+            );
+            let flush_ms = timed("flush() checksum", || store.flush(42).unwrap()).1;
+            assert!(
+                flush_ms <= clone_ms + ser_ms + write_ms + 40,
+                "flush must not be slower than its phases"
+            );
+            let load_ms = timed("load() read-back", || {
+                let st = SaveStore::load(&path, 42);
+                assert_eq!(st.players.len(), count);
+            })
+            .1;
+            assert!(
+                load_ms < 5_000,
+                "load must stay well under any startup budget"
+            );
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

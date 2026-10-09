@@ -9,14 +9,29 @@
 use super::*;
 
 impl Game {
-    /// Snapshot every online player, then write the save file. Called on the
-    /// 30 s autosave cadence and at shutdown.
+    /// Snapshot every online player + the world state, then write the
+    /// save file on a BLOCKING THREAD (the serialize+write bulk measured
+    /// 95 ms per save at 1k players / 519 ms at 10k - the 30 s autosave
+    /// must not stall the 100 ms tick budget with it). The live-cadence
+    /// entry point.
     pub(super) fn autosave(&mut self) {
-        self.save_all_and_flush();
+        self.save_all();
+        self.save.flush_background(self.world.seed);
     }
 
+    /// Snapshot + write SYNCHRONOUSLY. The shutdown-path entry point
+    /// (the run loop's final flush): the process is going away, so the
+    /// write must complete before it does.
     pub(super) fn save_all_and_flush(&mut self) {
-        let seed = self.world.seed;
+        self.save_all();
+        if let Err(e) = self.save.flush(self.world.seed) {
+            tracing::warn!(error = %e, "save flush failed");
+        }
+    }
+
+    /// Snapshot every online player + the world state into the store
+    /// WITHOUT writing (see `autosave` for the writing halves).
+    pub(super) fn save_all(&mut self) {
         for p in &self.world.players {
             if let Some(slot) = self.world.gobs.get(p.gob) {
                 let pos = self.world.gobs.pos[slot];
@@ -225,9 +240,6 @@ impl Game {
             });
         }
         self.save.world_state.animals = animals;
-        if let Err(e) = self.save.flush(seed) {
-            tracing::warn!(error = %e, "autosave failed");
-        }
     }
 
     pub(super) fn handle_cmd(&mut self, cmd: Cmd) {
