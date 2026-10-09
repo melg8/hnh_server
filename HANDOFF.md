@@ -370,56 +370,10 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
   ms); live A/B confirmed the boundary spikes gone; RSS footprint
   ~0.8 MB/session (10k ≈ 8 GB); the 14th CI push retry failed on the
   same PAT scope (probed via a side branch, master untouched).
-
-## 2026-10-09 - Session 74 (type 0: docs hygiene)
-
-SESSION TYPE ROTATION LOG: 69=3, 70=2, 71=3, 72=4, 73=5, 74=0. All six
-types served - pick freely, avoid repeating the previous session's type.
-
-GOAL: reduce context pollution; restore the missing entry points; keep
-every fact verifiable against the repo state.
-
-DONE:
-
-- ROOT README.md CREATED (was missing entirely): the user-facing entry
-  point - what the repo is, the Linux/macOS quick start (build, the
-  cwd-independent make-gameres.sh, run, client), the Windows one-command
-  path, ports, verification + load-testing commands, the repository
-  map. How-to-run knowledge lived only in HANDOFF.md (agent-oriented)
-  and windows/README.md (Windows-only); a fresh human (or GitHub
-  landing page) had no starting point.
-- server/scripts/README.md: test_craft.py added to the probe table
-  (a live gate probe with the `EAT FLOW: OK` verdict - re-verified
-  live this session) - it had never been listed; the four closed
-  S70/S71 one-off diagnostics (debug_kiln_nav, debug_kiln_nav2,
-  debug_pagina_announce, debug_water_scan; their root causes are
-  folded into the domain docs and the archive) moved to `attic/`, and
-  the attic section documents the move.
-- HANDOFF.md Known gaps consolidated with the S73 verdicts: the
-  fan-out item now carries the pair-walk-floor finding and the
-  per-pair-timer ban; a new item #10 lists the named perf follow-ups
-  (the retx_sweep unacked layout, the vis delta-scan) so the next
-  sessions see them in one place instead of digging through session
-  tails.
-- CLAUDE.md: GitNexus index numbers refreshed to the S72 re-index
-  (10843 symbols / 39105 relationships / 630 flows).
-- CI: the per-session workflow push retry performed (13th attempt) -
-  the remote still rejects the PAT without the `workflow` scope; the
-  file content stays preserved in HANDOFF_ARCHIVE.md (S50 addendum).
-  Local gate remains the only authoritative check.
-
-PROCESS NOTE: the first docs commit was made, then an unrelated
-`git reset --hard` (the CI push attempt rollback) silently wiped the
-staged mv/README/CLAUDE edits; they were re-applied by diff-checking
-the committed tree and amended into the same commit before the push.
-Lesson recorded: never interleave a destructive rollback with
-in-progress staged work - commit (or stash) the clean work first.
-
-NOT DONE / next session carries: unchanged from S73 (retx_sweep and
-the vis delta-scan are the named type-5 candidates; GL e2e + Windows
-smoke; the multi-machine cluster profile).
-
-COMMITS: 9ea65f8 amended to 49d7047 (the docs hygiene), this handoff.
+- S76 (type 2): the 8.4k-line game/tests.rs battery split into 12
+  per-theme modules + common.rs (pure move, 154 tests + 35 helpers
+  redistributed, the largest file now <=1091 lines); the #[path] hack
+  dropped; 317 green.
 
 ## 2026-10-09 - Session 75 (type 1: architecture review)
 
@@ -470,3 +424,45 @@ locally. The S74 lesson stands: no destructive rollback around
 staged work.
 
 COMMITS: 037240c (the background flush), this handoff.
+
+## 2026-10-09 - Session 76 (type 2: refactoring)
+
+SESSION TYPE ROTATION LOG: 71=3, 72=4, 73=5, 74=0, 75=1, 76=2. All six
+types served - pick freely, avoid repeating the previous session's type.
+
+GOAL: split the crate's largest file - game/tests.rs (8384 lines, 154
+tests + 35 shared helpers) - into per-theme modules. Pure move, zero
+logic changes.
+
+DONE:
+
+- game/tests.rs is now a thin module wrapper; the battery lives in
+  game/tests/{equip,animals,movement,cluster,migration,drops,crops,
+  stations,craft,archery,combat,trough}.rs (190-1091 lines each, cut
+  by feature: entry/equip/cursor, predators+taming+production,
+  movement/art layers, cluster relays, char migration, static drops,
+  crops/plow, stations/bake, craft chains, archery, melee/PvP, trough)
+- the 35 shared setup helpers (entered_game, clustered_game, drains,
+  species/station/trough builders) are pub(super) in
+  game/tests/common.rs and imported by every theme module
+- the mod tests declaration lost its #[path = "game/tests.rs"] hack -
+  a plain `#[cfg(test)] mod tests;` resolves game/tests.rs plus the
+  game/tests/ children natively (the #[path] form would have looked
+  for the children in game/ directly)
+- the split was performed by a scripted segmenter (exact-name test
+  map, helpers auto-routed to common); two parser defects were caught
+  by compile errors and fixed before commit: segment ends previously
+  swallowed the next segment's doc/attribute header (leaving
+  "expected item after attributes" tails), and header blocks split by
+  a blank line between the docs and the #[test] attribute stayed
+  behind
+- verified: 287 unit green (the exact pre-split count, same set),
+  fmt + clippy -D warnings clean, workspace 317 green (first run hit
+  the known two-boot wire flake on the 2-core sandbox, clean rerun)
+
+NOT DONE / next session carries: unchanged - retx_sweep unacked layout
+and vis delta-scan (type 5), GL e2e + Windows smoke, multi-machine
+cluster profile; state.rs (2130) and game/cluster.rs (2054) are the
+next-largest non-test files if a future type-2 session wants them.
+
+COMMITS: 76900f0 (the test battery split), this handoff.

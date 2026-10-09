@@ -5317,3 +5317,53 @@ NOT DONE / next session carries:
 COMMITS: d22f590 (the vis is-new probe rides the parallel scan pass),
 this handoff.
 
+## 2026-10-09 - Session 74 (type 0: docs hygiene)
+
+SESSION TYPE ROTATION LOG: 69=3, 70=2, 71=3, 72=4, 73=5, 74=0. All six
+types served - pick freely, avoid repeating the previous session's type.
+
+GOAL: reduce context pollution; restore the missing entry points; keep
+every fact verifiable against the repo state.
+
+DONE:
+
+- ROOT README.md CREATED (was missing entirely): the user-facing entry
+  point - what the repo is, the Linux/macOS quick start (build, the
+  cwd-independent make-gameres.sh, run, client), the Windows one-command
+  path, ports, verification + load-testing commands, the repository
+  map. How-to-run knowledge lived only in HANDOFF.md (agent-oriented)
+  and windows/README.md (Windows-only); a fresh human (or GitHub
+  landing page) had no starting point.
+- server/scripts/README.md: test_craft.py added to the probe table
+  (a live gate probe with the `EAT FLOW: OK` verdict - re-verified
+  live this session) - it had never been listed; the four closed
+  S70/S71 one-off diagnostics (debug_kiln_nav, debug_kiln_nav2,
+  debug_pagina_announce, debug_water_scan; their root causes are
+  folded into the domain docs and the archive) moved to `attic/`, and
+  the attic section documents the move.
+- HANDOFF.md Known gaps consolidated with the S73 verdicts: the
+  fan-out item now carries the pair-walk-floor finding and the
+  per-pair-timer ban; a new item #10 lists the named perf follow-ups
+  (the retx_sweep unacked layout, the vis delta-scan) so the next
+  sessions see them in one place instead of digging through session
+  tails.
+- CLAUDE.md: GitNexus index numbers refreshed to the S72 re-index
+  (10843 symbols / 39105 relationships / 630 flows).
+- CI: the per-session workflow push retry performed (13th attempt) -
+  the remote still rejects the PAT without the `workflow` scope; the
+  file content stays preserved in HANDOFF_ARCHIVE.md (S50 addendum).
+  Local gate remains the only authoritative check.
+
+PROCESS NOTE: the first docs commit was made, then an unrelated
+`git reset --hard` (the CI push attempt rollback) silently wiped the
+staged mv/README/CLAUDE edits; they were re-applied by diff-checking
+the committed tree and amended into the same commit before the push.
+Lesson recorded: never interleave a destructive rollback with
+in-progress staged work - commit (or stash) the clean work first.
+
+NOT DONE / next session carries: unchanged from S73 (retx_sweep and
+the vis delta-scan are the named type-5 candidates; GL e2e + Windows
+smoke; the multi-machine cluster profile).
+
+COMMITS: 9ea65f8 amended to 49d7047 (the docs hygiene), this handoff.
+
