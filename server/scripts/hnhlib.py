@@ -799,11 +799,30 @@ class WireClient:
                 elif op == "MOVE":
                     g["pos"] = arg
                     g["moves"].append(arg)
+                    g["linbeg"] = None
+                    g["linstep"] = 0
                 elif op == "LINBEG":
                     g["linbeg"] = arg
                     g["linbegs"].append(arg)
+                    g["linstep"] = 0
+                    g["lin_t"] = time.time()
+                    # Anchor the streamed pos at the path START: the
+                    # pos only used to move on OD_MOVE (the final
+                    # landing), so a mid-flight beast looked parked at
+                    # its last landing point - the taming chase closed
+                    # on a ghost and every attack click died at the
+                    # 33-subtile reach gate (session 83).
+                    g["pos"] = (arg[0], arg[1])
                 elif op == "LINSTEP":
+                    g["linstep"] = arg
                     g["linsteps"].append(arg)
+                    g["lin_t"] = time.time()
+                    if g.get("linbeg"):
+                        sx, sy, tx, ty, c = g["linbeg"]
+                        f = min(max(arg / max(c, 1), 0.0), 1.0)
+                        g["pos"] = (
+                            int(sx + (tx - sx) * f),
+                            int(sy + (ty - sy) * f))
                 elif op == "LAYERS":
                     base, _ids = arg
                     # The layered base is the avatar body resource; record
@@ -817,6 +836,33 @@ class WireClient:
                         self.player_gob = gobid
 
     # ---- scenario actions --------------------------------------------------
+    def live_pos(self, gobid):
+        """The best-known position of a gob RIGHT NOW: the streamed
+        pos (anchored/stepped by LINBEG+LINSTEP) extrapolated along the
+        live LinMove at the tick cadence (server steps = 100 ms each,
+        the same clock the Java client's LinMove.getc runs on). A
+        mid-flight beast reports its on-path position instead of its
+        last landing - the taming chase needs this to close the real
+        gap (session 83)."""
+        g = self.gobs.get(gobid)
+        if not g:
+            return None
+        lb = g.get("linbeg")
+        pos = g.get("pos")
+        if not lb or not pos:
+            return pos
+        sx, sy, tx, ty, c = lb
+        if c <= 0:
+            return pos
+        l = g.get("linstep", 0) or 0
+        # Extrapolate forward from the last LINSTEP at one step per
+        # 200/3 ms (the client LinMove cadence, state.rs client_steps)
+        # - LINSTEP itself only arrives every two ticks.
+        dt = (time.time() - g.get("lin_t", 0)) / (0.2 / 3.0)
+        f = (l + dt) / c
+        f = min(max(f, 0.0), 1.0)
+        return (int(sx + (tx - sx) * f), int(sy + (ty - sy) * f))
+
     def play(self, name):
         assert self.charlist_id is not None
         self.send_rel(
