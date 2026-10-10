@@ -6362,3 +6362,98 @@ demo could adopt the staged-gate pattern for sandbox-hostile CI.
 COMMITS: 1db150a (server: true 60s session timeout + own-address
 game bind), 751b812 (client+gate: per-node port overrides, agent
 quick/exit modes, staged remote GL e2e), this handoff.
+## 2026-10-10 - Session 90 (type 3: the breeding pipeline - sexes, breed rows, gestation, birth, maturation, v8 persist)
+
+SESSION TYPE ROTATION LOG: 87=4, 88=0, 89=4, 90=3. Pick the next type
+freely - just NOT 3 (0/1/2/4/5 all open).
+
+WHAT SHIPPED (the livestock breeding vertical, server + live e2e):
+- state.rs: Sex on TameState (Female/Male, index roundtrip), the
+  per-animal breed rows (prod_quantity - the milk/wool quantity row,
+  breed_ql - the quality row), pregnant_acc + juvenile_acc
+  accumulators, MATURATION/GESTATION legacy thresholds, the
+  HNH_BREED_SCALE knob (x43200 for the live probe: ~9 s pregnancies
+  and ~20 s childhoods against the doc-true tick terms).
+- animals.rs: the sire sweep (a leashed male inside SIRE_RADIUS banks
+  a pregnancy accumulator on a fed female), birth (a domestic-born
+  calf gob beside the dam, INHERITED rows: sex roll, averaged breed
+  rows, juvenile age 0), the maturation gate (juveniles graze and
+  grow but open no production petal), the honest milk refusal lines
+  (the bull gives no milk / not yet grown / no milk yet), the
+  tamed_owner map so rows re-bind on the tamer's next login after a
+  restart, follow/leash hygiene for calves beside their dam.
+- persist.rs v8 (additive): sex, prod_quantity, breed_ql,
+  pregnant_acc, juvenile_acc on SavedAnimal; pre-v8 saves load with
+  documented defaults (female, legacy row, adult); boot restores the
+  rows and remembers the tamer_key; the sigterm shutdown flush was
+  verified to write the full herd (10 animals in the trace save).
+- main.rs: every dev knob (no_aggro/fast_tame/breed_scale/
+  leash_ticks/milk_rate/lp_rate) logs its effective value at startup
+  so each probe log carries its own configuration.
+- test_breeding.py (the live gate): quell-tame the cow + aurochs
+  pair, walk the herd to the pasture, scaled gestation, CALF BORN
+  beside the dam, maturation, the sex verdict through the flower
+  menu (a heifer is milked through the inherited production row, a
+  bull calf answers the refusal line and the dam re-conceives - up
+  to six calves), then the restart leg: SIGTERM -> flush -> a second
+  server boots on the SAME save and the SAME character re-enters on
+  its persisted position beside the reloaded herd -> BREEDING: OK.
+- hnhlib.py: MCache-parity grid streaming (the ROOT fix of the
+  session - see LESSONS) + ensure_server keep_save for restart legs.
+
+ROOT CAUSES FIXED (all live-traced, not guessed):
+1. Restart leg loaded an EMPTY world: ensure_server deleted the save
+   file before every boot - including the restart boot. The first
+   server HAD flushed the herd on SIGTERM; the probe itself erased
+   it (saved_chars=0 with the herd parked on the save). Fix:
+   keep_save=True on the restart boot only.
+2. The restart probe entered a FRESH character (name+"r") which
+   spawns 3000 subtiles away at (555,555) and sees only wild cows;
+   the herd reloads beside the ORIGINAL character's persisted
+   position. Fix: re-enter the same username (the S89 instant-persist
+   contract makes the offline char available at once).
+3. Nav flakes (stalled chase, "nav to the grass field failed"):
+   the probe client only ever requested the spawn 3x3 + one fixed
+   5x5 grid ring; any pursuit that crossed into an unrequested grid
+   walked BLIND - tile_at returns None, line_clear refuses,
+   find_tile_path returns None, the probe stands still while the
+   beast flees (live trace: the pursuit crossed into grid (1,3),
+   BFS (111,296)->(125,348): None; the same pair on a client that
+   streamed the grid: path len 7). Fix: every pump requests the 3x3
+   grids around the avatar's CURRENT position (Java MCache parity),
+   pending set + 5 s re-request for UDP loss.
+
+LESSONS (probe-client parity, hard-won):
+- A probe that stops moving is a MAP STREAMING bug first, a movement
+  bug second: the server happily walks clicks into unstreamed tiles,
+  the client-side planner just cannot aim there.
+- Long sync test runs die with the canceled tool call; a bare
+  nohup+setsid python also died minutes into the run (sandbox
+  process eviction after context restarts) - the only reliable shape
+  in this session was ONE foreground call (timeout 560) holding the
+  whole ~4 min probe.
+- faulthandler watchdog (500 s, exit=True) in the long e2e probes:
+  a silent hang dumps its stack instead of stalling the gate.
+
+EVIDENCE: BREEDING: OK (breedfinal5: tame x2, calf born from the
+scaled gestation, heifer milked through the inherited row, herd
+persisted and reloaded from the v8 save). Gate: cargo fmt clean,
+clippy --all-targets -D warnings clean, 354 workspace tests green
+(11 proto + 324 unit [2 ign] + 7 wire [1 ign] + 12 world). The
+save-file trace: 10 tamed animals with v8 rows (sex/rows/preg/
+juvenile) written by the SIGTERM flush and reloaded by the restart
+boot. test_dairy.py + test_dough.py regressions exercised inside
+the probe (quell/milk/plow/grass flows shared).
+
+NOT DONE / next session carries (S91 must NOT be type 3): GL e2e +
+Windows smoke of the fresh release binary on the WINDOWS port side;
+the remaining NOT-DONE dough legs (S79/S82: oven-fired other doughs);
+CI push still blocked on the PAT workflow scope (human action);
+breeding depth beyond the vertical (wool/sheep rows exist in the
+schema but no sheep e2e; cross-breed quality drift is a single
+average, not the doc's mutation roll - revisit against docs/).
+
+COMMITS: 043bcb5 (animals: the breeding pipeline + v8 persist),
+f547ea9 (e2e: the breeding probe green live + MCache-parity grid
+streaming + keep_save), this handoff.
+

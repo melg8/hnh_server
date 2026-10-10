@@ -431,6 +431,10 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
   duel torn down server-side); the dairy e2e probe with fightview
   tracking.
 - S84 (type 4): the dairy chain green end to end - 0.25 s pursuit
+  window; S79 dough legs covered - pizza/bun/pirozhki-baked slices,
+  milk draw <-> butter churn alternation, raisins quota,
+  streamed-map grass spirals, tree-exhaustion switching; 338
+  tests green.
 - S85 (type 5): the vis delta-scan (gap #10b closed) - per-CELL deltas, not per-gob.
 - S86 (type 3): the multi-machine cluster profile - cluster-up.sh + two e2e gates.
 - S87 (type 4): remote-profile e2e + Java-exact move semantics for probes (OCache parity).
@@ -438,104 +442,7 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
 - S89: true 60s session timeout + own-address game bind (Java source filter); real GL client e2e over the REMOTE profile, staged run-remote-e2e.sh; -Dhaven.authport/gameport client overrides.
 - S90: the breeding pipeline - sexes, breed rows, scaled gestation, calves with inherited rows, maturation gate, honest milk refusals, v8 persist + restart reload; MCache-parity grid streaming for probes (the nav-flake root).
 - S91: documentation de-pollution - the livestock doc consolidated (dup + stale chronicle removed, breeding notes landed), AGENTS.md session-protocol + Windows sections; GitNexus index re-bootstrapped.
-  slices, milk draw <-> butter churn alternation, raisins quota,
-  streamed-map grass spirals, tree-exhaustion switching; 338
-  tests green.
-
-## 2026-10-10 - Session 90 (type 3: the breeding pipeline - sexes, breed rows, gestation, birth, maturation, v8 persist)
-
-SESSION TYPE ROTATION LOG: 87=4, 88=0, 89=4, 90=3. Pick the next type
-freely - just NOT 3 (0/1/2/4/5 all open).
-
-WHAT SHIPPED (the livestock breeding vertical, server + live e2e):
-- state.rs: Sex on TameState (Female/Male, index roundtrip), the
-  per-animal breed rows (prod_quantity - the milk/wool quantity row,
-  breed_ql - the quality row), pregnant_acc + juvenile_acc
-  accumulators, MATURATION/GESTATION legacy thresholds, the
-  HNH_BREED_SCALE knob (x43200 for the live probe: ~9 s pregnancies
-  and ~20 s childhoods against the doc-true tick terms).
-- animals.rs: the sire sweep (a leashed male inside SIRE_RADIUS banks
-  a pregnancy accumulator on a fed female), birth (a domestic-born
-  calf gob beside the dam, INHERITED rows: sex roll, averaged breed
-  rows, juvenile age 0), the maturation gate (juveniles graze and
-  grow but open no production petal), the honest milk refusal lines
-  (the bull gives no milk / not yet grown / no milk yet), the
-  tamed_owner map so rows re-bind on the tamer's next login after a
-  restart, follow/leash hygiene for calves beside their dam.
-- persist.rs v8 (additive): sex, prod_quantity, breed_ql,
-  pregnant_acc, juvenile_acc on SavedAnimal; pre-v8 saves load with
-  documented defaults (female, legacy row, adult); boot restores the
-  rows and remembers the tamer_key; the sigterm shutdown flush was
-  verified to write the full herd (10 animals in the trace save).
-- main.rs: every dev knob (no_aggro/fast_tame/breed_scale/
-  leash_ticks/milk_rate/lp_rate) logs its effective value at startup
-  so each probe log carries its own configuration.
-- test_breeding.py (the live gate): quell-tame the cow + aurochs
-  pair, walk the herd to the pasture, scaled gestation, CALF BORN
-  beside the dam, maturation, the sex verdict through the flower
-  menu (a heifer is milked through the inherited production row, a
-  bull calf answers the refusal line and the dam re-conceives - up
-  to six calves), then the restart leg: SIGTERM -> flush -> a second
-  server boots on the SAME save and the SAME character re-enters on
-  its persisted position beside the reloaded herd -> BREEDING: OK.
-- hnhlib.py: MCache-parity grid streaming (the ROOT fix of the
-  session - see LESSONS) + ensure_server keep_save for restart legs.
-
-ROOT CAUSES FIXED (all live-traced, not guessed):
-1. Restart leg loaded an EMPTY world: ensure_server deleted the save
-   file before every boot - including the restart boot. The first
-   server HAD flushed the herd on SIGTERM; the probe itself erased
-   it (saved_chars=0 with the herd parked on the save). Fix:
-   keep_save=True on the restart boot only.
-2. The restart probe entered a FRESH character (name+"r") which
-   spawns 3000 subtiles away at (555,555) and sees only wild cows;
-   the herd reloads beside the ORIGINAL character's persisted
-   position. Fix: re-enter the same username (the S89 instant-persist
-   contract makes the offline char available at once).
-3. Nav flakes (stalled chase, "nav to the grass field failed"):
-   the probe client only ever requested the spawn 3x3 + one fixed
-   5x5 grid ring; any pursuit that crossed into an unrequested grid
-   walked BLIND - tile_at returns None, line_clear refuses,
-   find_tile_path returns None, the probe stands still while the
-   beast flees (live trace: the pursuit crossed into grid (1,3),
-   BFS (111,296)->(125,348): None; the same pair on a client that
-   streamed the grid: path len 7). Fix: every pump requests the 3x3
-   grids around the avatar's CURRENT position (Java MCache parity),
-   pending set + 5 s re-request for UDP loss.
-
-LESSONS (probe-client parity, hard-won):
-- A probe that stops moving is a MAP STREAMING bug first, a movement
-  bug second: the server happily walks clicks into unstreamed tiles,
-  the client-side planner just cannot aim there.
-- Long sync test runs die with the canceled tool call; a bare
-  nohup+setsid python also died minutes into the run (sandbox
-  process eviction after context restarts) - the only reliable shape
-  in this session was ONE foreground call (timeout 560) holding the
-  whole ~4 min probe.
-- faulthandler watchdog (500 s, exit=True) in the long e2e probes:
-  a silent hang dumps its stack instead of stalling the gate.
-
-EVIDENCE: BREEDING: OK (breedfinal5: tame x2, calf born from the
-scaled gestation, heifer milked through the inherited row, herd
-persisted and reloaded from the v8 save). Gate: cargo fmt clean,
-clippy --all-targets -D warnings clean, 354 workspace tests green
-(11 proto + 324 unit [2 ign] + 7 wire [1 ign] + 12 world). The
-save-file trace: 10 tamed animals with v8 rows (sex/rows/preg/
-juvenile) written by the SIGTERM flush and reloaded by the restart
-boot. test_dairy.py + test_dough.py regressions exercised inside
-the probe (quell/milk/plow/grass flows shared).
-
-NOT DONE / next session carries (S91 must NOT be type 3): GL e2e +
-Windows smoke of the fresh release binary on the WINDOWS port side;
-the remaining NOT-DONE dough legs (S79/S82: oven-fired other doughs);
-CI push still blocked on the PAT workflow scope (human action);
-breeding depth beyond the vertical (wool/sheep rows exist in the
-schema but no sheep e2e; cross-breed quality drift is a single
-average, not the doc's mutation roll - revisit against docs/).
-
-COMMITS: 043bcb5 (animals: the breeding pipeline + v8 persist),
-f547ea9 (e2e: the breeding probe green live + MCache-parity grid
-streaming + keep_save), this handoff.
+- S92: the breeding GL e2e landed green - livestock agent mode (the ANIMALS phase hunts the herd, not predators), the pixel-exact COW PIXELS verdict (template match 0.0 dist, hare 135+), 3 calves born on the live GL path.
 
 ## 2026-10-10 - Session 91 (type 0: documentation de-pollution - the livestock doc consolidated, the breeding notes landed, AGENTS.md gaps closed)
 
@@ -620,3 +527,58 @@ AGENTS.md sections), 89163ac (handoff: the rust.yml retry note),
 1070a8d (docs: crafting + food consolidation), and the final S91
 commit (scripts/jogl/run-breeding-gl-e2e.sh + its AGENTS.md harness
 entry + this handoff update).
+
+## 2026-10-10 - Session 92 (type 4: the breeding GL e2e - livestock agent mode + the pixel-exact cow verdict)
+
+SESSION TYPE ROTATION LOG: 88=0, 89=4, 90=3, 91=0, 92=4. Pick the next
+type freely - just NOT 4 (0/1/2/3/5 all open).
+
+GOAL (type 4, per the rotation): close the oldest carried gap - "GL e2e
+of the breeding vertical on the REAL Java client". The session-91 prep
+(run-breeding-gl-e2e.sh) existed but had never been run green.
+
+DONE:
+
+- First live run (breedgl): the interrupted pre-summary context ran the
+  harness as shipped; the server leg was green (v8 save restored 5,
+  herd re-bound on login, 3 calves born 13:50:15) but the ANIMALS
+  verdict fell back - the DriveAgent hunts PREDATORS (wolf/boar only),
+  and no predator ever spawns near a breeding save site, while the
+  herd follows the player OFF-viewport-edge during the hunt phases.
+- Root fix (DriveAgent.java): `-Dhaven.drivelivestock=true` retargets
+  the ANIMALS phase at the herd species (cow/bull/calf/sheep/aurochs)
+  - tamed animals FOLLOW the player, so they walk into the viewport by
+  themselves. Rebuilt driveagent.jar (javac + jar, JDK8 toolchain).
+- Second live run (breedgl2, full foreground call): ALL green -
+  restore 5 -> re-bound on login -> 3 calves born at 14:10:56 while
+  the client rendered -> `ANIMALS SCREENSHOT: saved kritter at 294,369
+  res=gfx/kritter/cow/body/standing/standing-0` -> full corpus verdicts
+  MOVEMENT/SPEED/EQUIPVIS/CURSOR/GROUNDDROP/CLUSTER OK -> script
+  verdicts HERD RENDERS: OK + LIVE BIRTH: OK.
+- VLM counter-evidence investigated honestly: a VLM read of the
+  screenshot claimed ZERO cows ("a rabbit"). Resolved by pixels, not
+  opinions: scripts/verify_cow_pixels.py template-matches the exact
+  27x43 cow standing-0 sprite against the frame - COW PIXEL MATCH: OK
+  (dist=0.0 at image-origin 282,338 = the agent-reported 294,369 minus
+  the sprite offset 21,14; the hare template scores 135+ at its best,
+  so the match discriminates species). Lesson recorded: VLM eyeballing
+  of 27x43 px sprites is NOT evidence (horns read as ears); pixel
+  template matching is.
+- The pixel verdict is now part of the harness: run-breeding-gl-e2e.sh
+  prints COW PIXELS: OK/FAIL via verify_cow_pixels.py (exit-coded,
+  machine-readable). AGENTS.md harness entry updated (livestock mode +
+  the three-verdict contract).
+- HANDOFF housekeeping: S90 archived (keep-last-two), the session-index
+  S84 entry repaired (its tail had been orphaned onto the S91 line by
+  the S89 archival), S92 index line added.
+
+NOT DONE / next session carries: Windows smoke of the fresh release
+binary (run-client.bat path - sandbox has no wine; needs the human or
+a wine session); the remaining dough legs (S79/S82 oven-fired doughs);
+CI push still blocked on the PAT workflow scope (human action; the
+valid rust.yml ships untracked); breeding depth per the livestock doc
+Open questions (sheep e2e, heifer gate, calf drawables, quality
+mutation roll). S93 must NOT be type 4.
+
+COMMITS: aff4e3d (e2e: livestock agent mode + pixel-exact cow proof),
+this handoff.
