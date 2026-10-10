@@ -35,9 +35,17 @@ how something came to be.
    `--saturated` for the worst case (3300+ animals, live fights) and
    `--bots 1000` for the documented 1k target. Scenario probes:
    `python3 server/scripts/probe_melee.py` etc. (see server/scripts/README.md).
-6. Multi-node: `--cluster <nodes> --node N` starts the grid-owner
-   cluster (wire format documented in the archive, sessions 27/34).
-7. Client: `ant jar` (JDK 21 + Ant 1.10), run
+6. Multi-node: `cd server && ./scripts/cluster-up.sh up` boots the
+   local 2..4-node grid-owner cluster (node 0 keeps the default
+   client-facing ports); `CLUSTER_SPEC=host:mesh,... SELF=i
+   cluster-up.sh remote` is the per-machine deployment shape. The
+   wire format itself is documented in the archive (sessions 27/34).
+7. Cluster e2e gates: `./scripts/test_cluster.sh` must print
+   `CLUSTER E2E: OK` and `./scripts/test_remote_cluster.sh` must
+   print `REMOTE CLUSTER: OK` (mesh, guest walk over peer cells,
+   cross-node migration) - run them after any cluster/stream/net
+   change.
+8. Client: `ant jar` (JDK 21 + Ant 1.10), run
    `java -cp build/haven.jar:lib/* haven.MainFrame` - it connects to
    127.0.0.1 automatically (auth 1871, game 1870, resources 1872).
    `-Dhaven.autoplay=Player` skips charselect. `-Dhaven.pinnedcert`

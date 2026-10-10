@@ -45,14 +45,36 @@ waits for the ports, and launches the client. `start-cluster.bat`
 boots a two-node cluster on one machine. See `windows/README.md` for
 every script, and `windows/collect-logs.bat` for one-file bug reports.
 
+## Quick start (multi-machine cluster)
+
+One command boots a local 2..4-node cluster (grid ownership splits by
+a stable hash over the nodes):
+
+```bash
+cd server && ./scripts/cluster-up.sh up      # node 0 keeps ports 1871/1870
+```
+
+For real multi-machine deployment, run on each host (same seed):
+
+```bash
+CLUSTER_SPEC=hostA:18790,hostB:18791 SELF=0 ./scripts/cluster-up.sh remote   # host A
+CLUSTER_SPEC=hostA:18790,hostB:18791 SELF=1 ./scripts/cluster-up.sh remote   # host B
+```
+
+Characters migrate across nodes on re-login through any node's ports
+(node i: auth 1871+2i, game 1870+4i, res 1872+4i, mesh 18790+i).
+
 ## Verifying and load-testing
 
 ```bash
 cd server
-cargo test --workspace        # unit + wire integration (316 tests)
+cargo test --workspace        # unit + wire integration (339 tests)
 ./target/release/hnh-server --seed 42 --bots 1000 --saturated --perf
                               # 1000 walking/fighting bots, 5 s perf reports
 python3 scripts/test_client.py testuser   # WORLD ENTRY: OK (live smoke)
+./scripts/test_cluster.sh              # CLUSTER E2E: OK  (local 2-node)
+./scripts/test_remote_cluster.sh       # REMOTE CLUSTER: OK (per-machine,
+                                        # mesh + guest walk + migration)
 ```
 
 The richer scenario probes (crafting, farming, stations, melee, the

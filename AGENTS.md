@@ -190,6 +190,40 @@ If the change touches `unsafe` code, additionally run `cargo miri test` for
 the affected crate. If you cannot run the toolchain in your environment, state
 that explicitly in your summary instead of claiming success.
 
+## Multi-Node Cluster Surfaces (run + verify)
+
+Any change to the cluster path (`grid_owner.rs`, `nodes.rs`,
+`game/cluster.rs`, node message encoding in `hnh-proto`) or to the
+session/stream layer it feeds MUST be verified on a real multi-node
+boot, not only by the in-process unit battery:
+
+```bash
+cd server
+./scripts/test_cluster.sh          # local 2-node profile  -> CLUSTER E2E: OK
+./scripts/test_remote_cluster.sh   # per-machine profile   -> REMOTE CLUSTER: OK
+```
+
+- `cluster-up.sh up` boots a local 2..4-node cluster with the port
+  formula node i = auth 1871+2i, game 1870+4i, res 1872+4i, mesh
+  18790+i (node 0 keeps the client-facing defaults, so the Java
+  client, `run-client.bat` and `test_client.py` work unchanged).
+- `cluster-up.sh remote` boots ONLY this machine's node from
+  `CLUSTER_SPEC=hostA:18790,hostB:18791,... SELF=i` - one copy per
+  machine, same `--seed`; the rendezvous-hash grid ownership splits
+  the world across machines. `stop`/`status` manage both modes.
+- The e2e gates prove the mesh (dial link up), world entry through
+  node 0, the guest walk across peer-owned cells (peer-subscribed +
+  guest-ingested evidence), and cross-node character migration
+  (snapshot served by the owner, migration received by the peer).
+  The remote gate runs the operator command per machine on two
+  loopback addresses (127.0.0.1 + 127.0.0.2) and re-enters the
+  migrated character through machine B's own ports.
+- Probe clients (`hnhlib.WireClient`) bind to any node's ports and
+  echo OBJACK like the real client's SWorker; their movement
+  semantics mirror `src/haven/OCache.java` exactly (OD_MOVE never
+  cancels a live LinMove; the final LINSTEP `l >= c` is the arrival
+  marker). Keep that parity when touching either side.
+
 ## MANDATORY: Verify Client-Visible Changes on the REAL Client
 
 Every change that can affect what the user sees or does in the game
@@ -269,6 +303,8 @@ client demonstrates the behavior. Record both evidences in HANDOFF.md.
 This project is indexed by GitNexus as **hnh_server** (10963 symbols, 39272 relationships, 624 execution flows).
 
 > Index stale? Run `node .gitnexus/run.cjs analyze --index-only` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? Bootstrap with `npx`, `bunx`, or `pnpm dlx` — e.g. `bunx gitnexus@latest analyze` (npm 11 npx crash; #1939).
+>
+> No `.gitnexus/` index in your environment at all (fresh sandbox, env restart)? Rebuild it with the bootstrap above, or - for that one session only - fall back to text search (`grep`/`rg`) plus reading the affected files for impact analysis, and say so explicitly in the handoff record. Never silently skip the impact step, and never treat a grep hit count as equivalent to the graph verdict.
 
 ## Always Do
 
