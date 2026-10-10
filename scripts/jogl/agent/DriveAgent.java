@@ -395,6 +395,16 @@ public class DriveAgent {
             }
             System.out.println("NO TELEPORT: " + (maxJump <= 33 ? "OK (max jump " + maxJump + " subtiles)" : "FAIL (jump " + maxJump + ")"));
 
+            // Quick mode (the remote-profile migration leg): the first
+            // movement phase is all the evidence the leg needs; skip the
+            // long tail phases and let the caller drive the next client
+            // instance (e.g. re-entry through another node's address).
+            if (Boolean.getBoolean("haven.drivequick")) {
+                System.out.println("AGENT: quick mode - stopping after MOVEMENT");
+                exitClient();
+                return;
+            }
+
             // Rapid re-clicks: five orders in quick succession, spread wide
             // enough that each one authorizes a real walk. Positions must
             // keep gliding between samples (no destination jump).
@@ -1170,9 +1180,37 @@ public class DriveAgent {
             } catch (Throwable e) {
                 System.out.println("RELAYFIGHT VERDICT: FAIL " + e);
             }
+
+            // Clean exit when asked: WINDOW_CLOSING runs the real player
+            // quit path (window listener -> main-thread interrupt ->
+            // Session sender thread -> MSG_CLOSE), so the server persists
+            // the character at once instead of waiting for the UDP
+            // silence timeout.
+            if (Boolean.getBoolean("haven.driveexit")) {
+                exitClient();
+            }
         } catch (Throwable e) {
             System.out.println("AGENT ERROR: " + e);
             e.printStackTrace();
+        }
+    }
+
+    /** Dispatch WINDOW_CLOSING on the MainFrame window: the same path a
+     *  real player's window-close takes. No-op (with a log line) when the
+     *  window cannot be found. */
+    static void exitClient() {
+        try {
+            Object mf = getStatic(Class.forName("haven.MainFrame"), "instance");
+            if (mf instanceof java.awt.Window) {
+                java.awt.Window w = (java.awt.Window) mf;
+                w.dispatchEvent(new java.awt.event.WindowEvent(w,
+                        java.awt.event.WindowEvent.WINDOW_CLOSING));
+                System.out.println("AGENT: window closing dispatched");
+            } else {
+                System.out.println("AGENT: window closing NOT dispatched (no MainFrame window)");
+            }
+        } catch (Throwable e) {
+            System.out.println("AGENT: window closing dispatch failed " + e);
         }
     }
 

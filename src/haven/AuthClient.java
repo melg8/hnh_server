@@ -57,8 +57,14 @@ public class AuthClient {
 		}
 	}
 
+	// Local multi-node cluster: node i listens on auth port 1871+2i
+	// (cluster-up.sh). The default keeps the single-node contract;
+	// -Dhaven.authport lets the client enter through any node's own
+	// address (the multi-machine entry profile).
+	private static final int AUTHPORT = Integer.getInteger("haven.authport", 1871);
+
 	public AuthClient(String host, String username) throws IOException {
-		sk = ssl.connect(host, 1871);
+		sk = ssl.connect(host, AUTHPORT);
 		skin = sk.getInputStream();
 		skout = sk.getOutputStream();
 		binduser(username);

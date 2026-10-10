@@ -203,10 +203,34 @@ cd server
 ./scripts/test_remote_cluster.sh   # per-machine profile   -> REMOTE CLUSTER: OK
 ```
 
+The REAL-client version of the remote gate (the actual GL render path,
+through machine A then machine B's own address) is STAGED because sandboxed
+CI hosts may evict long-lived idle wrapper processes - each stage is one
+short foreground call, the Xvfb+client pair lives exactly as long as the
+JVM renders through it:
+
+```bash
+scripts/jogl/run-remote-e2e.sh up      # boot both machines -> REMOTE GL MESH: OK
+scripts/jogl/run-remote-e2e.sh legA    # full agent corpus via machine A
+                                       #   -> REMOTE GL WALK + RENDER: OK
+scripts/jogl/run-remote-e2e.sh legB    # re-enter via 127.0.0.2:1873/1874
+                                       #   -> REMOTE GL MIGRATION + CLIENT: OK
+scripts/jogl/run-remote-e2e.sh down    # stop both machines
+# ("all" chains the stages for hosts where one long call is fine)
+```
+
 - `cluster-up.sh up` boots a local 2..4-node cluster with the port
   formula node i = auth 1871+2i, game 1870+4i, res 1872+4i, mesh
   18790+i (node 0 keeps the client-facing defaults, so the Java
   client, `run-client.bat` and `test_client.py` work unchanged).
+- A clustered node binds its game UDP socket to its OWN CLUSTER_SPEC
+  address (not wildcard): the real Java client (`Session.java`
+  RWorker) drops every datagram whose source address != the server it
+  dialed, so machine B answering from a wildcard bind would be
+  silently discarded by any client entering through B. Single-node
+  keeps the wildcard contract (local clients, the bot fleet). The
+  Java client gains `-Dhaven.authport`/`-Dhaven.gameport` overrides
+  for entering through any node's own address.
 - `cluster-up.sh remote` boots ONLY this machine's node from
   `CLUSTER_SPEC=hostA:18790,hostB:18791,... SELF=i` - one copy per
   machine, same `--seed`; the rendezvous-hash grid ownership splits

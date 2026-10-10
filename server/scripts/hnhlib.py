@@ -380,6 +380,20 @@ class WireClient:
         self.objdata_datagrams = 0
         self.objacks = {}  # gobid -> last frame seen (SWorker mirror)
         self.last_ack = 0.0
+        # SWorker idle clock (session 89): every outbound datagram
+        # stamps it; pump() beats when it goes stale, mirroring the
+        # Java client's 5 s idle beat (Session.java sworker).
+        self._last_out = 0.0
+
+    def _send(self, data):
+        """Send one raw datagram and stamp the sworker idle clock.
+
+        Every outbound path funnels through here so pump()'s idle beat
+        sees exactly what the Java sworker would: it beats only when
+        its own output has been idle for 5 s.
+        """
+        self._last_out = time.time()
+        self.sock.sendto(data, self.server)
 
     # ---- session plumbing -------------------------------------------------
     def connect(self):
@@ -394,7 +408,7 @@ class WireClient:
             + cookie
         )
         for _ in range(8):
-            self.sock.sendto(sess, self.server)
+            self._send(sess)
             try:
                 data, _ = self.sock.recvfrom(65536)
                 if data[0] == MSG_SESS and len(data) == 2 and data[1] == 0:
@@ -413,7 +427,7 @@ class WireClient:
             else:
                 out += p
         self.tseq += len(subs)
-        self.sock.sendto(out, self.server)
+        self._send(out)
 
     def wdgmsg(self, wid, name, args=b""):
         self.send_rel([bytes([RMSG_WDGMSG]) + le16(wid) + havstr(name) + args])
@@ -441,7 +455,7 @@ class WireClient:
         return True
 
     def mapreq(self, gx, gy):
-        self.sock.sendto(bytes([MSG_MAPREQ]) + le32(gx) + le32(gy), self.server)
+        self._send(bytes([MSG_MAPREQ]) + le32(gx) + le32(gy))
 
     def pump(self, seconds):
         deadline = time.time() + seconds
@@ -452,8 +466,14 @@ class WireClient:
                 msg = bytes([MSG_OBJACK])
                 for gid, frame in self.objacks.items():
                     msg += le32(gid) + le32(frame)
-                self.sock.sendto(msg, self.server)
+                self._send(msg)
                 self.last_ack = now
+            if now - self._last_out > 5.0:
+                # SWorker mirror (Session.java: beat on 5 s output
+                # idle). The server's 60 s silence timeout is live
+                # (session 89), so a probe must look idle-but-ALIVE,
+                # never dead: an idle real client beats every 5 s.
+                self._send(bytes([MSG_BEAT]))
             try:
                 data, _ = self.sock.recvfrom(65536)
             except socket.timeout:
@@ -673,7 +693,7 @@ class WireClient:
                     t2, b2 = self.held.pop(self.rseq)
                     self.on_rel(t2, b2)
                     self.rseq = (self.rseq + 1) & 0xFFFF
-                self.sock.sendto(bytes([MSG_ACK]) + le16((self.rseq - 1) & 0xFFFF), self.server)
+                self._send(bytes([MSG_ACK]) + le16((self.rseq - 1) & 0xFFFF))
             elif ((seq - self.rseq) & 0xFFFF) < 0x8000:
                 self.held[seq] = (t, body)
             seq = (seq + 1) & 0xFFFF

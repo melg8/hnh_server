@@ -67,6 +67,13 @@ public class Session {
 
 	static final int ackthresh = 30;
 
+	// Local multi-node cluster: node i listens on game port 1870+4i
+	// (cluster-up.sh). The default keeps the single-node contract;
+	// -Dhaven.gameport lets the client enter through any node's own
+	// address (the multi-machine entry profile). Parsed once: this
+	// is the per-datagram hot path.
+	static final int GAMEPORT = Integer.getInteger("haven.gameport", 1870);
+
 	DatagramSocket sk;
 	InetAddress server;
 	Thread rworker, sworker/*, ticker*/;
@@ -890,7 +897,7 @@ public class Session {
 
 	public void sendmsg(byte[] msg) {
 		try {
-			sk.send(new DatagramPacket(msg, msg.length, server, 1870));
+			sk.send(new DatagramPacket(msg, msg.length, server, GAMEPORT));
 		} catch (IOException e) {
 		}
 	}
