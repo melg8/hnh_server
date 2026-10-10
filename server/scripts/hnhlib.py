@@ -1027,7 +1027,7 @@ class WireClient:
             return pos
         l = g.get("linstep", 0) or 0
         # Extrapolate forward from the last LINSTEP at one step per
-        # 200/3 ms (the client LinMove cadence, state.rs client_steps)
+        # 200/3 ms (the client LinMove cadence, state/gobs.rs client_steps)
         # - LINSTEP itself only arrives every two ticks.
         dt = (time.time() - g.get("lin_t", 0)) / (0.2 / 3.0)
         f = (l + dt) / c

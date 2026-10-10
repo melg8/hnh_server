@@ -1179,6 +1179,6 @@ async fn melee_relay_result_resyncs_and_closes_on_knockout() {
 
 // ------------------------------------------------------------------
 // Taming (session 45): quell gates, tameness accumulation, leash
-// lifecycle. Server-policy numbers live in state.rs (TAMENESS_*,
+// lifecycle. Server-policy numbers live in state/livestock.rs (TAMENESS_*,
 // LEASH_BREAK_TICKS) and the docs Open questions.
 // ------------------------------------------------------------------

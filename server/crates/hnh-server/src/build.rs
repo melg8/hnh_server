@@ -178,7 +178,7 @@ pub const BUILDABLES: &[Buildable] = &[
         // Legacy demand verified against RoB (Legacy:Kiln): Clay x45
         // with the Pottery skill prereq (skill gating is not enforced
         // for stations - the same policy the oven's bake prereq runs
-        // under). Clay is obtainable: shore clay deposits (state.rs,
+        // under). Clay is obtainable: shore clay deposits (state/gathering.rs,
         // session 69). The legacy 3x3 footprint and per-tile paving are
         // not modeled (single-tile placement is the server-wide
         // policy, recorded in the mechanics doc).

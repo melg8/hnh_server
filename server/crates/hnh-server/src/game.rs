@@ -1738,7 +1738,7 @@ mod pose;
 mod relay;
 mod social;
 mod stream;
-// Keep `game::move_dir` / `game::art_dir` (doc references in state.rs
+// Keep `game::move_dir` / `game::art_dir` (doc references in state/
 // and nodes.rs) resolving after the pose-table move (proj-pub-use-reexport).
 // The pub(super) row re-exposes the table accessors and the avatar base
 // resource to the sibling stream/interact/cluster files through their

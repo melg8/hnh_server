@@ -6,7 +6,7 @@
 //!
 //! Pure move out of game.rs (session 70 split). `move_dir` / `art_dir`
 //! / `PoseTable` are re-exported from `game` so the `game::move_dir`
-//! doc references in state.rs and nodes.rs keep resolving.
+//! doc references in state/ and nodes.rs keep resolving.
 
 use super::*;
 
@@ -105,7 +105,7 @@ pub(crate) struct PoseTable {
 
 static POSES: std::sync::OnceLock<PoseTable> = std::sync::OnceLock::new();
 
-/// Species index order must mirror the enum declaration order (state.rs).
+/// Species index order must mirror the enum declaration order (state/species.rs).
 /// Session 46 appends the mufflon (the pack's directory spelling) and
 /// the sheep - both ship body pose directories like the original seven.
 /// Session 77 appends the bear and the hen (the sausage chain's meat

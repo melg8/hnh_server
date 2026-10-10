@@ -659,7 +659,7 @@ this section is the WHAT that is live.
   quality rolls, and whether the pick verb opened a flower menu with
   extra options are unknown from the pack and the reachable wiki pages.
   The flat GATHER_QL, TREE_HARVESTS = 5 and BOULDER_STONES = 5 are
-  chosen server policy (state.rs constants); reconcile them against
+  chosen server policy (state/gathering.rs constants); reconcile them against
   Legacy:Branch / Legacy:Stone / Legacy:Quality when reachable.
 
 - **Sausage-chain numbers (session 77).** The per-wurst meat unit

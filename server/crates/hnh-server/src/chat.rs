@@ -7,7 +7,7 @@
 use crate::state::VIEW_RADIUS;
 
 /// Area chat range. Server policy: you hear what you can see — the relay
-/// shares the view radius (state.rs, ~45 tiles at 500 subtiles).
+/// shares the view radius (state/gobs.rs, ~45 tiles at 500 subtiles).
 pub const AREA_CHAT_RADIUS: i32 = VIEW_RADIUS;
 
 /// Hard cap on a relayed line. The client `Textlog` renders long lines on

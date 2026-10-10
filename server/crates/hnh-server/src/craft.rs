@@ -250,7 +250,7 @@ pub const RECIPES: &[Recipe] = &[
     },
     // Bone arrows: same weighted model as stone arrows (RoB Legacy:Quality
     // cites the bone-arrow example for the branch-heavier rule). Bones
-    // enter the economy through animal loot (state.rs Species::loot).
+    // enter the economy through animal loot (state/species.rs Species::loot).
     Recipe {
         id: "bonearrow",
         name: "Bone Arrow",
@@ -335,7 +335,7 @@ pub const RECIPES: &[Recipe] = &[
     // action layers (ad = ["craft", id], verified by scanning the res
     // bytes: yarn/linencloth/linenpants/linenshirt/bucket), and every
     // input/output invobj resource ships in the pack. Wool enters the
-    // economy through the session-46 sheep/mouflon loot rows (state.rs).
+    // economy through the session-46 sheep/mouflon loot rows (state/species.rs).
     // Unit counts are chosen server policy pending legacy verification
     // (crafting-and-building.md Open questions).
     Recipe {
@@ -1886,7 +1886,7 @@ Peapod=STR:0.1 PER:0.9
 
     /// Session 36: the three new recipes resolve, carry RoB-verified
     /// per-type quality weights, and the bone-arrow ingredient is fed by
-    /// the animal loot table (state.rs Species::loot drops bones for
+    /// the animal loot table (state/species.rs Species::loot drops bones for
     /// every species).
     #[test]
     fn bow_chain_recipes_are_consistent() {
@@ -1907,7 +1907,7 @@ Peapod=STR:0.1 PER:0.9
             assert!(!r.outputs.is_empty(), "{id} has outputs");
         }
         // Every animal species drops bones so the bone-arrow recipe has
-        // an in-world source (state.rs Session 36 loot extension).
+        // an in-world source (state/species.rs Session 36 loot extension).
         for sp in crate::state::Species::ALL {
             let loot = sp.loot();
             assert!(

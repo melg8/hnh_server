@@ -386,7 +386,9 @@ Consolidated in session 91 from the per-session chronicle (sessions
 45-90) into one current-state section, because the chronicle had grown a
 verbatim duplicate of the session-45 entry and early claims that later
 sessions overturned ("animals are not persisted", "breeding is out of
-scope"). Constants live in `crates/hnh-server/src/state.rs`; behaviors in
+scope"). Constants live in `crates/hnh-server/src/state/` (the session-94 module split: herd
+constants in `state/livestock.rs`, species rows in `state/species.rs`);
+behaviors in
 `src/game/animals.rs` (fight/tame/production plumbing), `src/game.rs`
 (the production + breeding sweeps), `src/persist.rs` (save format) and
 `src/game/lifecycle.rs` (flush). The legacy-contract sections above stay
