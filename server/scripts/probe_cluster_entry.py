@@ -10,6 +10,10 @@ on the entering node.
 
 Verdict lines:
   WORLD ENTRY (node <auth-port>): OK
+
+Optional 4th argument = host (session 87: the remote-profile smoke
+enters through the OTHER machine's own loopback address, e.g.
+  probe_cluster_entry.py user 1873 1874 127.0.0.2
 """
 
 import sys
@@ -23,8 +27,9 @@ def main() -> int:
     user = sys.argv[1] if len(sys.argv) > 1 else "clusterentry"
     auth_port = int(sys.argv[2]) if len(sys.argv) > 2 else 1871
     game_port = int(sys.argv[3]) if len(sys.argv) > 3 else 1870
+    host = sys.argv[4] if len(sys.argv) > 4 else "127.0.0.1"
 
-    c = WireClient(user, auth_port=auth_port, game_port=game_port)
+    c = WireClient(user, host=host, auth_port=auth_port, game_port=game_port)
     c.connect()
     c.pump(2.0)
     if "charlist" not in c.widgets.values():

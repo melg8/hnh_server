@@ -106,6 +106,16 @@ taming) that are easier to drive from python.
   the CHARACTER MIGRATION (created through node 0, re-entered through
   node 1: node 0 serves the snapshot, node 1 receives it). Verdict:
   `CLUSTER E2E: OK`.
+- `test_remote_cluster.sh` - session-87 REMOTE-profile e2e gate: the
+  same legs as `test_cluster.sh`, but each node runs the real
+  `CLUSTER_SPEC=... SELF=i cluster-up.sh remote` path on its own
+  loopback address (machine A = 127.0.0.1, machine B = 127.0.0.2) -
+  exactly the commands an operator types per host. The migration leg
+  re-enters through machine B's own address (127.0.0.2:1873/1874).
+  Verdict: `REMOTE CLUSTER: OK`. This gate caught the session-87
+  client-semantics bug (see hnhlib.py's MOVE branch: OD_MOVE must
+  never cancel a live LinMove, and probes must echo OBJACK like the
+  real SWorker - both now pinned by this gate).
 
 ## Attic
 

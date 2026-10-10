@@ -316,12 +316,20 @@ class WireClient:
     widgets instead of re-implementing the transport.
     """
 
-    def __init__(self, username, request_chr=True, send_objacks=False,
+    def __init__(self, username, request_chr=True, send_objacks=True,
                  host="127.0.0.1", auth_port=None, game_port=None):
         """One client bound to one node. Passing the ports of a cluster
         node (e.g. auth 1873 / game 1874 for node 1 of cluster-up.sh)
         drives the whole session through THAT node - the multi-machine
-        profile's entry test."""
+        profile's entry test.
+
+        send_objacks defaults True (session 87): the real client's
+        SWorker echoes OBJACK within <=320 ms, so the server's unacked
+        table drains fast and its retransmit sweep stays idle. Probes
+        that never acked left ~700 bootstrap blocks pending for the
+        full 10 s retirement window, and the duplicate OD_MOVE
+        retransmits they caused kept wiping the first post-entry
+        LINBEG (see on_objdata's MOVE branch)."""
         self.username = username
         self.request_chr = request_chr
         self.send_objacks = send_objacks
@@ -823,8 +831,15 @@ class WireClient:
                 elif op == "MOVE":
                     g["pos"] = arg
                     g["moves"].append(arg)
-                    g["linbeg"] = None
-                    g["linstep"] = 0
+                    # Java OCache.move(): updates the base rc ONLY - it
+                    # never cancels a live LinMove. A retransmitted
+                    # entry block (frame 0, OD_MOVE) can legally arrive
+                    # AFTER a fresh LINBEG (frame 1); the old reset here
+                    # wiped "linbeg" and made the first walk leg after
+                    # world entry look like it never started (session
+                    # 87 root cause). Arrival is the FINAL LINSTEP
+                    # (l >= c) below, exactly like OCache.linstep's
+                    # delattr(Moving).
                 elif op == "LINBEG":
                     g["linbeg"] = arg
                     g["linbegs"].append(arg)
@@ -847,6 +862,14 @@ class WireClient:
                         g["pos"] = (
                             int(sx + (tx - sx) * f),
                             int(sy + (ty - sy) * f))
+                        if arg >= c:
+                            # Java OCache.linstep(): a step at/after the
+                            # step count ENDS the move (delattr Moving)
+                            # - the final LINSTEP is the arrival marker,
+                            # OD_MOVE is not. Snap the landing position
+                            # to the target like LinMove.getc at f=1.
+                            g["pos"] = (tx, ty)
+                            g["linbeg"] = None
                 elif op == "LAYERS":
                     base, _ids = arg
                     # The layered base is the avatar body resource; record

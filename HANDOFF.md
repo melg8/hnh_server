@@ -426,244 +426,6 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
   slices, milk draw <-> butter churn alternation, raisins quota,
   streamed-map grass spirals, tree-exhaustion switching; 338
   tests green.
-## 2026-10-09/10 - Session 81 (type 3: the dough ingredient chains)
-
-SESSION TYPE ROTATION LOG: 77=3, 78=5, 79=3, 80=4, 81=3. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: close the S79 "five baking doughs without ingredient sources"
-dead end in one move: five dough recipes (apple/blueberry/honey/
-raisin/pirozhki), the forageable world that feeds them, and the live
-probe that drives every new leg. The session was interrupted
-mid-feature (all code landed in the working tree, tests already
-green, but nothing committed); this continuation verified the tree
-live, committed, and pushed.
-
-DONE:
-
-- Five dough recipes over the flour-and-water base invariant
-  (apdough, dough_blueberrypie, hbdough, rbcdough, dough_pirozhki),
-  all Cooking/Per-softcapped, every output label keying the BAKE_MAP
-  oven dispatch. Ratios are server policy where RoB Legacy records
-  no counts (the ccdough x2-fruit + x1-butter shape); the honeybun
-  returns TWO empty buckets.
-- state::ForageKind registry + Kind::Forage gobs: Blueberries
-  (forest/heath), Chantrelles (forest), wild Grapevines, Yellow
-  Onion (grass). One pick = FORAGE_YIELD (3) units in a single
-  multi-unit Drop, then the plant is consumed (legacy single-pick).
-  Visibility gating DEVIATION from legacy Per*Exp recorded in the
-  farming doc.
-- Kind::FruitTree (appletree res): APPLE_PICKS (5) picks, one Apple
-  each, then degrades to a plain branch-yielding tree (the legacy
-  stage-6 behavior compressed into one gob).
-- Kind::BeeHive (bhive res): HIVE_HONEY_UNITS (3), bucket-gated
-  harvest exactly like the session-47 milking contract (empty bucket
-  in -> Bucket of Honey out; refusal system lines when empty-handed
-  or drained). Permanent fixture. Guest nodes publish it as a
-  no-act Structure (the bucket check lives on the home node - the
-  S62 guest-trough state).
-- Raisins: grapes x2 -> raisins x1 hand recipe (the S79 butter-
-  precedent deviation; legacy dries on a frame over two days).
-- make_fork_paginae.py resolves the parent's REAL on-disk version
-  into the AButton layer (the session-80 "Wrong res version" root
-  cause made hardcoded parent_ver=1 untrustworthy). The raisins
-  fork page (paginae/craft/raisins, parented into the baking
-  family) ships in res/compiled.
-- Kind::Drop grew a count field (serde default 1; persisted queues
-  and fixtures unchanged); the relay carries it through DropView
-  and StaticStack; pickup grants the whole stack.
-- fep.conf: Apple=CON:1 and Bucket of Honey=AGI:1 (any label the
-  server can produce must resolve a row or eating silently bails -
-  enforced by the eat path, documented in food-and-fep.md).
-- Roll-band spawn table design: every new broadleaf/forest/grass
-  static draws from the SAME per-tile roll (no extra draws), so all
-  pre-existing spawns stay bit-identical and old saves keep their
-  surroundings.
-- test_dough.py: the live five-leg probe (four forage handfuls,
-  apple budget + degradation, hive refusal + harvest, raisins
-  craft, raw apple eat). DOUGH: OK live. White-box pin
-  dough_chain_recipes_are_wired (every dough recipe keys BAKE_MAP,
-  paginas ship, fep rows resolve, world sprites exist).
-- diag_statics.py (the spawn-table dump used while tuning the roll
-  bands) attic'ed.
-
-MEASURED/EVIDENCE: DOUGH: OK live run (dough79555: 3 grapes, 5
-apples, honey, raisins, eat). fix_gameres_parent_refs.py --check
-gameres: stale=0 over 6385 resources. Gate: fmt + clippy -D warnings
-clean; 327 workspace tests green (11 proto + 297 unit [2 ign] +
-7 wire [1 ign] + 12 world). make-gameres already runs both repair
-passes (the S80 follow-up is closed by inspection).
-
-NOT DONE / next session carries: the butter + carrot-cake live
-chain drive (milk needs a tamed cow - the taming walkthrough is on
-the GL e2e list); a full dough->bake->eat pie cycle live (needs the
-farm/quern flour chain - test_bake covers Bread end to end, the new
-doughs are BAKE_MAP-pinned but not oven-driven); the vis delta-scan
-re-measure (gap #10b); multi-machine cluster profile; GL e2e +
-Windows smoke; CI push retry (the PAT still lacks the workflow
-scope as of S74/S75 retries).
-
-COMMITS: a3c3394 (world: the five dough ingredient chains close the
-baking breadth), this handoff.
-
-## 2026-10-10 - Session 82 (type 5: the tick-tail attribution and retirement)
-
-SESSION TYPE ROTATION LOG: 79=3, 80=4, 81=3, 82=5. All six types served -
-pick freely, avoid repeating the previous session's type.
-
-GOAL: close the S81 PIE tail first (the dough->bake->eat pie cycle), then
-serve type 5 against the named gap: the perf log carried 45-70 ms of
-tick time on burst ticks that no phase counter owned. The session was
-interrupted twice by context loss mid-measurement; the final
-continuation verified the tree, committed, measured, and closed.
-
-DONE:
-
-- PIE LEG LIVE (the S81 NOT-DONE tail): test_dough.py grew
-  blueberry_pie_leg - branches -> bucket (craft) -> water fill ->
-  walk_to_grass ring scan -> farm wheat -> grind flour -> knead
-  blueberry dough -> oven pie -> EAT. Two probe bugs fixed on the
-  way: gather_branches waited for the whole want in one pickup
-  (inventory grows one pick at a time - incremental before/after
-  wait) and the farm leg ran deep in the broadleaf forest where
-  plow_tile refuses everything but grass (farming.rs) - a
-  TILE_SPAN ring scan now walks to a real grass field first.
-  DOUGHPIE: OK live, committed 18adc43.
-- TAIL ATTRIBUTION: tail_us now names the post-phase gap (the
-  retransmit sweep's retire walk, the rare sweeps, the dirty-index
-  clear, the tick-end start/FX batch fan-out), and
-  startbat_fanout_us splits the start/FX batch share out of
-  mvbat_fanout_us (which sums both fan-outs). retx_retire_us is
-  timed separately because the retire walk runs AFTER
-  retx_sweep_us is recorded. The four counters now own the whole
-  tail (worst steady tick: owned 100-111%, >100% is cross-tick
-  boundary wrap). Committed f18aac8 + 1df83e0.
-- TARGETED RETIRE: the untargeted expire-retire pass rescanned
-  EVERY session's unacked table after each sweep (O(sessions x
-  pending), retain) and measured 37 ms max on burst ticks at 1000
-  bots. The sweep already knows which sessions it saw expired
-  blocks on, so the pass now walks that sid list
-  (retire_scratch, a session-id ring like retx_scratch). A
-  budget-skipped session retires on a later sweep - the ring
-  cursor rotates through all sessions and the 10 s age ceiling
-  dwarfs the 3-tick sweep period. retx_retired_gobs confirms the
-  scope. Measured (load82.sh, 1000 saturated walking bots,
-  steady): retire max 37013 -> 6964 us (-81%), tail max 61258 ->
-  43947 (-28%), wmax p50 89811 -> 68178 (-24%), mean tick 49070 ->
-  37961 (-23%). Committed 6caa31f.
-- ZERO-ALLOC FINALIZER RECORDS: the fan-out's shared-block path
-  recorded finalizer hits with bytes.to_vec() (malloc + copy on
-  tick thread, then a second copy into BlockBytes' inline buffer
-  and a free) - ~24k hits/tick at the 1000-bot scale, movement
-  finalizer blocks are ~24 bytes, well inside the 144-byte inline
-  width. BlockBytes::from_slice copies straight in; oversize
-  re-render blocks pay one allocation, same as before.
-  record_unacked split into owned/slice wrappers over one inner.
-  Unit pin block_bytes_from_slice_matches_from_vec (0/1/8/144/145
-  boundary + variant choice). Measured honestly: the tick-level
-  effect is BELOW the sandbox run-to-run noise (three post-fix
-  runs: startbat p50 11.7/11.7/15.2 vs 11.7 pre-fix; identical
-  code spreads tick p50 27-64 ms across runs) - the malloc is
-  gone by construction, structural relief in the S78 family.
-  Committed fe9388d.
-- load82.sh: the A/B harness - boots the release binary with 1000
-  in-process saturated walking bots, holds the steady state
-  (DUR=90 default), summarizes tail attribution + tick budget
-  and the worst-tick ownership check from the perf log.
-- scripts/analyze_perf.py kept OUT of the repo (session-local log
-  comparison helper) in /home/z/my-project/scripts/.
-
-MEASURED/EVIDENCE: gate green throughout - fmt, clippy -D
-warnings, 328 workspace tests (11 proto + 298 unit [2 ign] + 7
-wire [1 ign] + 12 world; one wire run flaked on the documented
-2-core concurrent-boot starvation, rerun green); DOUGHPIE live;
-load82.sh A/B numbers above. GitNexus: the AGENTS.md record
-stands (deployed S67); no local .gitnexus index in this sandbox -
-impact analysis done by grep + reading, per the standing note.
-
-NOT DONE / next session carries: the vis delta-scan re-measure
-(gap #10b) - untouched this session, the time went to the
-tail-attribution family; butter + carrot-cake live chain drive
-(milk needs a tamed cow, carrots need the crop walk); no dough
-OTHER than Bread and the blueberry pie oven-fired live yet;
-multi-machine cluster profile; GL e2e + Windows smoke; CI push
-retry (the PAT still lacks the workflow scope).
-
-COMMITS: 18adc43 (dough: the pie leg live end to end), f18aac8
-(perf: tail attribution), 1df83e0 (perf: retire pass and start
-batch own the tail), 6caa31f (perf: targeted retire), fe9388d
-(perf: zero-alloc finalizer records), this handoff.
-
-## 2026-10-10 - Session 85 (type 5: the vis delta-scan, gap #10b closed)
-
-SESSION TYPE ROTATION LOG: 82=5, 83=3, 84=4, 85=5. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: the carried gap #10b - "the full rescan per moving session is
-the remaining scan cost" (named S73, untouched since). A session
-that crossed a cell re-scanned its whole view square every scan;
-serve short walks from the cached result instead. The session began
-mid-implementation (the context loss left the working tree holding
-the whole feature, tests included, uncommitted); this continuation
-verified it, measured it honestly - including REVERTING a variant
-that lost - and closed it.
-
-DONE:
-
-- DELTA SCAN (stream.rs): a viewer that moved within one
-  VIEW_RADIUS of its last scan is served by re-filtering the cached
-  ids by their CURRENT positions, plus the touched enterers near
-  the new square, plus the STRIP cells the walk opened
-  (visidx.rs strip_in_view_into: new-square cells NOT fully
-  embedded in the old square - a naive overlap test misses static
-  enterers living on the edge cells). Beyond the window (teleport,
-  grid handoff) the full scan stays; a touched set near the view
-  population (a dense mover herd) still flips to Full. ScanKind
-  (Full/Patch/Delta) replaces the old bool; vis_delta joins the
-  perf counters (vis_skipped + vis_cached + vis_delta = issued).
-- UNIT PINS: vis_delta_scan_matches_full_scan_for_a_walking_viewer
-  (static strip enterer, mover enterer, leaver, death, chained
-  steps, a quiet step - the delta result must EQUAL a full rescan
-  every step) and vis_delta_falls_back_to_full_after_a_teleport.
-- THE REVERTED VARIANT (recorded in the patch doc comment): a
-  binary-search-skip patch (skip the position lookup for cached
-  ids absent from the touched list) was measured WORSE at the
-  1000-bot saturated herd - phase_vis p50 8845 us over two runs vs
-  7526 baseline. In a dense herd the touched lists approach the
-  cache size, and ~700 cache-warm position lookups beat ~700
-  binary searches over a cold ~300-entry scratch. Reverted to the
-  linear re-filter; the numbers stay in the comment so the idea is
-  not re-tried blind.
-- load85.sh: the A/B harness (load82.sh's shape + the vis scan-mix
-  and vis_scan_us/vis_cells columns; the perf line is a 5 s
-  snapshot, so the per-snapshot counters read as per-5s rates).
-
-MEASURED/EVIDENCE (load85.sh, 1000 saturated walking bots, 5 s
-snapshots, seed 42): phase_vis p50 7526 -> 6763 us, mean 15582 ->
-9398 (-40%), max 35912 -> 18530 (-48%); vis_scan_us max 26-32 ms
--> 10.4 ms. Scan mix stable across runs (issued ~42-43k/5 s: full
-~23-26k, cached ~15-20k, delta 0.6-0.9k - the herd is dense, so
-delta serves the few sparse walkers and the burst tail). Gate
-green: fmt + clippy -D warnings, 339 workspace tests (11 proto +
-309 unit [2 ign] + 7 wire [1 ign] + 12 world). Live smoke on the
-release binary: WORLD ENTRY: OK + CATTR ORDER: OK.
-
-OPERATIONAL NOTES: a server launched bare (&) inside a bash tool
-call dies with the call's cancel - only the script-wrapper shape
-(load85.sh) survives a canceled call as an orphan and finishes
-itself; poll with SHORT calls (sleep 30), never sleep 240. The
-perf line fires every 5 s: rows=19 is a full DUR=90 steady window.
-
-NOT DONE / next session carries (S86 must NOT be type 5): GL e2e +
-Windows smoke of the fresh release binary; the multi-machine
-cluster profile; CI push retry (the PAT still lacks the workflow
-scope); the remaining NOT-DONE dough legs from S79/S82 if any
-surface on a fresh world.
-
-COMMITS: 82ffc0f (perf: the vis delta-scan for a walking viewer,
-gap 10b - implementation + tests + load85.sh + the A/B numbers),
-this handoff.
-
 ## 2026-10-10 - Session 86 (type 3: the multi-machine cluster profile)
 
 SESSION TYPE ROTATION LOG: 83=3, 84=4, 85=5, 86=3. All six types
@@ -737,3 +499,82 @@ the remote code path end to end in the sandbox.
 COMMITS: 7cd65c1 (cluster: the multi-machine profile, one command -
 cluster-up.sh, test_cluster.sh, probe_cluster_entry.py, WireClient
 node binding, the MSG_CLOSE migration fix, README), this handoff.
+
+## 2026-10-10 - Session 87 (type 4: the remote-profile e2e + the client move-semantics fix)
+
+SESSION TYPE ROTATION LOG: 84=4, 85=5, 86=3, 87=4. Pick the next
+type freely - just not 4.
+
+GOAL: the carried "remote-CLUSTER_SPEC smoke on two loopback
+addresses" - prove `cluster-up.sh remote` (the real per-machine
+deployment shape) end to end inside the sandbox. The smoke failed on
+its FIRST run; the session turned into root-causing that failure, and
+the root cause was a genuine semantics bug in the probe client
+library, not in the cluster code.
+
+DONE:
+
+- test_remote_cluster.sh (server/scripts): the REMOTE-profile e2e
+  gate. machine A = 127.0.0.1, machine B = 127.0.0.2; each runs the
+  exact operator command (`CLUSTER_SPEC=127.0.0.1:18790,127.0.0.2:
+  18791 SELF=i cluster-up.sh remote`). Legs: REMOTE MESH (dial link
+  up on both), GUEST WALK through machine A over machine B's cells
+  (probe_guest_walk), and REMOTE MIGRATION - the character is created
+  through machine A, then re-entered through machine B's OWN address
+  (127.0.0.2:1873/1874; probe_cluster_entry.py gained the host
+  argument): A serves the snapshot, B receives the migration.
+  Verdict line: REMOTE CLUSTER: OK.
+- THE BUG (first run): leg 1 of the guest walk reported "never
+  started" - no LINBEG for the player gob - while legs 2-4 arrived.
+  The one-shot instrumented dump (diag87_dump.py, since deleted with
+  its runner scripts) captured the wire truth: LINBEG (frame 1) DID
+  arrive 100 ms after the click - and 200 ms later a RETRANSMITTED
+  entry block (frame 0, OD_MOVE) arrived after it, and hnhlib's
+  on_objdata wiped "linbeg" on every OD_MOVE. The movement was
+  therefore deleted client-side the moment it started; legs 2-4
+  survived only because by then the retransmit wave had drained. The
+  retransmits existed at all because probes never echoed OBJACK, so
+  the ~700 bootstrap blocks stayed unconfirmed for the full 10 s
+  retirement window.
+- THE FIX (hnhlib.py, matched to the Java client, verified in
+  src/haven/OCache.java): OD_MOVE updates the base pos only and NEVER
+  cancels a live LinMove (OCache.move() sets rc, nothing else); the
+  FINAL LINSTEP (l >= c) is the arrival marker and ends the move
+  (OCache.linstep -> delattr(Moving)) - it now snaps pos to the
+  target and clears "linbeg". And send_objacks now defaults True:
+  the real client's SWorker acks within <=320 ms, so the server's
+  unacked table drains and the retransmit sweep stays idle - probes
+  model the real client instead of pathological silence.
+- Diagnostics cleaned up: diag87.sh / diag87b.sh / diag87_dump.py
+  were one-shot and are deleted (root cause closed); the permanent
+  artifacts are test_remote_cluster.sh + the hnhlib fix.
+
+MEASURED/EVIDENCE: REMOTE CLUSTER: OK under RUST_LOG=debug (mesh
+machineA=1 machineB=1, guest walk 4/4 legs, guest ingested=2 on
+machine B, migration served=1 received=1) - and the failure mode is
+now pinned by a gate, not just observed. Regressions green: CLUSTER
+E2E: OK (test_cluster.sh, all 4 legs + migration), MOVE PROBE: OK
+(probe_walk: LINBEG seen right after the click, arrival snap exactly
+on the clicked target), WORLD ENTRY: OK + CATTR ORDER: OK
+(test_client.py), DIRECTION WIRE: OK (probe_direction). Rust
+untouched: 339 workspace tests green (11 proto + 309 unit [2 ign] +
+7 wire [1 ign] + 12 world).
+
+OPERATIONAL NOTES: a canceled bash tool call does NOT kill the
+script-wrapper shape (test_remote_cluster.sh finished as an orphan
+and its output file held the full green verdict) - poll the output
+file with short calls instead of relaunching. HANDOFF hygiene: this
+session found S81/S82/S85 still living in HANDOFF.md above the
+keep-last-two window; they moved verbatim to the archive in
+chronological order (S81/S82 inserted before S83, S85 appended) -
+grep the archive for them from now on.
+
+NOT DONE / next session carries (S88 must NOT be type 4): GL e2e +
+Windows smoke of the fresh release binary; CI push retry (the PAT
+still lacks the workflow scope); the remaining NOT-DONE dough legs
+from S79/S82 if any surface on a fresh world; a Java-client live
+pass over the REMOTE profile (the hnhlib fix mirrors OCache, but the
+real client has not walked the 127.0.0.2 leg yet).
+
+COMMITS: (this session) scripts: the remote-profile e2e gate + the
+Java-exact move semantics for probes, this handoff.
