@@ -307,6 +307,15 @@ scripts/jogl/run-real-client-e2e.sh <username> <tag>
 # picks the character itself via Charlist.choose_player after the shot)
 # and pixel-checks the avatar frame:
 scripts/jogl/verify_charlist_portrait.sh <tag>
+
+# Breeding herd on the live GL path: boots the server ON a v8 breeding
+# save (the session-90 herd the probe bred), the client re-enters AS the
+# persisted character beside the herd, and HNH_BREED_SCALE=20000 speeds
+# gestation so a calf is born WHILE the client renders. Verdicts:
+# HERD RENDERS + LIVE BIRTH. Needs
+# server/target/breeding-test-save-14642.json (from test_breeding.py
+# --keep-save or a prior run):
+scripts/jogl/run-breeding-gl-e2e.sh <tag>
 ```
 
 `MOVEMENT: MOVED` plus `SPEED VERDICT: OK` (measured tiles/s inside the

@@ -601,13 +601,22 @@ DONE:
 NOT DONE / next session carries: the reconstructed
 .github/workflows/rust.yml ships UNTRACKED in the working tree (this
 session's once-per-session push retry was refused: the PAT still
-lacks the workflow scope - human action); everything else unchanged
+lacks the workflow scope - human action; the file itself is valid
+YAML with branches: [master]); everything else unchanged
 from S90 except the doc debt - GL e2e + Windows smoke of the fresh
-release binary;
+release binary (the GL leg is now ONE COMMAND:
+scripts/jogl/run-breeding-gl-e2e.sh <tag>, committed this session -
+it boots the server on the v8 breeding save, re-enters as the
+persisted character beside the herd and HNH_BREED_SCALE=20000
+forces a live birth while the client renders; the save is
+server/target/breeding-test-save-14642.json, already on disk);
 the remaining dough legs (S79/S82); CI push still blocked on the PAT
 workflow scope (human action); the breeding-depth items now honestly
 listed in the livestock doc's Open questions (sheep e2e, heifer gate,
 calf drawables, quality mutation roll).
 
-COMMITS: this handoff records the docs commit (livestock
-consolidation + breeding notes + AGENTS.md sections).
+COMMITS: c625981 (docs: livestock consolidation + breeding notes +
+AGENTS.md sections), 89163ac (handoff: the rust.yml retry note),
+1070a8d (docs: crafting + food consolidation), and the final S91
+commit (scripts/jogl/run-breeding-gl-e2e.sh + its AGENTS.md harness
+entry + this handoff update).
