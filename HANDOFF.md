@@ -443,90 +443,7 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
 - S90: the breeding pipeline - sexes, breed rows, scaled gestation, calves with inherited rows, maturation gate, honest milk refusals, v8 persist + restart reload; MCache-parity grid streaming for probes (the nav-flake root).
 - S91: documentation de-pollution - the livestock doc consolidated (dup + stale chronicle removed, breeding notes landed), AGENTS.md session-protocol + Windows sections; GitNexus index re-bootstrapped.
 - S92: the breeding GL e2e landed green - livestock agent mode (the ANIMALS phase hunts the herd, not predators), the pixel-exact COW PIXELS verdict (template match 0.0 dist, hare 135+), 3 calves born on the live GL path.
-
-## 2026-10-10 - Session 91 (type 0: documentation de-pollution - the livestock doc consolidated, the breeding notes landed, AGENTS.md gaps closed)
-
-SESSION TYPE ROTATION LOG: 88=0, 89=4, 90=3, 91=0. Pick the next type
-freely - just NOT 0 (1/2/3/4/5 all open).
-
-GOAL (type 0, per the rotation): close the documentation debt S90 left
-(the breeding vertical landed WITHOUT its domain-doc update, violating
-the AGENTS.md same-changeset rule) and de-pollute the polluted docs
-that keep costing every fresh context their re-read budget.
-
-DONE:
-
-- docs/mechanics/livestock/animals-and-husbandry.md: the six
-  per-session chronicle sections (45/45-duplicate/46/47/48/62/77) are
-  consolidated into ONE current-state "Server implementation notes
-  (this repo)" section with domain subsections (taming, roster/morph,
-  production/feeding/starvation, breeding, persistence). The chronicle
-  had a VERBATIM DUPLICATE of the session-45 entry (254 lines of
-  chronicle replaced; the doc went 693 -> 679 lines while GAINING the
-  breeding notes). Old contradictions ("animals are not persisted",
-  "breeding is out of scope") are gone.
-- The session-90 breeding notes landed as their own subsection,
-  cross-checked against the code (state.rs constants, game.rs Phase D,
-  animals.rs spawn_calf/refusals, persist.rs v8): sexes, per-animal
-  rows (wild 9..11), gestation 3 888 000 ticks / maturation
-  8 640 000 ticks, BREED_SEEK_RADIUS 55, twins 5%, the nursing +
-  BREED_CLUSTER_CAP=8 runaway guards, inheritance (average + spread
-  +0..=2/-0..=1, sire softcap), HNH_BREED_SCALE, v8 persist with
-  tamer-key rebinding, the SIGTERM flush.
-- Open questions refreshed: the stale "breeding out of scope" bullet
-  became the honest gap list (no sheep e2e, the calf milk-drinking
-  reservation flow not modeled, lactation gated on adulthood+sex
-  instead of the doc's never-calved heifer gate, no calf/bull
-  drawable, the single-average quality drift vs the doc's mutation
-  roll, fodder-average product quality still open).
-- The same de-pollution pass over the two other chronicle-carrying
-  docs: crafting-and-building.md (SEVEN session-note H2 sections, and
-  a skeleton bug - sessions 71/77/81 had appended their notes AFTER
-  "## Open questions") and food-and-fep.md (two sections) are each
-  consolidated under one "## Server implementation notes (this repo)"
-  H2 with the per-session chronicle demoted to H3 subsections and
-  Open questions restored to the end; content preserved verbatim
-  (plus two em-dashes -> ASCII and one half-resolved deviation line
-  refreshed: bricks became craftable when the S70 kiln landed, but
-  the oven/smelter demands keep the stone/branch substitute pending a
-  balance pass).
-- AGENTS.md: added the two sections a fresh context was missing -
-  "Session Protocol (read HANDOFF.md FIRST)" (rotation rule, keep-
-  last-two, commit discipline) and "Windows quick start (the
-  user-facing contract)" (windows/run-client.bat as THE one command;
-  .bat flow must keep working). CI paragraph refreshed (session 53 ->
-  session 91: the workflow file still has not landed).
-- GitNexus: the .gitnexus/ index was MISSING in this environment
-  (sandbox eviction); re-bootstrapped via `bunx gitnexus@latest
-  analyze --index-only` - the tool call reported canceled but the
-  index actually landed and `node .gitnexus/run.cjs status` verifies:
-  registered index at commit 51ebff2 (10/10/2026). The 130 MB .gitnexus
-  tree is fully git-ignored (internal `*` .gitignore). This session
-  edited documentation only - no code symbols - so no impact analysis
-  was required; the index is ready for the next session's code work.
-
-NOT DONE / next session carries: the reconstructed
-.github/workflows/rust.yml ships UNTRACKED in the working tree (this
-session's once-per-session push retry was refused: the PAT still
-lacks the workflow scope - human action; the file itself is valid
-YAML with branches: [master]); everything else unchanged
-from S90 except the doc debt - GL e2e + Windows smoke of the fresh
-release binary (the GL leg is now ONE COMMAND:
-scripts/jogl/run-breeding-gl-e2e.sh <tag>, committed this session -
-it boots the server on the v8 breeding save, re-enters as the
-persisted character beside the herd and HNH_BREED_SCALE=20000
-forces a live birth while the client renders; the save is
-server/target/breeding-test-save-14642.json, already on disk);
-the remaining dough legs (S79/S82); CI push still blocked on the PAT
-workflow scope (human action); the breeding-depth items now honestly
-listed in the livestock doc's Open questions (sheep e2e, heifer gate,
-calf drawables, quality mutation roll).
-
-COMMITS: c625981 (docs: livestock consolidation + breeding notes +
-AGENTS.md sections), 89163ac (handoff: the rust.yml retry note),
-1070a8d (docs: crafting + food consolidation), and the final S91
-commit (scripts/jogl/run-breeding-gl-e2e.sh + its AGENTS.md harness
-entry + this handoff update).
+- S93: the sheep/wool vertical green end to end (quell -> ram+ewe 50/50 morph -> scaled shear -> lamb -> juvenile refusal -> v8 persist); the ANIMAL GRID-STREAM FIX (far beasts no longer ride MAPREQ - the frozen-ghost root; the OD_REM retract now sends immediately) - a server protocol fix that also heals the Java client.
 
 ## 2026-10-10 - Session 92 (type 4: the breeding GL e2e - livestock agent mode + the pixel-exact cow verdict)
 
@@ -582,3 +499,73 @@ mutation roll). S93 must NOT be type 4.
 
 COMMITS: aff4e3d (e2e: livestock agent mode + pixel-exact cow proof),
 this handoff.
+
+## 2026-10-10 - Session 93 (type 3: the sheep/wool vertical + the animal grid-stream fix)
+
+SESSION TYPE ROTATION LOG: 88=0, 89=4, 90=3, 91=0, 92=4, 93=3. Pick
+the next type freely - just NOT 3 (0/1/2/4/5 all open).
+
+GOAL (type 3): close the sheep/wool breeding-depth gap from the
+livestock doc's Open questions - the sheep family end to end: quell
+the wild mouflon, reach BOTH sheep sexes, grow and shear wool, birth
+and refuse a lamb, persist the flock.
+
+DONE:
+
+- Root cause of the probe's "too far away" refusals (client believed
+  the mouflon stood at dist=0): the grid MAPREQ streamed EVERY
+  animal of the grid (up to 2500+ subtile out) while movement deltas
+  only fan out inside FANOUT_SPAN - a far animal's client cache
+  position froze at spawn time forever. A SERVER protocol bug
+  (affects the real Java client the same way), not a probe bug.
+- Fix A (stream.rs): animals stream only inside 2*VIEW_RADIUS (600
+  axial) of the REQUESTER - the threshold IS the retract hysteresis,
+  so no boundary flicker; statics stream unchanged; far beasts
+  re-enter through the fresh MAPREQs a walking player generates.
+- Fix B (stream.rs): the OD_REM retract now sends IMMEDIATELY -
+  record_unacked only REGISTERS for the retransmit sweep (it does
+  not send); a swept retract sat behind its retry delay and the
+  queue_full throttle, so out-of-range gobs stayed spawned for 30+ s
+  (live trace: a mouflon 2600 subtiles out, removal never arrived).
+- Fix C (animals.rs): the mouflon sex roll is 50/50 (the aurochs
+  stays the pinned wild bull): pinning every mouflon Male deadlocked
+  the sheep pipeline - a ewe could only arrive through a mouflon
+  morph or a birth, and a birth needs a dam (the chicken-and-egg
+  loop).
+- HNH_WOOL_RATE (state.rs/game.rs/main.rs): the HNH_MILK_RATE
+  pattern for wool - scales the per-tick accumulator only; the
+  3-wool cap and the drawn volume stay legacy-true. Unit-tested.
+- Probe reality post-fix: the entry stream no longer carries the
+  far herd, so test_sheep.py grew a TWO-PHASE hunt: the pure north
+  trek along the reconnoitered clear line (scan_direction.py N: the
+  seed-42 herd stands ~2.4k subtiles north, x~555 is water-clear)
+  and the quell cycle standing IN the herd. Chasing en-route drifter
+  mouflons pulled the probe into the swamps (walled-off beasts, 150 s
+  per blocked chase) - the trek phase ignores them on purpose. The
+  last ~500 subtiles of a chase hand over to the dairy close_on_beast
+  pursuit: nav_walk's fixed pump schedule idles at ~18 subt/s, BELOW
+  the panicking mouflon's 30 (the gap never closed through staged
+  hops alone).
+- diag_mouflon.py verdict: post-fix the streamed mouflon keeps
+  moving (LINBEG refresh) and its retract (rm flag) lands <2 s after
+  crossing the hysteresis.
+- e2e GREEN (test_sheep.py, the final shape): LP skills + rope ->
+  TREK NORTH -> quell 67606 (close pursuit dist 285->70) -> the 50/50
+  morph reaches a ram AND a ewe (herd sweep: Female+Male+Female) ->
+  pasture -> SHEAR: 3 wool (the full stored meter) -> LAMB BORN gob
+  71247 -> the honest "not yet grown" refusal -> SIGTERM restart ->
+  PERSIST: flock rows reloaded. SHEEP: OK.
+- Gate: fmt clean, clippy clean, 357 workspace tests (+3: the
+  ewe-yield morph test, two wool-rate contract tests). The livestock
+  doc's Open questions now record the sheep e2e as live.
+
+NOT DONE / next session carries: Windows smoke of the release binary
+(run-client.bat path - sandbox has no wine; needs the human); the
+remaining dough legs (S79/S82 oven-fired doughs); CI push still
+blocked on the PAT workflow scope (the valid rust.yml ships
+untracked); breeding depth per the livestock doc Open questions
+(heifer gate, calf/bull drawables, quality mutation roll). S94 must
+NOT be type 3.
+
+COMMITS: 3a710a4 (feat: the sheep/wool vertical + the animal
+grid-stream fix), this handoff.

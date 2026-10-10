@@ -6457,3 +6457,87 @@ COMMITS: 043bcb5 (animals: the breeding pipeline + v8 persist),
 f547ea9 (e2e: the breeding probe green live + MCache-parity grid
 streaming + keep_save), this handoff.
 
+
+## 2026-10-10 - Session 91 (type 0: documentation de-pollution - the livestock doc consolidated, the breeding notes landed, AGENTS.md gaps closed)
+
+SESSION TYPE ROTATION LOG: 88=0, 89=4, 90=3, 91=0. Pick the next type
+freely - just NOT 0 (1/2/3/4/5 all open).
+
+GOAL (type 0, per the rotation): close the documentation debt S90 left
+(the breeding vertical landed WITHOUT its domain-doc update, violating
+the AGENTS.md same-changeset rule) and de-pollute the polluted docs
+that keep costing every fresh context their re-read budget.
+
+DONE:
+
+- docs/mechanics/livestock/animals-and-husbandry.md: the six
+  per-session chronicle sections (45/45-duplicate/46/47/48/62/77) are
+  consolidated into ONE current-state "Server implementation notes
+  (this repo)" section with domain subsections (taming, roster/morph,
+  production/feeding/starvation, breeding, persistence). The chronicle
+  had a VERBATIM DUPLICATE of the session-45 entry (254 lines of
+  chronicle replaced; the doc went 693 -> 679 lines while GAINING the
+  breeding notes). Old contradictions ("animals are not persisted",
+  "breeding is out of scope") are gone.
+- The session-90 breeding notes landed as their own subsection,
+  cross-checked against the code (state.rs constants, game.rs Phase D,
+  animals.rs spawn_calf/refusals, persist.rs v8): sexes, per-animal
+  rows (wild 9..11), gestation 3 888 000 ticks / maturation
+  8 640 000 ticks, BREED_SEEK_RADIUS 55, twins 5%, the nursing +
+  BREED_CLUSTER_CAP=8 runaway guards, inheritance (average + spread
+  +0..=2/-0..=1, sire softcap), HNH_BREED_SCALE, v8 persist with
+  tamer-key rebinding, the SIGTERM flush.
+- Open questions refreshed: the stale "breeding out of scope" bullet
+  became the honest gap list (no sheep e2e, the calf milk-drinking
+  reservation flow not modeled, lactation gated on adulthood+sex
+  instead of the doc's never-calved heifer gate, no calf/bull
+  drawable, the single-average quality drift vs the doc's mutation
+  roll, fodder-average product quality still open).
+- The same de-pollution pass over the two other chronicle-carrying
+  docs: crafting-and-building.md (SEVEN session-note H2 sections, and
+  a skeleton bug - sessions 71/77/81 had appended their notes AFTER
+  "## Open questions") and food-and-fep.md (two sections) are each
+  consolidated under one "## Server implementation notes (this repo)"
+  H2 with the per-session chronicle demoted to H3 subsections and
+  Open questions restored to the end; content preserved verbatim
+  (plus two em-dashes -> ASCII and one half-resolved deviation line
+  refreshed: bricks became craftable when the S70 kiln landed, but
+  the oven/smelter demands keep the stone/branch substitute pending a
+  balance pass).
+- AGENTS.md: added the two sections a fresh context was missing -
+  "Session Protocol (read HANDOFF.md FIRST)" (rotation rule, keep-
+  last-two, commit discipline) and "Windows quick start (the
+  user-facing contract)" (windows/run-client.bat as THE one command;
+  .bat flow must keep working). CI paragraph refreshed (session 53 ->
+  session 91: the workflow file still has not landed).
+- GitNexus: the .gitnexus/ index was MISSING in this environment
+  (sandbox eviction); re-bootstrapped via `bunx gitnexus@latest
+  analyze --index-only` - the tool call reported canceled but the
+  index actually landed and `node .gitnexus/run.cjs status` verifies:
+  registered index at commit 51ebff2 (10/10/2026). The 130 MB .gitnexus
+  tree is fully git-ignored (internal `*` .gitignore). This session
+  edited documentation only - no code symbols - so no impact analysis
+  was required; the index is ready for the next session's code work.
+
+NOT DONE / next session carries: the reconstructed
+.github/workflows/rust.yml ships UNTRACKED in the working tree (this
+session's once-per-session push retry was refused: the PAT still
+lacks the workflow scope - human action; the file itself is valid
+YAML with branches: [master]); everything else unchanged
+from S90 except the doc debt - GL e2e + Windows smoke of the fresh
+release binary (the GL leg is now ONE COMMAND:
+scripts/jogl/run-breeding-gl-e2e.sh <tag>, committed this session -
+it boots the server on the v8 breeding save, re-enters as the
+persisted character beside the herd and HNH_BREED_SCALE=20000
+forces a live birth while the client renders; the save is
+server/target/breeding-test-save-14642.json, already on disk);
+the remaining dough legs (S79/S82); CI push still blocked on the PAT
+workflow scope (human action); the breeding-depth items now honestly
+listed in the livestock doc's Open questions (sheep e2e, heifer gate,
+calf drawables, quality mutation roll).
+
+COMMITS: c625981 (docs: livestock consolidation + breeding notes +
+AGENTS.md sections), 89163ac (handoff: the rust.yml retry note),
+1070a8d (docs: crafting + food consolidation), and the final S91
+commit (scripts/jogl/run-breeding-gl-e2e.sh + its AGENTS.md harness
+entry + this handoff update).
