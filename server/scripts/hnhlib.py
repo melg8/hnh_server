@@ -122,13 +122,17 @@ def auth_cookie(username, password="x", port=AUTH_PORT):
     return body
 
 
-def ensure_server(env_extra=None, save_path=None):
+def ensure_server(env_extra=None, save_path=None, log_path=None):
     """Start an isolated server (fresh save) if none is listening.
 
     env_extra: extra environment variables for the server process (for
     scenario clocks such as HNH_CROP_TIME_SCALE). save_path overrides
     the default per-scenario save file; it is removed before boot so
-    every run starts from a fresh world.
+    every run starts from a fresh world. log_path: when set the server
+    process stdout/stderr go to that file instead of /dev/null - set
+    RUST_LOG in env_extra to capture the server's own debug lines
+    (e.g. silent "plow refused"/"plant refused" refusals that the
+    client never sees).
     """
     probe = socket.socket()
     probe.settimeout(0.4)
@@ -151,13 +155,25 @@ def ensure_server(env_extra=None, save_path=None):
     env["HNH_SAVE_FILE"] = save_path
     if env_extra:
         env.update(env_extra)
+    if log_path:
+        env.setdefault("RUST_LOG", "debug")
+        log_fh = open(log_path, "ab")
+        stdout_arg = log_fh
+        stderr_arg = subprocess.STDOUT
+    else:
+        log_fh = None
+        stdout_arg = subprocess.DEVNULL
+        stderr_arg = subprocess.DEVNULL
     proc = subprocess.Popen(
         [BIN, "--seed", "42"],
         cwd=os.path.join(REPO, "server"),
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=stdout_arg,
+        stderr=stderr_arg,
     )
+    if log_fh is not None:
+        # The child inherited the descriptor; the parent handle can go.
+        log_fh.close()
     deadline = time.time() + 30
     while time.time() < deadline:
         try:

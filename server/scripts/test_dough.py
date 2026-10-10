@@ -373,17 +373,22 @@ def eat_item(c, label, what):
     assert ok, "eating the %s pushed no `food` uimsg" % what
 
 
-def find_any_tree(c):
+def find_any_tree(c, skip=()):
     """The nearest live plain tree (any species; the fruit-tree
     degradation leg may already have converted the local apple tree,
-    so scan every trees/ shape)."""
+    so scan every trees/ shape). `skip` holds tree gobs that yielded
+    nothing this run (session 84: a tree caps at TREE_HARVESTS = 5
+    picks, then the server kills it and leaves a Stump - the stump res
+    is gfx/terobjs/trees/LOG, not .../stump, so the old substring
+    filter let the fruitless stump win the nearest-tree race)."""
     found = {
         g: info
         for g, info in c.gobs.items()
         if (info["res"] or "").startswith("gfx/terobjs/trees/")
         and "appletree" not in info["res"]
-        and "stump" not in (info["res"] or "")
+        and (info["res"] or "").rsplit("/", 1)[-1] != "log"
         and not info.get("removed")
+        and g not in skip
     }
     assert found, "no plain tree in the loaded grids"
     px, py = c.gobs[c.player_gob]["pos"]
@@ -396,9 +401,17 @@ def find_any_tree(c):
 def gather_branches(c, want):
     """Pick `want` branches off forest trees (the full-pie leg's fuel
     budget: the starter kit's 10 branches cover saw + two buckets +
-    quern + oven; the oven burn itself needs more)."""
+    quern + oven; the oven burn itself needs more). Session 84: a
+    tree holds TREE_HARVESTS = 5 picks, then the pick kills it and the
+    next click of the dairy fuel loop hit the fruitless stump (the
+    live probe asserted "the tree yielded no branch" right after the
+    stations ate the fifth pick). A miss now marks the tree spent and
+    the loop takes the next nearest tree - the forest always has
+    another one in view."""
+    spent = set()
+    misses = 0
     while inv_total(c, BRANCH_INV) < want:
-        gid = find_any_tree(c)
+        gid = find_any_tree(c, skip=spent)
         seen = {
             g for g, info in c.gobs.items()
             if info["res"] == BRANCH_DROP and not info.get("removed")
@@ -409,7 +422,13 @@ def gather_branches(c, want):
                 g not in seen and not info.get("removed")
                 for g, info in c.gobs.items()
                 if info["res"] == BRANCH_DROP), 6)
-        assert ok, "the tree yielded no branch"
+        if not ok:
+            # Exhausted (or stumped, or merely slow) tree: spend it and
+            # take the next nearest; bounded by the tree population.
+            spent.add(gid)
+            misses += 1
+            assert misses < 12, "no tree in view yielded a branch"
+            continue
         drop_id = sorted(
             g for g, info in c.gobs.items()
             if info["res"] == BRANCH_DROP and not info.get("removed")
@@ -453,6 +472,30 @@ def walk_to_grass(c):
     ok = c.nav_walk(target, stop=20, max_clicks=400)
     assert ok, "nav to the grass field %s failed" % (grass,)
     print("at the grass field: %s" % (grass,))
+
+
+def grass_tiles_near(c, ptile, count=5, rings=12):
+    """Plowable grass tiles around `ptile`, nearest first, read from
+    the STREAMED map (session 84: the fixed 5x5 dx/dy sweep of the
+    wheat and carrot flows only works when the walk lands inside a
+    wide field - on a lone grass pocket in the woods every neighbor
+    but one plow-refuses ("not grass", farming.rs), and the live
+    dairy runs planted 1 crop where the flow asked for 5). The
+    spiral rings mirror walk_to_grass's search shape."""
+    out = []
+    for r in range(rings + 1):
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                if max(abs(dx), abs(dy)) != r:
+                    continue
+                t = (ptile[0] + dx, ptile[1] + dy)
+                if c.tile_at(
+                        t[0] * TILE_SPAN + 5,
+                        t[1] * TILE_SPAN + 5) == GRASS:
+                    out.append(t)
+                    if len(out) >= count:
+                        return out
+    return out
 
 
 def ensure_flour(c, quern, qmc, want=2):

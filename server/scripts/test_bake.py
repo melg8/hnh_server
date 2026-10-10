@@ -145,36 +145,41 @@ def inv_total(c, resname):
 def plant_and_harvest(c):
     """Plow + plant the five starter Wheat Seeds on nearby tiles, wait
     for maturity (wire stage byte 3), and harvest every crop through
-    the flower menu."""
+    the flower menu. Session 84: the planting tiles come from the
+    streamed-map grass spiral (grass_tiles_near) - the old fixed 5x5
+    sweep planted 1 of 5 on a lone grass pocket in the woods
+    ("too few wheat crops planted (1)", the same shape the carrot leg
+    hit)."""
     buy_farming_value(c)
     ppos = c.gobs[c.player_gob]["pos"] or (0, 0)
     ptile = (ppos[0] // TILE_SPAN, ppos[1] // TILE_SPAN)
     wheat_item = c.find_item("Wheat Seeds")
     assert wheat_item is not None, "starter wheat seeds missing"
 
-    crops = []
+    from test_dough import grass_tiles_near  # local: shared helper
+    candidates = grass_tiles_near(c, ptile, count=5)
+    assert candidates, "no plowable grass tile near %s" % (ptile,)
+
     planted = 0
-    for dx in range(-2, 3):
-        for dy in range(-2, 3):
-            if planted >= 5 or abs(dx) + abs(dy) > 3:
-                continue
-            tile = (ptile[0] + dx, ptile[1] + dy)
-            c.arm_plow()
-            c.pump(0.25)
-            c.click_tile(tile)
-            c.pump(0.3)
-            c.take_item(wheat_item)
-            c.pump(0.25)
-            c.map_itemact_tile(tile)
-            if c.wait_for(
-                lambda: any(
-                    (info["res"] or "") == "gfx/terobjs/plants/wheat"
-                    for info in c.gobs.values()
-                ),
-                2.5,
-            ):
-                planted += 1
-                c.pump(0.2)
+    for tile in candidates:
+        if planted >= 5:
+            break
+        c.arm_plow()
+        c.pump(0.25)
+        c.click_tile(tile)
+        c.pump(0.3)
+        c.take_item(wheat_item)
+        c.pump(0.25)
+        c.map_itemact_tile(tile)
+        if c.wait_for(
+            lambda: any(
+                (info["res"] or "") == "gfx/terobjs/plants/wheat"
+                for info in c.gobs.values()
+            ),
+            2.5,
+        ):
+            planted += 1
+            c.pump(0.2)
     crops = c.find_gobs("gfx/terobjs/plants/wheat")
     assert len(crops) >= 2, "too few wheat crops planted (%d)" % len(crops)
     print("planted %d wheat crops" % len(crops))

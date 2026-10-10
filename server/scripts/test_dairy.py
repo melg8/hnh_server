@@ -65,6 +65,7 @@ from test_dough import (  # noqa: E402
     eat_item,
     ensure_flour,
     gather_branches,
+    grass_tiles_near,
     inv_total,
     request_neighborhood,
     walk_to_gob,
@@ -145,6 +146,9 @@ def ensure_dairy_server():
             REPO, "server", "target",
             "dairy-test-save-%d.json" % (os.getpid() % 100000),
         ),
+        # RUST_LOG=debug lands the server's silent refusal lines (plow/
+        # plant refused) in target/dairy-server.log for post-mortems.
+        log_path=os.path.join(REPO, "server", "target", "dairy-server.log"),
     )
 
 
@@ -339,18 +343,26 @@ def find_cow(c):
     return gid
 
 
-def close_on_beast(c, gid, want=30, deadline=30.0):
+def close_on_beast(c, gid, want=30, deadline=40.0):
     """Pursue a fleeing beast to within `want` subtiles of its LIVE
-    streamed position (session 83). The beast's out-of-fight panic hops
-    (165 + jitter at the cow's 30 subt/s) lose ground to a run player
-    (+20 subt/s) ONLY while the walk target keeps REFRESHING: a single
-    snapshot walk lands where the beast USED to be, and the follow-up
-    attack click is then refused by the server's swing-reach gate ("too
-    far away"). Short re-aimed walk bursts until the live distance
-    closes inside `want`."""
+    streamed position. Session 84 root cause for the never-opening
+    fight (dbg11 trace): nav_walk's fixed pump schedule waits 1.2 s +
+    d/50 per clicked segment while the walk itself only takes d/50, so
+    the runner idles for most of every segment - the measured
+    effective speed was ~18 subt/s against the run gait's 50, BELOW the
+    panicking cow's 30, and the gap could never close (the distance
+    oscillated 140-350 for a minute). The pursuit here re-aims at the
+    beast's LIVE position every 0.25 s slice: every click restarts the
+    server-side LinMove at full gait speed, the runner never idles,
+    and the gap closes at the honest (gait - 30) ~20 subt/s. A forced
+    hostile duel is broken from INSIDE the loop - while it lives our
+    own attack click is refused (one Fightview per player), so every
+    step of the chase would be wasted motion."""
     end = time.time() + deadline
     last = 0.0
     while time.time() < end:
+        if hostile_forced(c, gid):
+            break_hostile_fight(c)
         bpos = c.live_pos(gid)
         ppos = c.live_pos(c.player_gob)
         if bpos is None or ppos is None:
@@ -363,9 +375,23 @@ def close_on_beast(c, gid, want=30, deadline=30.0):
                 ppos, bpos, dist, c.frv_cur))
         if dist <= want:
             return True
-        # A few click segments toward the beast's CURRENT position, then
-        # re-read: the gap closes at the run-vs-panic speed margin.
-        c.nav_walk(bpos, stop=want, max_clicks=3, log=lambda m: None)
+        # Continuous re-aim: click the LIVE beast position when the
+        # line is clear (the server walks it at full gait); around
+        # obstacles fall back to the next BFS waypoint for this slice.
+        if c.line_clear(ppos[0], ppos[1], bpos[0], bpos[1]):
+            c.click_ground(bpos[0], bpos[1])
+        else:
+            path = c.find_tile_path(ppos, bpos)
+            if path:
+                far = None
+                for w in path[:6]:
+                    if c.line_clear(ppos[0], ppos[1], w[0], w[1]):
+                        far = w
+                w = far or path[0]
+                c.click_ground(w[0], w[1])
+            # No path at all (water/rock between): idle this slice and
+            # let the beast's next panic hop land somewhere reachable.
+        c.pump(0.25)
     return False
 
 
@@ -396,6 +422,16 @@ def break_hostile_fight(c, deadline=45.0):
     return c.frv_id is None or not c.frv_rels
 
 
+def hostile_forced(c, gid):
+    """True when the live frv window is on anything but the wanted
+    beast: an aggressive chaser's forced duel, which the server (one
+    Fightview per player) refuses to swap for our own click until it
+    ends. The server's aggro leash (session 83) tears such a duel down
+    once the chaser is dragged far from its home anchor; sprinting
+    away drags it there."""
+    return c.frv_id is not None and bool(c.frv_rels) and c.frv_cur != gid
+
+
 def open_fight(c, gid, tries=6):
     """Close in on the beast and click (opens the fight window).
     Session 83: the server opens melee engagement only from swing reach
@@ -405,17 +441,23 @@ def open_fight(c, gid, tries=6):
     then click. The frv window confirms the fight actually lives AND
     is with the WANTED beast: an aggressive chaser may have forced a
     duel on us first (one Fightview - our click is then refused), so
-    a mismatched window is sprint-broken and the approach retried."""
+    a mismatched window is sprint-broken and the approach retried.
+    The forced-duel check runs at the TOP of every attempt: the live
+    trace showed a boar duel could shadow the whole chase while
+    close_on_beast kept failing to close (the duel is only refused,
+    never broken, from inside the chase loop)."""
     for _ in range(tries):
         pos = c.live_pos(gid)
         if pos is None:
             raise AssertionError("the beast vanished from the view")
+        if hostile_forced(c, gid):
+            break_hostile_fight(c)
         if not close_on_beast(c, gid, want=30, deadline=30.0):
             # The beast crossed water/rock or outran the deadline: wait
             # a beat for it to wander somewhere reachable.
             c.pump(2.0)
             continue
-        if c.frv_id is not None and c.frv_rels and c.frv_cur != gid:
+        if hostile_forced(c, gid):
             # A boar/wolf forced its duel on us before the click: the
             # server (correctly) refuses to open ours while it lives.
             break_hostile_fight(c)
@@ -542,15 +584,28 @@ def milk_cycle(c, gid, draws=3):
 
 
 def butter_leg(c, gid, want=3):
-    """Milk -> butter x3 (each craft consumes one bucket-milk and
-    returns the empty bucket for the next draw)."""
+    """Milk -> butter x3 with ONE bucket serving every draw: each churn
+    consumes one bucket-milk and RETURNS the empty bucket, so the draw
+    and the churn must ALTERNATE. Doing every draw first (the session
+    83 shape) starves draw 2+: the milk petal re-validates the live
+    empty bucket on the choice and answers with a system line ("You
+    need an empty bucket to milk a cow.") - the bucket only comes back
+    at churn time, so the live trace saw draw 1 land and draw 2 hang
+    until the assert."""
     craft_once(c, "saw", SAW_INV)
     craft_once(c, "bucket", BUCKETE_INV)
-    milk_cycle(c, gid, draws=want)
-    while inv_total(c, BUTTER_INV) < want:
+    churned = 0
+    while churned < want:
+        milk_cycle(c, gid, draws=1)
+        before = inv_total(c, BUTTER_INV)
         craft_once(c, "butter", BUTTER_INV)
+        ok = c.wait_for(lambda: inv_total(c, BUTTER_INV) > before, 8)
+        assert ok, "the butter churn never produced butter (items=%r)" % (
+            [(i["res"], i["tt"]) for i in c.item_info.values()],)
+        churned += 1
+        print("BUTTER: churned x%d (the empty bucket returned for the "
+              "next draw)" % churned)
     assert inv_total(c, BUTTER_INV) >= want, "butter quota unmet"
-    print("BUTTER: crafted x%d (buckets returned each craft)" % want)
 
 
 def apple_leg(c, want=2):
@@ -583,14 +638,20 @@ def apple_leg(c, want=2):
 
 
 def grape_and_raisin_leg(c):
-    """Two grape handfuls (3 units each) -> two raisin packs."""
+    """Two grape handfuls (3 units each) churn into raisin packs: the
+    recipe eats TWO grapes per ONE pack, so a single craft of the old
+    shape left the quota unmet (session 84 live trace: 6 grapes, 1
+    pack, "raisins quota unmet"). The raisin butter-cake dough later
+    consumes raisins x2, so churn while the quota stands."""
     from test_dough import pick_and_pickup  # local import: same module
     for _ in range(2):
         pick_and_pickup(
             c, GRAPEVINE_RES, GRAPE_DROP, GRAPE_INV, "Grapes", 3)
-    craft_once(c, "raisins", RAISINS_INV)
+    while inv_total(c, RAISINS_INV) < 2:
+        craft_once(c, "raisins", RAISINS_INV)
     assert inv_total(c, RAISINS_INV) >= 2, "raisins quota unmet"
-    print("RAISINS: crafted x2 (two grape handfuls)")
+    print("RAISINS: crafted x%d (two grape handfuls)" % (
+        inv_total(c, RAISINS_INV),))
 
 
 def carrot_leg(c, want=2):
@@ -598,37 +659,53 @@ def carrot_leg(c, want=2):
     through the flower menu (mature yield 1-3 carrots + seeds)."""
     from test_bake import buy_farming_value
     buy_farming_value(c)
+    # The leg runs right after the grape walk: the vines grow on the
+    # mountain side, and the server's plow_tile refuses every tile but
+    # grass (farming.rs), so the live run planted nothing there
+    # (session 84: "too few carrots planted (0)"). Walk back to a
+    # plowable grass field first - the same shape the pie leg runs
+    # under in test_dough.
+    walk_to_grass(c)
     ppos = c.gobs[c.player_gob]["pos"] or (0, 0)
     ptile = (ppos[0] // TILE_SPAN, ppos[1] // TILE_SPAN)
     seed_wid = c.find_item_by_tooltip("Carrot Seeds")
     assert seed_wid is not None, "starter carrot seeds missing"
 
+    # Plowable tiles picked from the STREAMED map, spiraling out from
+    # the field tile the walk landed on (the shared grass_tiles_near:
+    # the fixed 5x5 sweep only works on a wide field, a lone grass
+    # pocket in the woods plow-refuses all but one neighbor).
+    candidates = grass_tiles_near(c, ptile, count=5)
+    assert candidates, "no plowable grass tile near %s" % (ptile,)
+
     planted = 0
-    for dx in range(-2, 3):
-        for dy in range(-2, 3):
-            if planted >= 5 or abs(dx) + abs(dy) > 3:
-                continue
-            tile = (ptile[0] + dx, ptile[1] + dy)
-            c.arm_plow()
-            c.pump(0.25)
-            c.click_tile(tile)
-            c.pump(0.3)
-            c.take_item(seed_wid)
-            c.pump(0.25)
-            c.map_itemact_tile(tile)
-            if c.wait_for(
+    for tile in candidates:
+        if planted >= 5:
+            break
+        c.arm_plow()
+        c.pump(0.25)
+        c.click_tile(tile)
+        c.pump(0.3)
+        c.take_item(seed_wid)
+        c.pump(0.25)
+        c.map_itemact_tile(tile)
+        if c.wait_for(
                 lambda: any(
                     (info["res"] or "") == CARROT_PLANT
                     for info in c.gobs.values()), 2.5):
-                planted += 1
-                c.pump(0.2)
+            planted += 1
+            c.pump(0.2)
     crops = [g for g, i in c.gobs.items() if i["res"] == CARROT_PLANT]
     assert len(crops) >= 2, "too few carrots planted (%d)" % len(crops)
     print("planted %d carrots" % len(crops))
 
     deadline = time.time() + 15
     for gob in crops:
-        while c.gobs[gob]["sdt"] != b"\x03":
+        # Carrot is a 4-stage crop (farm.rs CARROT: stages 4, wire 0..4)
+        # - full maturity is wire stage 4 with the main product; the
+        # wheat flow's b"\x03" wait hangs forever here (session 84 live
+        # trace: "carrot never matured" with the plant already grown).
+        while c.gobs[gob]["sdt"] != b"\x04":
             assert time.time() < deadline, "carrot %s never matured" % gob
             c.pump(0.25)
     print("all carrots mature")
