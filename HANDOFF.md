@@ -587,8 +587,12 @@ DONE:
   edited documentation only - no code symbols - so no impact analysis
   was required; the index is ready for the next session's code work.
 
-NOT DONE / next session carries: everything unchanged from S90 except
-the doc debt - GL e2e + Windows smoke of the fresh release binary;
+NOT DONE / next session carries: the reconstructed
+.github/workflows/rust.yml ships UNTRACKED in the working tree (this
+session's once-per-session push retry was refused: the PAT still
+lacks the workflow scope - human action); everything else unchanged
+from S90 except the doc debt - GL e2e + Windows smoke of the fresh
+release binary;
 the remaining dough legs (S79/S82); CI push still blocked on the PAT
 workflow scope (human action); the breeding-depth items now honestly
 listed in the livestock doc's Open questions (sheep e2e, heifer gate,
