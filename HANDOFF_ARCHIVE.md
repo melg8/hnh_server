@@ -6596,3 +6596,73 @@ mutation roll). S93 must NOT be type 4.
 COMMITS: aff4e3d (e2e: livestock agent mode + pixel-exact cow proof),
 this handoff.
 
+## 2026-10-10 - Session 93 (type 3: the sheep/wool vertical + the animal grid-stream fix)
+
+SESSION TYPE ROTATION LOG: 88=0, 89=4, 90=3, 91=0, 92=4, 93=3. Pick
+the next type freely - just NOT 3 (0/1/2/4/5 all open).
+
+GOAL (type 3): close the sheep/wool breeding-depth gap from the
+livestock doc's Open questions - the sheep family end to end: quell
+the wild mouflon, reach BOTH sheep sexes, grow and shear wool, birth
+and refuse a lamb, persist the flock.
+
+DONE:
+
+- Root cause of the probe's "too far away" refusals (client believed
+  the mouflon stood at dist=0): the grid MAPREQ streamed EVERY
+  animal of the grid (up to 2500+ subtile out) while movement deltas
+  only fan out inside FANOUT_SPAN - a far animal's client cache
+  position froze at spawn time forever. A SERVER protocol bug
+  (affects the real Java client the same way), not a probe bug.
+- Fix A (stream.rs): animals stream only inside 2*VIEW_RADIUS (600
+  axial) of the REQUESTER - the threshold IS the retract hysteresis,
+  so no boundary flicker; statics stream unchanged; far beasts
+  re-enter through the fresh MAPREQs a walking player generates.
+- Fix B (stream.rs): the OD_REM retract now sends IMMEDIATELY -
+  record_unacked only REGISTERS for the retransmit sweep (it does
+  not send); a swept retract sat behind its retry delay and the
+  queue_full throttle, so out-of-range gobs stayed spawned for 30+ s
+  (live trace: a mouflon 2600 subtiles out, removal never arrived).
+- Fix C (animals.rs): the mouflon sex roll is 50/50 (the aurochs
+  stays the pinned wild bull): pinning every mouflon Male deadlocked
+  the sheep pipeline - a ewe could only arrive through a mouflon
+  morph or a birth, and a birth needs a dam (the chicken-and-egg
+  loop).
+- HNH_WOOL_RATE (state.rs/game.rs/main.rs): the HNH_MILK_RATE
+  pattern for wool - scales the per-tick accumulator only; the
+  3-wool cap and the drawn volume stay legacy-true. Unit-tested.
+- Probe reality post-fix: the entry stream no longer carries the
+  far herd, so test_sheep.py grew a TWO-PHASE hunt: the pure north
+  trek along the reconnoitered clear line (scan_direction.py N: the
+  seed-42 herd stands ~2.4k subtiles north, x~555 is water-clear)
+  and the quell cycle standing IN the herd. Chasing en-route drifter
+  mouflons pulled the probe into the swamps (walled-off beasts, 150 s
+  per blocked chase) - the trek phase ignores them on purpose. The
+  last ~500 subtiles of a chase hand over to the dairy close_on_beast
+  pursuit: nav_walk's fixed pump schedule idles at ~18 subt/s, BELOW
+  the panicking mouflon's 30 (the gap never closed through staged
+  hops alone).
+- diag_mouflon.py verdict: post-fix the streamed mouflon keeps
+  moving (LINBEG refresh) and its retract (rm flag) lands <2 s after
+  crossing the hysteresis.
+- e2e GREEN (test_sheep.py, the final shape): LP skills + rope ->
+  TREK NORTH -> quell 67606 (close pursuit dist 285->70) -> the 50/50
+  morph reaches a ram AND a ewe (herd sweep: Female+Male+Female) ->
+  pasture -> SHEAR: 3 wool (the full stored meter) -> LAMB BORN gob
+  71247 -> the honest "not yet grown" refusal -> SIGTERM restart ->
+  PERSIST: flock rows reloaded. SHEEP: OK.
+- Gate: fmt clean, clippy clean, 357 workspace tests (+3: the
+  ewe-yield morph test, two wool-rate contract tests). The livestock
+  doc's Open questions now record the sheep e2e as live.
+
+NOT DONE / next session carries: Windows smoke of the release binary
+(run-client.bat path - sandbox has no wine; needs the human); the
+remaining dough legs (S79/S82 oven-fired doughs); CI push still
+blocked on the PAT workflow scope (the valid rust.yml ships
+untracked); breeding depth per the livestock doc Open questions
+(heifer gate, calf/bull drawables, quality mutation roll). S94 must
+NOT be type 3.
+
+COMMITS: 3a710a4 (feat: the sheep/wool vertical + the animal
+grid-stream fix), this handoff.
+

@@ -445,76 +445,7 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
 - S92: the breeding GL e2e landed green - livestock agent mode (the ANIMALS phase hunts the herd, not predators), the pixel-exact COW PIXELS verdict (template match 0.0 dist, hare 135+), 3 calves born on the live GL path.
 - S93: the sheep/wool vertical green end to end (quell -> ram+ewe 50/50 morph -> scaled shear -> lamb -> juvenile refusal -> v8 persist); the ANIMAL GRID-STREAM FIX (far beasts no longer ride MAPREQ - the frozen-ghost root; the OD_REM retract now sends immediately) - a server protocol fix that also heals the Java client.
 - S94: the state module split - the 3184-line single-file state.rs became the state/ domain module tree (11 files, pure move machine-verified: item sets equal, 99.4% of code lines verbatim, test name sets identical); every stale state.rs doc/comment reference re-pointed; the reusable verify_split.py harness landed.
-
-## 2026-10-10 - Session 93 (type 3: the sheep/wool vertical + the animal grid-stream fix)
-
-SESSION TYPE ROTATION LOG: 88=0, 89=4, 90=3, 91=0, 92=4, 93=3. Pick
-the next type freely - just NOT 3 (0/1/2/4/5 all open).
-
-GOAL (type 3): close the sheep/wool breeding-depth gap from the
-livestock doc's Open questions - the sheep family end to end: quell
-the wild mouflon, reach BOTH sheep sexes, grow and shear wool, birth
-and refuse a lamb, persist the flock.
-
-DONE:
-
-- Root cause of the probe's "too far away" refusals (client believed
-  the mouflon stood at dist=0): the grid MAPREQ streamed EVERY
-  animal of the grid (up to 2500+ subtile out) while movement deltas
-  only fan out inside FANOUT_SPAN - a far animal's client cache
-  position froze at spawn time forever. A SERVER protocol bug
-  (affects the real Java client the same way), not a probe bug.
-- Fix A (stream.rs): animals stream only inside 2*VIEW_RADIUS (600
-  axial) of the REQUESTER - the threshold IS the retract hysteresis,
-  so no boundary flicker; statics stream unchanged; far beasts
-  re-enter through the fresh MAPREQs a walking player generates.
-- Fix B (stream.rs): the OD_REM retract now sends IMMEDIATELY -
-  record_unacked only REGISTERS for the retransmit sweep (it does
-  not send); a swept retract sat behind its retry delay and the
-  queue_full throttle, so out-of-range gobs stayed spawned for 30+ s
-  (live trace: a mouflon 2600 subtiles out, removal never arrived).
-- Fix C (animals.rs): the mouflon sex roll is 50/50 (the aurochs
-  stays the pinned wild bull): pinning every mouflon Male deadlocked
-  the sheep pipeline - a ewe could only arrive through a mouflon
-  morph or a birth, and a birth needs a dam (the chicken-and-egg
-  loop).
-- HNH_WOOL_RATE (state.rs/game.rs/main.rs): the HNH_MILK_RATE
-  pattern for wool - scales the per-tick accumulator only; the
-  3-wool cap and the drawn volume stay legacy-true. Unit-tested.
-- Probe reality post-fix: the entry stream no longer carries the
-  far herd, so test_sheep.py grew a TWO-PHASE hunt: the pure north
-  trek along the reconnoitered clear line (scan_direction.py N: the
-  seed-42 herd stands ~2.4k subtiles north, x~555 is water-clear)
-  and the quell cycle standing IN the herd. Chasing en-route drifter
-  mouflons pulled the probe into the swamps (walled-off beasts, 150 s
-  per blocked chase) - the trek phase ignores them on purpose. The
-  last ~500 subtiles of a chase hand over to the dairy close_on_beast
-  pursuit: nav_walk's fixed pump schedule idles at ~18 subt/s, BELOW
-  the panicking mouflon's 30 (the gap never closed through staged
-  hops alone).
-- diag_mouflon.py verdict: post-fix the streamed mouflon keeps
-  moving (LINBEG refresh) and its retract (rm flag) lands <2 s after
-  crossing the hysteresis.
-- e2e GREEN (test_sheep.py, the final shape): LP skills + rope ->
-  TREK NORTH -> quell 67606 (close pursuit dist 285->70) -> the 50/50
-  morph reaches a ram AND a ewe (herd sweep: Female+Male+Female) ->
-  pasture -> SHEAR: 3 wool (the full stored meter) -> LAMB BORN gob
-  71247 -> the honest "not yet grown" refusal -> SIGTERM restart ->
-  PERSIST: flock rows reloaded. SHEEP: OK.
-- Gate: fmt clean, clippy clean, 357 workspace tests (+3: the
-  ewe-yield morph test, two wool-rate contract tests). The livestock
-  doc's Open questions now record the sheep e2e as live.
-
-NOT DONE / next session carries: Windows smoke of the release binary
-(run-client.bat path - sandbox has no wine; needs the human); the
-remaining dough legs (S79/S82 oven-fired doughs); CI push still
-blocked on the PAT workflow scope (the valid rust.yml ships
-untracked); breeding depth per the livestock doc Open questions
-(heifer gate, calf/bull drawables, quality mutation roll). S94 must
-NOT be type 3.
-
-COMMITS: 3a710a4 (feat: the sheep/wool vertical + the animal
-grid-stream fix), this handoff.
+- S95: the architecture analysis (docs/architecture-analysis.md) - the measured 1k contract (steady tick 11-14 ms, ~6x headroom), the fd ceiling at 1011 in-process bots (EMFILE save failure + watchdog false alarms), and the CROWD WALL (2.5k clustered bots run 58-307 ms ticks; the O(movers x viewers) fan-out hits 380k pairs/tick vs 11.5k dispersed); 8 ranked opportunities O1-O8 + honest gaps G1-G5.
 
 ## 2026-10-10 - Session 94 (type 2: the state module split - the single-file state.rs becomes a domain module tree)
 
@@ -582,3 +513,71 @@ NOT be type 2.
 
 COMMITS: (refactor: the state module split + reference re-pointing +
 the pure-move verifier), this handoff.
+
+## 2026-10-10 - Session 95 (type 1: the architecture analysis - measured 1k contract, the crowd wall, the ranked 10k road)
+
+SESSION TYPE ROTATION LOG: 89=4, 90=3, 91=0, 92=4, 93=3, 94=2, 95=1.
+Type 1 was last served at session 75 (20 sessions ago). Pick the next
+type freely - just NOT 1 (0/2/3/4/5 all open).
+
+GOAL (type 1, per the rotation): architecture analysis with improvement
+opportunities on the 1k -> 10k road, MEASURED not assumed - the
+deliverable is docs/architecture-analysis.md (linked from the README
+repository map).
+
+DONE:
+
+- The architecture map (doc §1): crates and dependency direction
+  (proto/world/server), the task topology (single-writer game task, UDP
+  shards, auth, res http, bots, mesh, watchdog), the 9-phase attributed
+  tick, the SoA gob model, the vis stack (dirty cells + result cache +
+  delta scans + the 128-touched dense guard), persist, and the
+  grid-owner cluster (rendezvous hash; the same partition drives the
+  in-process rayon fan-out - the cluster contract is exercised every
+  tick).
+- The 1k contract MEASURED (doc §2, release binary, 2 workers): steady
+  tick 11.4-13.7 ms (mean 16.3 incl. ramp) against the 100 ms budget -
+  ~6x headroom; phase_vis ~7 ms (55%, the dominant phase); login storm
+  1000 sessions in 48 s (~21/s, max tick 117 ms); bots drive the REAL
+  client path (walk/fight/harvest/pickup over UDP).
+- The fd ceiling FOUND at 1011 sessions (doc §2.1): default
+  ulimit -n 1024 stops the in-process bot harness (bots pay BOTH ends'
+  fd cost in one process; 1017 sockets at the cap). Two robustness bugs
+  surfaced, both real beyond the harness: the background save FAILED on
+  EMFILE with no retry (character-progress loss risk), and the health
+  watchdog FALSE-ALARMED "listener is down" (its own probe socket could
+  not be created - wrong diagnosis). Fixes ranked O1; load scripts must
+  raise ulimit before >1k runs.
+- The CROWD WALL found and measured (doc §2.2, the session's headline):
+  a 2500-bot run with the fd limit raised runs 58-307 ms ticks while
+  the bots cluster - OVER budget at ~2.5k sessions. Root: the movement
+  fan-out is O(movers x viewers-in-span): fanout_pairs hit 380k/tick at
+  ~1400 clustered bots vs 11.5k at 1000 dispersed bots (33x at the SAME
+  session count); mvbat_fanout_us peaked at 95 ms. As bots disperse the
+  tick recovers (36k pairs late-run) - but real 10k gameplay sits in
+  the crowd regime regularly (spawns, markets, sieges), so the crowd
+  case is a capacity case. The cluster does NOT save a single-cell
+  crowd: rendezvous hashing is density-blind, a mega-crowd's whole cell
+  stays on one node -> ranked O8 (crowd-aware ownership).
+- Ranked opportunities (doc §4, each traceable to code + counter):
+  O2 shard+bound the fan-out (top, measured), O1 persist retry +
+  watchdog honesty, O3 the missing 2.5x/10x measurement points, O4
+  per-cell bucket packing in visidx, O5 save segmentation, O6 auth
+  sharding for reconnect storms, O7 the RSS harness, O8 crowd-aware
+  grid ownership. Explicit "checked and sound" list recorded (the
+  single-writer task, unbounded channels' practical bounds, SoA,
+  rendezvous ownership, the 1 MiB frame cap).
+- Honest gaps (doc §5): G1 the 2.5k DISPERSED steady state (the 420 s
+  window ended while bots still spread - re-run with a ~10 min hold);
+  G2 no 10k point; G3 save-flush latency at >1k chars; G4 no RSS
+  numbers; G5 cluster guest overhead not re-measured since S86.
+- Verification section (doc §6): every number re-runnable by command,
+  including how to reproduce the fd ceiling and the crowd regime.
+
+NOT DONE / next session carries: Windows smoke (human), S79/S82 dough
+legs, CI push (PAT workflow scope - human), breeding depth (heifer
+gate, calf drawables, quality mutation roll). The doc's O1/O2 are
+natural type 5 targets; O8 is the large one. S96 must NOT be type 1.
+
+COMMITS: (docs: the architecture analysis - the measured 1k contract,
+the crowd wall, the ranked 10k road), this handoff.
