@@ -88,6 +88,7 @@ bake chain) live in `server/scripts/` - see
 | `server/` | The Rust server (crates: `hnh-proto`, `hnh-world`, `hnh-server`) |
 | `src/`, `build.xml` | The legacy Java client and its build |
 | `docs/mechanics/` | Verified game-mechanics reference (start at its README) |
+| `docs/architecture-analysis.md` | Measured scaling analysis: the 1k contract, the crowd wall, ranked 1k→10k opportunities |
 | `server/scripts/` | Python wire probes + the shared `hnhlib.py` harness |
 | `windows/` | One-command Windows launch tools |
 | `AGENTS.md` | Mandatory guidelines for AI coding agents |
