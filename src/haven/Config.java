@@ -219,7 +219,21 @@ public class Config {
 			BufferedReader br = new BufferedReader(in);
 			String strLine;
 			while ((strLine = br.readLine()) != null) {
+				// fep.conf/curio.conf ship provenance comments (the
+				// session-79/81 no-row notes); the server parser
+				// (craft.rs) tolerates comment/blank lines, and the
+				// client must too - a bare comment line has no '=' and
+				// killed Config.<clinit> with an
+				// ArrayIndexOutOfBoundsException, taking the whole
+				// client down at startup.
+				String trimmed = strLine.trim();
+				if (trimmed.isEmpty() || trimmed.startsWith("#")
+						|| trimmed.startsWith("//")) {
+					continue;
+				}
 				String[] info = strLine.split("=");
+				if (info.length < 2)
+					continue;
 				double blp = 0;
 				int att = 0;
 				float stime = 0.0f;
@@ -253,8 +267,18 @@ public class Config {
 			BufferedReader br = new BufferedReader(new InputStreamReader(in));
 			String strLine;
 			while ((strLine = br.readLine()) != null) {
+				// Same comment/blank tolerance as loadCurio above
+				// (mirrors the server-side craft.rs fep.conf parser):
+				// a line without '=' is skipped, not a crash.
+				String trimmed = strLine.trim();
+				if (trimmed.isEmpty() || trimmed.startsWith("#")
+						|| trimmed.startsWith("//")) {
+					continue;
+				}
 				HashMap<String, Float> fep = new HashMap<String, Float>();
 				String[] tmp = strLine.split("=");
+				if (tmp.length < 2)
+					continue;
 				String name;
 				name = tmp[0].toLowerCase();
 				tmp = tmp[1].split(" ");
