@@ -86,12 +86,12 @@ def havstr(s):
     return s.encode() + b"\x00"
 
 
-def auth_cookie(username, password="x", port=AUTH_PORT):
+def auth_cookie(username, password="x", port=AUTH_PORT, host="127.0.0.1"):
     """TLS auth handshake -> session cookie (dev policy: any password)."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    raw = socket.create_connection(("127.0.0.1", port), timeout=5)
+    raw = socket.create_connection((host, port), timeout=5)
     tls = ctx.wrap_socket(raw)
 
     def send_frame(ty, payload):
@@ -316,10 +316,17 @@ class WireClient:
     widgets instead of re-implementing the transport.
     """
 
-    def __init__(self, username, request_chr=True, send_objacks=False):
+    def __init__(self, username, request_chr=True, send_objacks=False,
+                 host="127.0.0.1", auth_port=None, game_port=None):
+        """One client bound to one node. Passing the ports of a cluster
+        node (e.g. auth 1873 / game 1874 for node 1 of cluster-up.sh)
+        drives the whole session through THAT node - the multi-machine
+        profile's entry test."""
         self.username = username
         self.request_chr = request_chr
         self.send_objacks = send_objacks
+        self.auth_port = AUTH_PORT if auth_port is None else auth_port
+        self.auth_host = host
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         # The world-entry burst (9 MAPDATA grids + several hundred gob
         # spawns + the reliable RMSG stream) easily overflows the
@@ -329,7 +336,7 @@ class WireClient:
         self.sock.setsockopt(
             socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
         self.sock.settimeout(0.25)
-        self.server = ("127.0.0.1", GAME_PORT)
+        self.server = (host, GAME_PORT if game_port is None else game_port)
         self.tseq = 0
         self.rseq = 0
         self.held = {}
@@ -368,7 +375,8 @@ class WireClient:
 
     # ---- session plumbing -------------------------------------------------
     def connect(self):
-        cookie = auth_cookie(self.username)
+        cookie = auth_cookie(self.username, port=self.auth_port,
+                             host=self.auth_host)
         sess = (
             bytes([MSG_SESS])
             + le16(1)

@@ -37,6 +37,7 @@ taming) that are easier to drive from python.
 | probe_drop.py | cross-node drop authority transfer | drop verdict |
 | probe_plow.py | cross-node plow relay (TileMutation) | plow verdict |
 | probe_guest_walk.py | wire client walks across peer-owned cells (needs a RUNNING 2-node cluster; guest evidence lives in the node logs) | `GUEST WALK: OK` |
+| probe_cluster_entry.py | enter the world THROUGH a chosen node (auth/game port args); twice with the same name through two nodes = the cross-node character migration | `WORLD ENTRY (node <port>): OK` |
 | probe_station.py | station fuel/input/light/output | `STATION FLOW: OK` |
 | test_build.py | build pipeline + persistence | `BUILD FLOW: OK` |
 | test_farming.py | plow/plant/harvest | farming verdict |
@@ -86,6 +87,25 @@ taming) that are easier to drive from python.
   the single-node baseline or a 2-node cluster (both nodes loaded) and
   prints per-node tick/phase/fan-out percentiles over a 60 s window.
   The gap #2/#7 profiling evidence came from this script.
+- `cluster-up.sh` - session-86 multi-machine cluster profile, one
+  command. `./cluster-up.sh up` boots a local N-node cluster (2..4,
+  same port layout as `windows/start-cluster.bat`: node i = auth
+  1871+2i, game 1870+4i, res 1872+4i, mesh 18790+i; node 0 keeps the
+  client-facing defaults, so the Java client and `test_client.py`
+  work unchanged). `CLUSTER_SPEC=hostA:18790,hostB:18791 SELF=1
+  ./cluster-up.sh remote` boots ONLY this machine's node - run one
+  copy per machine, same `--seed`, and the grid ownership (rendezvous
+  hash) splits the world across them: that is the multi-machine
+  deployment proper. `stop` / `status` manage both modes. Saves:
+  `save/cluster_n<i>.json`, one shard per node, stable across
+  restarts; logs append to `target/cluster-n<i>.log`.
+- `test_cluster.sh` - session-86 cluster e2e gate: boots a fresh
+  2-node cluster (throwaway saves), then proves MESH (dial link up),
+  WORLD ENTRY through node 0, GUEST WALK across peer-owned cells
+  (peer-subscribed + guest-ingested evidence in the node-1 log), and
+  the CHARACTER MIGRATION (created through node 0, re-entered through
+  node 1: node 0 serves the snapshot, node 1 receives it). Verdict:
+  `CLUSTER E2E: OK`.
 
 ## Attic
 

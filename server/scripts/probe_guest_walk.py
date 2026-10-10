@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Cluster guest-walk probe (session 54).
+"""Cluster guest-walk probe (session 54; ports refreshed session 86).
 
 Expects a 2-node cluster already listening (node 0: auth 1871 / game
-1870 UDP; node 1: 9801 / 9800). Drives one wire client through node 0:
+1870 UDP; node 1: auth 1873 / game 1874 - the cluster-up.sh /
+windows start-cluster.bat profile; probe_guest_walk only ever talks
+to node 0). Drives one wire client through node 0:
 session -> charlist -> play -> bootstrap, then walks EAST in validated
 220-subtile legs (modeled on probe_walk: each leg waits for the LINSTEP
 counter to reach the LINBEG step count). Four legs cross 3+ VisIndex
