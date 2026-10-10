@@ -122,7 +122,46 @@ def auth_cookie(username, password="x", port=AUTH_PORT, host="127.0.0.1"):
     return body
 
 
-def ensure_server(env_extra=None, save_path=None, log_path=None):
+def _terminate_listening_server():
+    """Session 90: kill any server still holding the auth port.
+
+    A probe killed by its faulthandler watchdog (exit=True) never runs
+    the `finally: stop_server(proc)` leg, so the child server survives
+    and keeps serving its dirty world - the next probe's
+    `ensure_server` then silently ATTACHES to it instead of booting
+    fresh (live trace: the breeding run entered as player gob 69900 on
+    a foreign world and found zero cows in the loaded grids). The
+    match pins the exact server binary path + args so nothing else is
+    touched; the port is polled until it actually frees up."""
+    probe = socket.socket()
+    probe.settimeout(0.4)
+    try:
+        probe.connect(("127.0.0.1", AUTH_PORT))
+    except OSError:
+        return  # nothing listening
+    finally:
+        probe.close()
+    subprocess.run(
+        ["pkill", "-f", "--", BIN + " --seed"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        s = socket.socket()
+        s.settimeout(0.4)
+        try:
+            s.connect(("127.0.0.1", AUTH_PORT))
+            s.close()
+            time.sleep(0.4)
+        except OSError:
+            return
+    raise RuntimeError("a stale server keeps the auth port busy")
+
+
+def ensure_server(env_extra=None, save_path=None, log_path=None,
+                  fresh=False, keep_save=False):
     """Start an isolated server (fresh save) if none is listening.
 
     env_extra: extra environment variables for the server process (for
@@ -133,7 +172,18 @@ def ensure_server(env_extra=None, save_path=None, log_path=None):
     RUST_LOG in env_extra to capture the server's own debug lines
     (e.g. silent "plow refused"/"plant refused" refusals that the
     client never sees).
+    fresh (session 90): terminate any server already listening on the
+    auth port FIRST (a leaked watchdog-killed probe's child), then
+    boot. The probes that share one server across stages keep the
+    default attach behavior.
+    keep_save (session 90): do NOT delete save_path before boot. The
+    restart legs (the breeding probe) boot a second server on the file
+    the first one flushed on its SIGTERM shutdown - deleting it here
+    silently reloaded an empty world (live trace: saved_chars=0 with
+    the herd parked on it, "the herd did not reload").
     """
+    if fresh:
+        _terminate_listening_server()
     probe = socket.socket()
     probe.settimeout(0.4)
     try:
@@ -147,11 +197,13 @@ def ensure_server(env_extra=None, save_path=None, log_path=None):
     if save_path is None:
         save_path = os.path.join(REPO, "server", "target", "build-test-save.json")
     # Fresh world: persistent plans from earlier runs would occupy the
-    # spawn-area tiles and intercept this run's itemacts.
-    try:
-        os.remove(save_path)
-    except OSError:
-        pass
+    # spawn-area tiles and intercept this run's itemacts - unless the
+    # caller explicitly wants the file KEPT (restart leg).
+    if not keep_save:
+        try:
+            os.remove(save_path)
+        except OSError:
+            pass
     env["HNH_SAVE_FILE"] = save_path
     if env_extra:
         env.update(env_extra)
@@ -377,6 +429,16 @@ class WireClient:
         # row-major y*100+x (mirror of Grid::idx on the server).
         self.tiles = {}
         self._mapfrag = {}  # pktid -> {off: chunk} until complete
+        # Session 90: grids already requested around the moving avatar
+        # (grid -> last request time). The spawn 3x3 + one neighborhood
+        # ring used to be the whole streaming story; a chase that crossed
+        # into an unrequested grid then walked BLIND (tile_at None ->
+        # line_clear refuses, find_tile_path None, the probe stalled
+        # while the beast fled - live trace: breeding pursuit grid (1,3)).
+        # Mirrors Java MCache: request the 3x3 around the CURRENT
+        # position, re-asking every 5 s while a grid stays missing
+        # (UDP loss happens).
+        self._mapreq_pending = {}
         self.objdata_datagrams = 0
         self.objacks = {}  # gobid -> last frame seen (SWorker mirror)
         self.last_ack = 0.0
@@ -474,11 +536,33 @@ class WireClient:
                 # (session 89), so a probe must look idle-but-ALIVE,
                 # never dead: an idle real client beats every 5 s.
                 self._send(bytes([MSG_BEAT]))
+            self._stream_player_grids(now)
             try:
                 data, _ = self.sock.recvfrom(65536)
             except socket.timeout:
                 continue
             self.on_datagram(data)
+
+    def _stream_player_grids(self, now):
+        """Request the 3x3 grids around the avatar's current position
+        once each (re-request every 5 s while missing: a lost mapdata
+        datagram would otherwise park the grid on the pending set
+        forever). Called from pump - the natural cadence of every
+        probe loop."""
+        pos = self.gobs.get(self.player_gob, {}).get("pos")
+        if not pos:
+            return
+        pgx, pgy = pos[0] // GRID_SPAN, pos[1] // GRID_SPAN
+        for gy in (pgy - 1, pgy, pgy + 1):
+            for gx in (pgx - 1, pgx, pgx + 1):
+                key = (gx, gy)
+                if key in self.tiles:
+                    continue
+                last = self._mapreq_pending.get(key)
+                if last is not None and now - last < 5.0:
+                    continue
+                self._mapreq_pending[key] = now
+                self.mapreq(gx, gy)
 
     def wait_for(self, predicate, timeout, step=0.25):
         deadline = time.time() + timeout
@@ -512,6 +596,7 @@ class WireClient:
         payload = b"".join(fr[k] for k in sorted(fr))
         self._mapfrag.pop(pktid, None)
         gx, gy = struct.unpack_from("<ii", payload, 0)
+        self._mapreq_pending.pop((gx, gy), None)
         o = payload.index(0, 8) + 1  # skip the NUL-terminated mnm string
         while payload[o] != 255:  # plot-flag table
             o += 2
@@ -557,7 +642,10 @@ class WireClient:
         coords). When the goal tile itself is impassable (ore deposits sit
         on mountain tiles), the path targets the nearest walkable 4-neighbor
         instead. Returns tile-center subtile waypoints, or None when no
-        path exists within the streamed grids."""
+        path exists within the streamed grids (a node budget aborts
+        unreachable searches - the 5x5 streamed grids hold ~250k tiles
+        and an unbounded BFS over them stalled a live probe for minutes
+        while the 60 s session timeout killed its server session)."""
         st = (start_sub[0] // TILE_SPAN, start_sub[1] // TILE_SPAN)
         gl = (goal_sub[0] // TILE_SPAN, goal_sub[1] // TILE_SPAN)
         if not self._tile_walkable(gl):
@@ -572,9 +660,10 @@ class WireClient:
             return [gl]
         prev = {st: None}
         q = deque([st])
+        budget = 40000
         dirs = ((1, 0), (-1, 0), (0, 1), (0, -1),
                 (1, 1), (1, -1), (-1, 1), (-1, -1))
-        while q:
+        while q and budget > 0:
             cur = q.popleft()
             if cur == gl:
                 break
@@ -584,6 +673,7 @@ class WireClient:
                     continue
                 prev[nb] = cur
                 q.append(nb)
+                budget -= 1
         if gl not in prev:
             return None
         path = []
@@ -901,19 +991,33 @@ class WireClient:
                     self.buddy_names[gobid] = arg
                     if arg == self.username:
                         self.player_gob = gobid
+                elif op == "FOLLOW":
+                    # Session 90: the leash attr. A live target renders
+                    # the beast AT its tamer (Java Following.getc() =
+                    # the target's position) - live_pos models that
+                    # below. -1 clears the leash.
+                    g["follow"] = arg if arg is not None and arg != -1 else None
 
     # ---- scenario actions --------------------------------------------------
     def live_pos(self, gobid):
-        """The best-known position of a gob RIGHT NOW: the streamed
-        pos (anchored/stepped by LINBEG+LINSTEP) extrapolated along the
-        live LinMove at the tick cadence (server steps = 100 ms each,
-        the same clock the Java client's LinMove.getc runs on). A
-        mid-flight beast reports its on-path position instead of its
-        last landing - the taming chase needs this to close the real
-        gap (session 83)."""
+        """The best-known position of a gob RIGHT NOW. A leashed gob
+        renders AT its tamer (Java Following.getc() returns the
+        TARGET's position - session 90): live_pos models the client.
+        Otherwise: the streamed pos (anchored/stepped by
+        LINBEG+LINSTEP) extrapolated along the live LinMove at the
+        tick cadence (server steps = 100 ms each, the same clock the
+        Java client's LinMove.getc runs on). A mid-flight beast
+        reports its on-path position instead of its last landing -
+        the taming chase needs this to close the real gap (session
+        83)."""
         g = self.gobs.get(gobid)
         if not g:
             return None
+        # Session 90: the leash render wins over any LinMove state
+        # (the server steps followed beasts silently server-side).
+        flw = g.get("follow")
+        if flw is not None and flw in self.gobs and flw != gobid:
+            return self.live_pos(flw)
         lb = g.get("linbeg")
         pos = g.get("pos")
         if not lb or not pos:

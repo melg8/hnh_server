@@ -300,22 +300,29 @@ AGGRESSIVE_RES = (
 )
 
 
-def find_cow(c):
+def find_cow(c, prefer=None, exclude=()):
     """The nearest wild Cow or Aurochs in the loaded grids (both are
     the milk chain's front end - the aurochs morphs into the cow at
-    full tameness). Animals spawn with an OD_RES cdv followed by the
-    compositing OD_LAYERS whose base is gfx/kritter/<species>/body -
-    the LAYERS base overwrites the recorded res, so the scan matches
-    the kritter folder prefix, not the exact cdv path.
+    full tameness). `prefer` (session 90) picks the pool first when
+    it is non-empty: "cow" returns wild cows (the dairy female),
+    "aurochs" returns wild aurochs (the breeding bull). Animals
+    spawn with an OD_RES cdv followed by the compositing OD_LAYERS
+    whose base is gfx/kritter/<species>/body - the LAYERS base
+    overwrites the recorded res, so the scan matches the kritter
+    folder prefix, not the exact cdv path.
     Session 83: cows standing inside a boar/wolf/bear's aggro radius
     (~300 subtiles) are SKIPPED when any alternative exists - an
     aggressive chaser forces a duel on the tamer mid-protocol and the
     one-Fightview rule keeps it stuck until the chase is outrun."""
+    prefixes = ("gfx/kritter/cow/", "gfx/kritter/aurochs/")
+    if prefer == "cow":
+        prefixes = ("gfx/kritter/cow/",)
+    elif prefer == "aurochs":
+        prefixes = ("gfx/kritter/aurochs/",)
     found = {
         g: info
         for g, info in c.gobs.items()
-        if (info["res"] or "").startswith(
-            ("gfx/kritter/cow/", "gfx/kritter/aurochs/"))
+        if (info["res"] or "").startswith(prefixes)
         and not info.get("removed")
     }
     assert found, "no cow/aurochs spawned in the loaded grids (res=%r)" % (
@@ -336,6 +343,13 @@ def find_cow(c):
     if not calm:
         print("WARN: every cow stands inside an aggro circle; "
               "taking the nearest and relying on the sprint break")
+    # Session 90 flake fix: `exclude` drops the candidates a previous
+    # quell pass already gave up on (an unreachable beast across a
+    # water/rock wall); an empty pool returns None so the caller can
+    # stop instead of re-picking the same wall.
+    pool = [g for g in pool if g not in exclude]
+    if not pool:
+        return None
     gid = min(
         pool,
         key=lambda g: abs(found[g]["pos"][0] - px)
@@ -402,14 +416,27 @@ def break_hostile_fight(c, deadline=45.0):
     subtiles/s against the boar's 55: the gap grows ~11/s, and the
     combat pass tears the fight down once an axis distance passes
     DISENGAGE (300 subtiles) - about 30 s of sprinting. The frv widget
-    disappearing is the break signal."""
+    disappearing is the break signal.
+    Session 90: the chaser may have already left the VIEW (its gob
+    unloaded, live_pos None) - the old loop then spun 45 s without a
+    single click while the duel sat alive (the breeding-probe trace:
+    a bear forced a duel mid-taming, wandered off, and the probe
+    idled to its timeout). Fall back to the chaser's LAST KNOWN
+    position (the streamed gob row) and sprint away from THAT; with
+    no row at all, sprint away from the wanted beast (any direction
+    grows the axis distance)."""
     end = time.time() + deadline
     while time.time() < end:
         if c.frv_id is None or not c.frv_rels:
             return True
         hostile = c.frv_cur or next(iter(c.frv_rels))
-        hpos = c.live_pos(hostile)
+        hpos = c.live_pos(hostile) or (c.gobs.get(hostile) or {}).get("pos")
         ppos = c.live_pos(c.player_gob)
+        if not hpos and ppos:
+            # Nothing known about the chaser: sprint away in a FIXED
+            # direction instead - any separation grows the axis
+            # distance toward DISENGAGE.
+            hpos = (ppos[0] - 100, ppos[1])
         if not (hpos and ppos):
             c.pump(0.5)
             continue
@@ -477,20 +504,58 @@ def open_fight(c, gid, tries=6):
     raise AssertionError("the fight never stayed open (skittish beast)")
 
 
-def quell_cycle(c):
+def quell_cycle(c, prefer=None, rounds=5, tries=3):
     """Five quell rounds: close in on the beast, click (opens the
     fight), build the maneuver pool (jump x2 -> 2 IP, seize x10 ->
     advantage 30), select quell, wait for the colored tameness line.
     The offence bar survives between fights (fight_open never resets
-    it), so every round resolves within a second.
+    it), so every round resolves within a second. `prefer` forwards
+    to find_cow (session 90: the breeding probe tames the cow first,
+    then the aurochs bull). `rounds` (session 90, fast-tame): pass 1
+    when the server runs HNH_FAST_TAME - the first landed quell banks
+    FULL tameness, so the four leash-break windows (each a chase plus
+    a ~4 s wait) are skipped; the five-round stack stays covered by
+    the unit tests and this probe's default path. `tries` (session 90
+    flake fix): the NEAREST beast can stand across an un-wadeable
+    water/rock wall - the pursuit idles its whole deadline and the
+    fight never opens; the cycle then takes the NEXT candidate
+    instead of dying (live trace: an aurochs 913 subtiles out past a
+    wall froze the whole breeding probe).
 
     Between rounds the beast walks the HNH_LEASH_TICKS window on its
     leash and then breaks it (chat line); a click before the break
     hits the collection menu instead of a fight, so the loop waits
     for the break before re-opening the fight."""
-    gid = find_cow(c)
+    tried = set()
+    err = None
+    for _ in range(tries):
+        gid = find_cow(c, prefer, exclude=tried)
+        if gid is None:
+            break
+        try:
+            return _quell_beast(c, gid, rounds)
+        except AssertionError as exc:
+            err = exc
+            tried.add(gid)
+            print("QUELL-FAIL gob %d: %s; taking the next beast" % (
+                gid, exc))
+    raise AssertionError(
+        "no quellable %r candidate left (last: %r)" % (prefer, err))
+
+
+def _quell_beast(c, gid, rounds=5):
     set_run_gait(c)
-    for rnd in range(5):
+    step = 100 // rounds
+    # Session 90 fix: the chat HISTORY (the previous beast's quell
+    # lines) satisfies every wait below instantly - the second
+    # quell_cycle of a probe then "tames" the sire in five fake
+    # rounds while the server banks two quells (live trace: the bull
+    # stalled at 40 tameness and never entered the herd sweep). Every
+    # wait below only counts lines that arrived AFTER this mark.
+    mark = len(c.chat_lines)
+    def fresh():
+        return [t for t, _ in c.chat_lines[mark:]]
+    for rnd in range(rounds):
         # The beast wanders between rounds: re-close and re-open the
         # fight, confirming the frv window this time (a click from
         # beyond DISENGAGE is closed by the tick before the client
@@ -522,10 +587,14 @@ def quell_cycle(c):
         # session-83 no-attack-no-swing rule the duel then idles
         # safely, so simply RE-SELECT every couple of seconds until
         # the gate takes and the quell swing lands.
-        want = "Tameness: %d/100" % ((rnd + 1) * 20)
-        deadline = time.time() + 60
+        want = "Tameness: %d/100" % ((rnd + 1) * step)
+        # Session 90: 90 s per round - the breeding probe tames the
+        # aurochs across terrain with a forced duel or two on the way
+        # (the idle-duel teardown now ends those, but the sprint costs
+        # real seconds the old 60 s budget did not have).
+        deadline = time.time() + 90
         rearm = 0.0
-        while not any(want in t for t, _ in c.chat_lines):
+        while not any(want in t for t in fresh()):
             assert time.time() < deadline, (
                 "quell round %d never landed (want %r; chat=%r)"
                 % (rnd + 1, want, c.chat_lines[-6:]))
@@ -535,19 +604,19 @@ def quell_cycle(c):
             if heated and time.time() - rearm > 2.0:
                 rearm = time.time()
                 c.menu_act("atk", "quell")
-        print("QUELL %d/5: %s" % (rnd + 1, want))
-        if rnd < 4:
+        print("QUELL %d/%d: %s" % (rnd + 1, rounds, want))
+        if rnd < rounds - 1:
             # The quelled beast follows on its leash, then breaks it
             # (HNH_LEASH_TICKS=40 -> ~4 s) and turns wild again: wait
             # for the break line before the next fight (before it the
             # click opens the Milk menu, not a fight).
             ok = c.wait_for(
-                lambda: any("breaks its leash" in t for t, _ in c.chat_lines), 20)
+                lambda: any("breaks its leash" in t for t in fresh()), 20)
             assert ok, "the leash never broke (chat=%r)" % (c.chat_lines[-6:],)
     ok = c.wait_for(
         lambda: any(
             ("fully tamed" in t) or ("domestic form" in t)
-            for t, _ in c.chat_lines), 6)
+            for t in fresh()), 6)
     assert ok, "the full-tame line never arrived (chat=%r)" % (
         c.chat_lines[-6:],)
     print("TAMING: fully tamed (5 quells, rope equipped, AH bought)")

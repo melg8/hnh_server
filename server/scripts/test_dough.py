@@ -469,7 +469,17 @@ def walk_to_grass(c):
             break
     assert grass is not None, "no grass tile within ring 80"
     target = (grass[0] * TILE_SPAN + 5, grass[1] * TILE_SPAN + 5)
-    ok = c.nav_walk(target, stop=20, max_clicks=400)
+    ok = c.nav_walk(target, stop=20, max_clicks=400, log=print)
+    if not ok:
+        # Session 90 live diagnosis: name the actual blocker when the
+        # grass nav fails (no tile path vs stalled clicks) - the bare
+        # "nav failed" assert hides which half broke.
+        pos = c.gobs[c.player_gob]["pos"] or (0, 0)
+        print("GRASS NAV DIAG: pos=%s target=%s start_walkable=%s "
+              "goal_walkable=%s streamed_grids=%d stalls=%s" % (
+                  pos, target, c.walkable(pos[0], pos[1]),
+                  c.walkable(target[0], target[1]), len(c.tiles),
+                  getattr(c, "stalls", None)))
     assert ok, "nav to the grass field %s failed" % (grass,)
     print("at the grass field: %s" % (grass,))
 
