@@ -264,9 +264,18 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     // Network tasks: shard_count UDP sockets share the port via SO_REUSEPORT.
     // Awaiting here makes shard bind failures fatal at startup instead of a
     // background log line the user only notices when clients misbehave.
+    // A clustered node binds its OWN CLUSTER_SPEC address (not wildcard):
+    // the real Java client drops datagrams whose source address != the
+    // server it dialed, so machine B must answer from B's address. See
+    // net::spawn / bind_shard_socket for the full contract.
+    let own_ip = args.cluster.as_ref().and_then(|list| {
+        nodes::ClusterConfig::parse(list, args.node)
+            .ok()
+            .map(|c| c.addrs[c.me].ip())
+    });
     let shard_count = args.shards.max(1);
     info!(shards = shard_count, "network sharding");
-    net::spawn(net_tx, shard_count, args.game_port).await?;
+    net::spawn(net_tx, shard_count, args.game_port, own_ip).await?;
     let (cert, key) = match (&args.cert, &args.key) {
         (Some(c), Some(k)) => (c.clone(), k.clone()),
         (None, None) => {

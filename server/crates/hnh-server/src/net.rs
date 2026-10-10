@@ -27,7 +27,19 @@ use crate::state::{GobId, SessionId};
 
 pub const GAME_PORT: u16 = 1870;
 /// Session idle timeout: no datagrams of any kind for this long => close.
+/// `HNH_SESSION_TIMEOUT_SECS` overrides it (integration tests shrink it;
+/// operators on lossy client links may raise it).
 const SESSION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Resolve the session timeout once per session boot. The 1 s floor
+/// keeps a typo from ever disabling the timeout entirely.
+fn session_timeout() -> Duration {
+    let secs = std::env::var("HNH_SESSION_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(SESSION_TIMEOUT.as_secs());
+    Duration::from_secs(secs.max(1))
+}
 /// Max datagram size we send (fits any sane MTU).
 pub const OUT_MTU: usize = 1200;
 
@@ -84,7 +96,7 @@ impl From<NetCmd> for Cmd {
 }
 
 /// Bind one UDP socket so shard sockets can share the game port.
-fn bind_shard_socket(port: u16) -> anyhow::Result<UdpSocket> {
+fn bind_shard_socket(bind: Option<std::net::IpAddr>, port: u16) -> anyhow::Result<UdpSocket> {
     let sock = socket2::Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::DGRAM,
@@ -107,7 +119,16 @@ fn bind_shard_socket(port: u16) -> anyhow::Result<UdpSocket> {
         sock.set_reuse_address(true)?;
     }
     sock.set_nonblocking(true)?;
-    sock.bind(&std::net::SocketAddr::from(([0, 0, 0, 0], port)).into())?;
+    // Multi-machine semantics: a clustered node binds its own
+    // CLUSTER_SPEC address so every reply it sends CARRIES that address
+    // as the source. The real Java client (Session.java RWorker) drops
+    // datagrams whose source != the server address it dialed, so a
+    // wildcard bind on machine B would source replies from the
+    // machine's primary route address and a client entering through B
+    // would silently discard ALL of B's traffic. Single-node keeps the
+    // wildcard contract (local clients, the bot fleet).
+    let ip = bind.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    sock.bind(&std::net::SocketAddr::from((ip, port)).into())?;
     let std_sock: std::net::UdpSocket = sock.into();
     Ok(UdpSocket::from_std(std_sock)?)
 }
@@ -116,15 +137,19 @@ fn bind_shard_socket(port: u16) -> anyhow::Result<UdpSocket> {
 /// across shards by kernel 4-tuple hash; `shards = 1` degenerates to the
 /// original single-socket layout. The accept log carries the shard id,
 /// giving operations a direct per-shard occupancy histogram.
+///
+/// `bind` is the node's own CLUSTER_SPEC address in a cluster (see
+/// `bind_shard_socket`), `None` for the single-node wildcard contract.
 pub async fn spawn(
     game_tx: mpsc::UnboundedSender<NetCmd>,
     shards: usize,
     port: u16,
+    bind: Option<std::net::IpAddr>,
 ) -> anyhow::Result<()> {
     let shard_count = shards.max(1);
     for id in 0..shard_count {
-        let socket = Arc::new(bind_shard_socket(port)?);
-        info!(shard = id, port, "game server (UDP) shard listening");
+        let socket = Arc::new(bind_shard_socket(bind, port)?);
+        info!(shard = id, port, ?bind, "game server (UDP) shard listening");
         let game_tx = game_tx.clone();
         tokio::spawn(async move {
             if let Err(e) = recv_loop(socket, game_tx, id).await {
@@ -400,6 +425,13 @@ struct Driver {
     raw_rx: mpsc::Receiver<crate::state::BlockBytes>,
     cmd_tx: mpsc::UnboundedSender<NetCmd>,
     last_recv: Instant,
+    /// Throttle stamp for OUR outgoing beats - deliberately NOT a
+    /// liveness input (session 89: the old code bumped `last_recv` by
+    /// +4 s on every beat, so the silence clock oscillated 1..5 s
+    /// forever, the 60 s timeout was unreachable, and a crashed
+    /// client kept its session - and its character "online" - until
+    /// a server restart, which NACKed every re-login).
+    last_beat: Instant,
     closed: bool,
 }
 
@@ -422,8 +454,10 @@ async fn run_session(
         raw_rx,
         cmd_tx,
         last_recv: Instant::now(),
+        last_beat: Instant::now(),
         closed: false,
     };
+    let timeout = session_timeout();
     // Timer budget: retransmit flushes piggyback on a 20 ms scheduler.
     let mut next_flush = tokio::time::Instant::now() + Duration::from_millis(20);
     loop {
@@ -472,14 +506,21 @@ async fn run_session(
             _ = tokio::time::sleep_until(next_flush) => {
                 next_flush = tokio::time::Instant::now() + Duration::from_millis(20);
                 flush_reliable(&mut d, &sock).await;
-                // Liveness: beat on 5 s idle, timeout on 60 s silence.
+                // Liveness: beat on 5 s idle, timeout on 60 s of TRUE
+                // silence. `last_beat` only throttles the server-side
+                // beats so the 20 ms scheduler cannot spam them; the
+                // timeout stays keyed on the last REAL datagram, so a
+                // peer that stops acking, beating and sending anything
+                // at all is dropped exactly once the timeout passes.
                 if d.last_recv.elapsed() >= Duration::from_secs(5) {
-                    if d.last_recv.elapsed() > SESSION_TIMEOUT {
+                    if d.last_recv.elapsed() > timeout {
                         info!(sid = d.sid, "session timed out");
                         break;
                     }
-                    let _ = sock.send_to(&[MSG_BEAT], d.addr).await;
-                    d.last_recv += Duration::from_secs(4); // keep beating until silence hits 60s
+                    if d.last_beat.elapsed() >= Duration::from_secs(5) {
+                        let _ = sock.send_to(&[MSG_BEAT], d.addr).await;
+                        d.last_beat = Instant::now();
+                    }
                 }
             }
         }
