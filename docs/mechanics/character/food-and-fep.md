@@ -144,7 +144,10 @@ The client displays whatever the server pushes - there is no eating-specific buf
 7. **Buffs**: catalog food/symbel buffs as resources; push `set`/`rm`/`clear` with correct `cticks` scaling (0.06 s per tick) and `major` flags.
 8. **Rounding discipline**: the client's visible predictions (`FEP * qmult` tooltips) must match server grants; keep the same float-to-int rounding as `Item.calcFEP` (`Item.java:284-285`).
 
-## Server implementation notes (this repo, session 3)
+## Server implementation notes (this repo)
+
+Consolidated in session 91: the two per-session chronicle sections
+are demoted to subsections under one H2; content preserved.
 
 - fep.conf is parsed at boot (Config.loadFEP format, lowercase keys,
   HHP special-cased); the table is resolved through cwd- and
@@ -169,8 +172,7 @@ The client displays whatever the server pushes - there is no eating-specific buf
   modeled yet (open questions 2/5 below still stand); the energy pool
   drains via the existing vitals tick.
 
-## Server implementation notes (this repo, sessions 79+81: fep.conf gaps)
-
+### Server implementation notes (this repo, sessions 79+81: fep.conf gaps)
 - Session 79: plain `Bread` shipped no row in the 2009 file, so the
   S71 baked loaf resolved no FEP and the eat path silently bailed
   (the `eat: no fep entry` debug line). Server policy: `Bread=CON:5`

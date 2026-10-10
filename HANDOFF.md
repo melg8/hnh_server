@@ -572,6 +572,17 @@ DONE:
   instead of the doc's never-calved heifer gate, no calf/bull
   drawable, the single-average quality drift vs the doc's mutation
   roll, fodder-average product quality still open).
+- The same de-pollution pass over the two other chronicle-carrying
+  docs: crafting-and-building.md (SEVEN session-note H2 sections, and
+  a skeleton bug - sessions 71/77/81 had appended their notes AFTER
+  "## Open questions") and food-and-fep.md (two sections) are each
+  consolidated under one "## Server implementation notes (this repo)"
+  H2 with the per-session chronicle demoted to H3 subsections and
+  Open questions restored to the end; content preserved verbatim
+  (plus two em-dashes -> ASCII and one half-resolved deviation line
+  refreshed: bricks became craftable when the S70 kiln landed, but
+  the oven/smelter demands keep the stone/branch substitute pending a
+  balance pass).
 - AGENTS.md: added the two sections a fresh context was missing -
   "Session Protocol (read HANDOFF.md FIRST)" (rotation rule, keep-
   last-two, commit discipline) and "Windows quick start (the

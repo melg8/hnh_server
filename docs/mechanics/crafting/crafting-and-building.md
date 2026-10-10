@@ -228,7 +228,15 @@ Server implementation notes (this repo, session 60):
 - **Client trust boundary.** Everything here is replayable by bots (this repo ships a scripting layer that presses Craft automatically). Treat every incoming `act`, `make`, `place`, `click`, and `itemact` as hostile until validated.
 - **Quality bookkeeping.** Snapshot ingredient qualities at consumption time (crafting) or delivery time (building); do not re-derive from stacks. The items domain document ([items and quality](../items/items-and-quality.md)) defines the quality attribute itself, the inner-quality tooltip override (`Item.q2`), and the quality multiplier conventions.
 
-## Server implementation notes (this repo, session 3)
+## Server implementation notes (this repo)
+
+Consolidated in session 91: the per-session chronicle (sessions 3
+through 81) is demoted to chronological subsections under this one
+H2, and Open questions moved back to the end where the shared
+skeleton expects it (sessions 71/77/81 had appended their notes
+after the questions). Content is preserved verbatim except where a
+stale line is marked; the section above (the contract) is the WHY,
+this section is the WHAT that is live.
 
 - The making choreography is live: `act("craft", <id>)` on the menugrid
   opens a `make` widget whose `pop` carries (session-local wire id,
@@ -289,11 +297,10 @@ Server implementation notes (this repo, session 60):
   equip.rs PIECES entries; rope is the documented taming
   precondition (animals-and-husbandry.md).
 
-## Server implementation notes (this repo, session 15)
-
+### Server implementation notes (this repo, session 15)
 - The building pipeline is live end to end: a build pagina's ad string is
   the pagina's own id (`paginae/build/oven.res` action layer ad =
-  ["oven"], decoded from lib/haven-res.jar — this also RESOLVES the
+  ["oven"], decoded from lib/haven-res.jar  -  this also RESOLVES the
   "build-menu action verb" open question below; the verb is per-object,
   not a shared "build" verb). `act("oven")` drives the mapview `place`
   uimsg (resname, ver=1, ontile, [radius]); the client ghost answers
@@ -329,14 +336,15 @@ Server implementation notes (this repo, session 60):
   unit-tested against the doc formulas.
 - Registry this session: oven (stone x2 + branch x1, HP 1200, station)
   and smelter (stone x6 + branch x4, HP 2500, plain structure until the
-  metal chain exists). DEVIATION: legacy oven demand is Brick x45 and
-  smelter Brick x35 + Stone x10 + Bar of Hard Metal x3; this server's
-  item economy cannot produce bricks/bars yet, so demands use the
-  obtainable stone/branch pair. Revisit when the metal chain lands.
+  metal chain exists). DEVIATION (half-resolved): legacy oven demand is
+  Brick x45 and smelter Brick x35 + Stone x10 + Bar of Hard Metal x3;
+  bricks became craftable when the S70 kiln landed, but the oven and
+  smelter keep the stone/branch substitute demands pending a balance
+  pass - revisit deliberately.
 - Station (oven) behavior: fuel via itemact (branch; one unit per
   delivery, delivered-fuel average tracked), single input slot via
   itemact (any craft::ROAST_MAP raw meat label; legacy had four dough
-  slots — one slot is server policy), Light/Extinguish through the
+  slots  -  one slot is server policy), Light/Extinguish through the
   flower menu on the station gob, 8-tick (0.8 s) job at the 10 Hz tick,
   one fuel unit burned per job, output drops beside the station (legacy
   used an internal inventory widget; ground-drop output is server
@@ -350,8 +358,7 @@ Server implementation notes (this repo, session 60):
   quality, fuel bookkeeping, loaded input, progress). Half-built plans
   and station fuel/input survive restarts; v2 saves stay readable.
 
-## Server implementation notes (this repo, session 46)
-
+### Server implementation notes (this repo, session 46)
 - **Tool requirement plumbing**: `Recipe` carries an optional `tool`
   resource name enforced in `craft_once` BEFORE the consume pass - the
   tool must sit in the crafter's inventory or any equipment slot, and
@@ -406,8 +413,7 @@ Server implementation notes (this repo, session 60):
     the saw and the crafted-saw bucket; the cargo unit battery covers
     the tanhide/leather/lboots quality math end to end.
 
-## Server implementation notes (this repo, session 66: metal chain groundwork)
-
+### Server implementation notes (this repo, session 66: metal chain groundwork)
 - **Ore source: ore deposits on the rocky belt.** MOUNTAIN/CAVE tiles
   with a walkable 4-neighbor spawn `gfx/terobjs/mining/heap` ore
   deposits (3% roll); each deposit carries Copper/Tin/Iron
@@ -439,6 +445,156 @@ Server implementation notes (this repo, session 60):
   `scripts/test_smelt.py` drives ore pick -> smelter build/fuel/load/
   light -> bar -> (iron leg) wrought iron; unit pins cover the smelt
   map, the recipe wiring and the end-to-end softcap math.
+
+### Server implementation notes (this repo, session 71: baking chain)
+- **Baking chain (verified live end to end, `test_bake.py`).** Mature
+  wheat yields Grist of Wheat (the 2009 pack ships no grain item;
+  sprout/grist/malt only - recorded in the farming doc). The quern
+  (Legacy:Quern; appended LAST to the buildable registry, Stone x2 +
+  Branch x2 demand) is a FUEL-LESS production station: the menu verb
+  is "Grind" instead of "Light", the fuel gate skips it entirely, a
+  15-tick job grinds one Grist of Wheat unit into one Flour. The oven
+  gained BAKE_MAP: a Bread Dough label bakes into Bread (own
+  resource), checked before the meat roast map. The dough hand recipe
+  (paginae/craft/dough ships): Flour x2 + Bucket of Water -> Dough x2
+  + the empty bucket back (1:1 flour-to-dough mass balance is server
+  policy). Water enters the economy through the bucket-fill itemact
+  (items domain). Legacy had four dough slots per oven; the single
+  input slot stays server policy (session-15 note above).
+- **Display labels are station contracts.** Every station input gate
+  matches the cursor stack's display label against the kind's map
+  keys (BAKE_MAP / GRIND_MAP / KILN_MAP / SMELT_MAP). Crafted stacks
+  shipped an EMPTY label, so the hand-kneaded Bread Dough was
+  rejected at the oven ("The station cannot process that.") - the
+  live probe caught it. Fix (58c8776): `craft_once` labels the
+  PRIMARY output with the recipe's display name (all 38 recipe names
+  are the product display names); multi-output byproducts (the dough
+  recipe's returned bucket) keep the empty label and the client falls
+  back to the resource name. Lesson recorded: any new stack producer
+  must set a display label when the stack can become a station input.
+- **Drop world shapes for milled grain.** The pack ships flour/grist
+  inventory icons but no terobjs world shapes; both render through
+  the seed-bag silhouette (DROP_WORLD_ALIASES -> gfx/terobjs/items/
+  bag-seed), the same fallback policy as bronze -> copper.
+- **Reach policy gap (open).** The bucket-fill itemact keys on the
+  tile under the click with no player-distance check; the legacy
+  client surely enforced adjacency client-side, but a server-side
+  reach policy for itemacts is not implemented (see Open questions).
+- **Tool-gate refusal names the display name (session 72).** The
+  missing-tool refusal used to interpolate the raw resource path
+  ("You need the gfx/invobjs/saw to make that."); it now names the
+  producing recipe's display name ("You need the Saw to make that.")
+  - consistent with the display-label string policy above. The wire
+  tier pins the exact refusal line (craft_flow
+  ..._enforces_the_tool_gate) plus the whole saw/bucket hand-craft
+  shape from the starter kit; the white-box battery pins the oven
+  bake contract (label gate, fuel gate, FUEL_PER_JOB burn, the
+  BAKE_MAP output drop) and the quern's fuel-gate skip on the real
+  itemact/menu/tick paths.
+
+### Server implementation notes (this repo, session 77: the sausage chain)
+- **The sausages branch (verified live, the one-off `s77_live_wurst`
+  probe).** Twelve of the thirteen shipped `paginae/craft/wurst-*` pages
+  become hand recipes (ad `craft|wurst_<id>`; the login paginae push
+  picks them up from RECIPES unchanged, the `sausages` root stays
+  server-side-only like the other category pages). Per-wurst meat
+  pairing: Fox Wurst/Fox Fuet <- Fox Meat, Boar Baloney/Boar Boudin <-
+  Boar Meat, Cow Chorizo <- Beef, Delicious Deer Dog <- Raw Deer Meat,
+  Bear Salami/Big Bear Banger <- Bear Meat, Lamb Sausages <- Raw
+  Mutton, Running Rabbit Sausage <- Rabbit Meat; Tame Game Liverwurst
+  blends Beef + Raw Mutton (the doc's "tame game"), Wonderful
+  Wilderness Wurst blends Bear + Deer (the doc's "wonderful
+  wilderness"). Softcap: Cooking caps Perception, matching the dough
+  entry; the equal per-type weights [1, 1] mirror the bow's rule.
+  fep.conf carries a FEP row for every implemented label - all twelve
+  eat (the `Chicken Chorizo` and `Bierwurst` keys have no item
+  resource in the pack and stay unimplemented).
+- **Raw meat is ONE resource; the label is the species.** Every raw
+  meat rides `gfx/invobjs/meat` and is told apart by the stack's
+  display label (`state::Species::meat_label`). The generic
+  `(resource, count)` recipe input therefore cannot express "Fox Meat
+  only" - a Fox Wurst would happily grind Beef. Fix: the wurst recipes'
+  meat inputs key on `craft::WURST_MEAT_SLOTS` (per-recipe
+  `(label, count)` slots that replace the generic meat input); both
+  validation and the lowest-quality-first consumption go per label,
+  and the refusal names the missing label ("You need the Fox Meat for
+  that."), consistent with the session-72 display-name policy. The
+  slot counts must sum to the recipe's meat input (unit-pinned).
+- **Casings enter the economy.** Intestines (`gfx/invobjs/intestines`)
+  follow the doc's butcher table verbatim: Aurochs/Cattle/Bear x4,
+  Deer x3, Boar/Sheep x2, Fox x1 (the mouflon row is undocumented -
+  policy 1; Wolf/Hare/Hen drop none per their doc rows). The bear and
+  the hen join the wild roster as the missing meat sources (Bear Meat
+  x8 + the raw bear hide; Raw Chicken Meat + Chicken Feather x3 per
+  the doc rows; the pack ships full `kritter/bear` and `kritter/hen`
+  pose sets - verified in the jar). `Piglet Wursts` stays
+  unimplemented: Raw Pork has no source until the pig morph ships
+  (the pack ships no pig kritter).
+
+### Server implementation notes (this repo, session 81: the dough ingredient chains)
+- **The five dough recipes close the baking breadth.** The pack
+  already shipped every dough ingredient icon and every dough pagina
+  (apdough, dough_blueberrypie, hbdough, rbcdough, dough_pirozhki -
+  2009 jar entries); the oven's BAKE_MAP has awaited inputs since
+  S79. Recipes: Apple Pie Dough (flour x2 + bucket-water + apple x2 +
+  butter -> dough x2 + bucket back), Blueberry Pie Dough (blueberry
+  x3, no butter), Honeybun Dough (bucket-water + bucket-honey ->
+  dough x2 + TWO empty buckets), Raisin Butter-cake Dough (raisins x2
+  + butter), Pirozhki Dough (chantrelles x2 + onion x2). All
+  Cooking/Per-softcapped ("per"), flour-and-water base invariant, and
+  every output label keys BAKE_MAP. Ratios are server policy where
+  the legacy pages record none (RoB Legacy lists ingredients without
+  counts for the pies); the ccdough precedent (x2 fruit + x1 butter)
+  is the shape.
+- **The forageable world (deviation from legacy foraging).** Legacy
+  gates forageable visibility behind Per*Exp base levels (B/2 .. 2B
+  "First Seen"/"All Seen" - see the farming doc); this server spawns
+  forageables as plain visible statics with NO visibility gating
+  (skill economy still young; the deviation is recorded here and in
+  the farming doc's implementation notes). Registry
+  `state::ForageKind`: Blueberries (forest/heath - the legacy terrain
+  binding), Chantrelles (forest), Grapes off wild grapevines
+  (gfx/terobjs/plants/wine), Yellow Onion (grass meadow - the
+  pirozhki chain's own seed source; the legacy seed ladder runs
+  through WWW drying, which this server does not model). One pick =
+  one FORAGE_YIELD (3) handful in a single multi-unit Drop gob, then
+  the plant is consumed (legacy forageables are single-pick).
+- **Apple trees.** Legacy runs a 7-stage lifecycle (Legacy:Apple_Tree;
+  stage 6 yields Apples + Branches). Server policy: the broadleaf
+  spawn table gains an apple-tree band (gfx/terobjs/trees/appletree);
+  `Kind::FruitTree` yields APPLE_PICKS (5) apple picks (one Apple drop
+  each, then degrades to a plain branch-yielding tree - the legacy
+  stage-6 tree yields both). The Chop act rides the same relay
+  contract as trees.
+- **Wild beehives.** gfx/terobjs/bhive statics on broadleaf forest
+  (server policy - legacy hives are player-built for pollination; see
+  the farming doc's "Beehives accelerate crops"). HONEY harvest is
+  bucket-gated exactly like the session-47 milking flow: the picker
+  must hold one empty bucket, the hive fills it (Bucket of Honey,
+  HIVE_HONEY_UNITS=3 per hive, hive is a permanent fixture). Guest
+  nodes publish the hive as a no-act Structure (the bucket check
+  lives on the home node - same cross-node state as the S62 guest
+  trough).
+- **Raisins: the hand-recipe deviation.** Legacy dries grapes on a
+  drying frame over two in-game days; this server keeps the chain
+  playable with the S79 butter precedent: a hand recipe (grapes x2 ->
+  raisins x1, Per-softcapped, fork pagina paginae/craft/raisins
+  parented into the baking family). The pack ships the raisins icon
+  (2009) but no pagina - `make_fork_paginae.py` composes it, and the
+  script now resolves the parent's REAL on-disk version into the
+  AButton layer (the session-80 "Wrong res version" root cause made
+  a hardcoded parent_ver=1 untrustworthy; fix_gameres_parent_refs.py
+  --check stays the pack-side guard, stale=0 over 6385 resources).
+- **Multi-unit drops.** `Kind::Drop` grew a `count` field: one pickup
+  grants the whole stack (serde default 1 - persisted queues and
+  fixtures unchanged). Forage handfuls are the first user; every
+  classic drop stays count=1. The cross-node relay carries the count
+  through `DropView` and `StaticStack`.
+- **World sprites for the new items.** Blueberries ship no terobjs
+  shape; the drop renders through the mulberry silhouette
+  (DROP_WORLD_ALIASES, the bronze->copper fallback policy). The
+  forage sdt byte is the verified-valid growth frame per plant code
+  (0 universal, 1 the onion crop's own proven harvest stage).
 
 ## Open questions
 
@@ -514,156 +670,3 @@ Server implementation notes (this repo, session 60):
   against Legacy:Sausages / Legacy:Wurst pages when reachable. The
   intestines yield per species follows the doc's butcher table
   verbatim (see the animals doc session-77 note).
-
-## Server implementation notes (this repo, session 71: baking chain)
-
-- **Baking chain (verified live end to end, `test_bake.py`).** Mature
-  wheat yields Grist of Wheat (the 2009 pack ships no grain item;
-  sprout/grist/malt only - recorded in the farming doc). The quern
-  (Legacy:Quern; appended LAST to the buildable registry, Stone x2 +
-  Branch x2 demand) is a FUEL-LESS production station: the menu verb
-  is "Grind" instead of "Light", the fuel gate skips it entirely, a
-  15-tick job grinds one Grist of Wheat unit into one Flour. The oven
-  gained BAKE_MAP: a Bread Dough label bakes into Bread (own
-  resource), checked before the meat roast map. The dough hand recipe
-  (paginae/craft/dough ships): Flour x2 + Bucket of Water -> Dough x2
-  + the empty bucket back (1:1 flour-to-dough mass balance is server
-  policy). Water enters the economy through the bucket-fill itemact
-  (items domain). Legacy had four dough slots per oven; the single
-  input slot stays server policy (session-15 note above).
-- **Display labels are station contracts.** Every station input gate
-  matches the cursor stack's display label against the kind's map
-  keys (BAKE_MAP / GRIND_MAP / KILN_MAP / SMELT_MAP). Crafted stacks
-  shipped an EMPTY label, so the hand-kneaded Bread Dough was
-  rejected at the oven ("The station cannot process that.") - the
-  live probe caught it. Fix (58c8776): `craft_once` labels the
-  PRIMARY output with the recipe's display name (all 38 recipe names
-  are the product display names); multi-output byproducts (the dough
-  recipe's returned bucket) keep the empty label and the client falls
-  back to the resource name. Lesson recorded: any new stack producer
-  must set a display label when the stack can become a station input.
-- **Drop world shapes for milled grain.** The pack ships flour/grist
-  inventory icons but no terobjs world shapes; both render through
-  the seed-bag silhouette (DROP_WORLD_ALIASES -> gfx/terobjs/items/
-  bag-seed), the same fallback policy as bronze -> copper.
-- **Reach policy gap (open).** The bucket-fill itemact keys on the
-  tile under the click with no player-distance check; the legacy
-  client surely enforced adjacency client-side, but a server-side
-  reach policy for itemacts is not implemented (see Open questions).
-- **Tool-gate refusal names the display name (session 72).** The
-  missing-tool refusal used to interpolate the raw resource path
-  ("You need the gfx/invobjs/saw to make that."); it now names the
-  producing recipe's display name ("You need the Saw to make that.")
-  - consistent with the display-label string policy above. The wire
-  tier pins the exact refusal line (craft_flow
-  ..._enforces_the_tool_gate) plus the whole saw/bucket hand-craft
-  shape from the starter kit; the white-box battery pins the oven
-  bake contract (label gate, fuel gate, FUEL_PER_JOB burn, the
-  BAKE_MAP output drop) and the quern's fuel-gate skip on the real
-  itemact/menu/tick paths.
-
-## Server implementation notes (this repo, session 77: the sausage chain)
-
-- **The sausages branch (verified live, the one-off `s77_live_wurst`
-  probe).** Twelve of the thirteen shipped `paginae/craft/wurst-*` pages
-  become hand recipes (ad `craft|wurst_<id>`; the login paginae push
-  picks them up from RECIPES unchanged, the `sausages` root stays
-  server-side-only like the other category pages). Per-wurst meat
-  pairing: Fox Wurst/Fox Fuet <- Fox Meat, Boar Baloney/Boar Boudin <-
-  Boar Meat, Cow Chorizo <- Beef, Delicious Deer Dog <- Raw Deer Meat,
-  Bear Salami/Big Bear Banger <- Bear Meat, Lamb Sausages <- Raw
-  Mutton, Running Rabbit Sausage <- Rabbit Meat; Tame Game Liverwurst
-  blends Beef + Raw Mutton (the doc's "tame game"), Wonderful
-  Wilderness Wurst blends Bear + Deer (the doc's "wonderful
-  wilderness"). Softcap: Cooking caps Perception, matching the dough
-  entry; the equal per-type weights [1, 1] mirror the bow's rule.
-  fep.conf carries a FEP row for every implemented label - all twelve
-  eat (the `Chicken Chorizo` and `Bierwurst` keys have no item
-  resource in the pack and stay unimplemented).
-- **Raw meat is ONE resource; the label is the species.** Every raw
-  meat rides `gfx/invobjs/meat` and is told apart by the stack's
-  display label (`state::Species::meat_label`). The generic
-  `(resource, count)` recipe input therefore cannot express "Fox Meat
-  only" - a Fox Wurst would happily grind Beef. Fix: the wurst recipes'
-  meat inputs key on `craft::WURST_MEAT_SLOTS` (per-recipe
-  `(label, count)` slots that replace the generic meat input); both
-  validation and the lowest-quality-first consumption go per label,
-  and the refusal names the missing label ("You need the Fox Meat for
-  that."), consistent with the session-72 display-name policy. The
-  slot counts must sum to the recipe's meat input (unit-pinned).
-- **Casings enter the economy.** Intestines (`gfx/invobjs/intestines`)
-  follow the doc's butcher table verbatim: Aurochs/Cattle/Bear x4,
-  Deer x3, Boar/Sheep x2, Fox x1 (the mouflon row is undocumented -
-  policy 1; Wolf/Hare/Hen drop none per their doc rows). The bear and
-  the hen join the wild roster as the missing meat sources (Bear Meat
-  x8 + the raw bear hide; Raw Chicken Meat + Chicken Feather x3 per
-  the doc rows; the pack ships full `kritter/bear` and `kritter/hen`
-  pose sets - verified in the jar). `Piglet Wursts` stays
-  unimplemented: Raw Pork has no source until the pig morph ships
-  (the pack ships no pig kritter).
-
-## Server implementation notes (this repo, session 81: the dough ingredient chains)
-
-- **The five dough recipes close the baking breadth.** The pack
-  already shipped every dough ingredient icon and every dough pagina
-  (apdough, dough_blueberrypie, hbdough, rbcdough, dough_pirozhki -
-  2009 jar entries); the oven's BAKE_MAP has awaited inputs since
-  S79. Recipes: Apple Pie Dough (flour x2 + bucket-water + apple x2 +
-  butter -> dough x2 + bucket back), Blueberry Pie Dough (blueberry
-  x3, no butter), Honeybun Dough (bucket-water + bucket-honey ->
-  dough x2 + TWO empty buckets), Raisin Butter-cake Dough (raisins x2
-  + butter), Pirozhki Dough (chantrelles x2 + onion x2). All
-  Cooking/Per-softcapped ("per"), flour-and-water base invariant, and
-  every output label keys BAKE_MAP. Ratios are server policy where
-  the legacy pages record none (RoB Legacy lists ingredients without
-  counts for the pies); the ccdough precedent (x2 fruit + x1 butter)
-  is the shape.
-- **The forageable world (deviation from legacy foraging).** Legacy
-  gates forageable visibility behind Per*Exp base levels (B/2 .. 2B
-  "First Seen"/"All Seen" - see the farming doc); this server spawns
-  forageables as plain visible statics with NO visibility gating
-  (skill economy still young; the deviation is recorded here and in
-  the farming doc's implementation notes). Registry
-  `state::ForageKind`: Blueberries (forest/heath - the legacy terrain
-  binding), Chantrelles (forest), Grapes off wild grapevines
-  (gfx/terobjs/plants/wine), Yellow Onion (grass meadow - the
-  pirozhki chain's own seed source; the legacy seed ladder runs
-  through WWW drying, which this server does not model). One pick =
-  one FORAGE_YIELD (3) handful in a single multi-unit Drop gob, then
-  the plant is consumed (legacy forageables are single-pick).
-- **Apple trees.** Legacy runs a 7-stage lifecycle (Legacy:Apple_Tree;
-  stage 6 yields Apples + Branches). Server policy: the broadleaf
-  spawn table gains an apple-tree band (gfx/terobjs/trees/appletree);
-  `Kind::FruitTree` yields APPLE_PICKS (5) apple picks (one Apple drop
-  each, then degrades to a plain branch-yielding tree - the legacy
-  stage-6 tree yields both). The Chop act rides the same relay
-  contract as trees.
-- **Wild beehives.** gfx/terobjs/bhive statics on broadleaf forest
-  (server policy - legacy hives are player-built for pollination; see
-  the farming doc's "Beehives accelerate crops"). HONEY harvest is
-  bucket-gated exactly like the session-47 milking flow: the picker
-  must hold one empty bucket, the hive fills it (Bucket of Honey,
-  HIVE_HONEY_UNITS=3 per hive, hive is a permanent fixture). Guest
-  nodes publish the hive as a no-act Structure (the bucket check
-  lives on the home node - same cross-node state as the S62 guest
-  trough).
-- **Raisins: the hand-recipe deviation.** Legacy dries grapes on a
-  drying frame over two in-game days; this server keeps the chain
-  playable with the S79 butter precedent: a hand recipe (grapes x2 ->
-  raisins x1, Per-softcapped, fork pagina paginae/craft/raisins
-  parented into the baking family). The pack ships the raisins icon
-  (2009) but no pagina - `make_fork_paginae.py` composes it, and the
-  script now resolves the parent's REAL on-disk version into the
-  AButton layer (the session-80 "Wrong res version" root cause made
-  a hardcoded parent_ver=1 untrustworthy; fix_gameres_parent_refs.py
-  --check stays the pack-side guard, stale=0 over 6385 resources).
-- **Multi-unit drops.** `Kind::Drop` grew a `count` field: one pickup
-  grants the whole stack (serde default 1 - persisted queues and
-  fixtures unchanged). Forage handfuls are the first user; every
-  classic drop stays count=1. The cross-node relay carries the count
-  through `DropView` and `StaticStack`.
-- **World sprites for the new items.** Blueberries ship no terobjs
-  shape; the drop renders through the mulberry silhouette
-  (DROP_WORLD_ALIASES, the bronze->copper fallback policy). The
-  forage sdt byte is the verified-valid growth frame per plant code
-  (0 universal, 1 the onion crop's own proven harvest stage).
