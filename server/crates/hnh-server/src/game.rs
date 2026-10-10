@@ -1218,6 +1218,11 @@ enum AnimalAction {
     /// ±550 scatter that bounded through the player and starved the
     /// fight's swing cadence of its 33-subtile reach).
     Flee((i32, i32)),
+    /// Aggro-leash surrender (session 83): the aggressor is past
+    /// AGGRO_GIVEUP from its home anchor (or already walking back) and
+    /// heads home. The payload is the home position; the serial apply
+    /// phase tears down any live duel it still holds.
+    Return((i32, i32)),
     Wander,
     Idle,
 }

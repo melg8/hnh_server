@@ -287,6 +287,22 @@ impl Game {
         let perception = if saturated { 1500 } else { 400 };
         let aggro = if saturated { 900 } else { 300 };
         let (ax, ay) = world.gobs.pos[slot];
+        // Aggro leash (session 83): a chase NEVER outlives
+        // AGGRO_GIVEUP subtiles of ground between the aggressor and its
+        // home anchor, and a surrendered beast walks back before it may
+        // re-aggro. Without this a boar that catches a tamer mid-approach
+        // shadows the player forever (its 55 subt/s beats the 50 run
+        // gait) and the one-Fightview rule then keeps the forced duel
+        // alive for minutes - the live dairy probe never got its own
+        // fight window back. The anchor is spawn-time state; old saves
+        // and guest transfers default to "where I stand" (never leashed).
+        let leashed = if species.aggressive() {
+            let home = world.animal_home.get(id).copied().unwrap_or((ax, ay));
+            let home_d = (ax - home.0).abs() + (ay - home.1).abs();
+            home_d >= AGGRO_GIVEUP || world.animal_surrender.contains(id)
+        } else {
+            false
+        };
         let mut nearest: Option<(GobId, i32)> = None;
         for p in &world.players {
             if let Some(pslot) = world.gobs.get(p.gob) {
@@ -298,6 +314,12 @@ impl Game {
             }
         }
         let action = match nearest {
+            // The leash pass wins over a fresh aggro: a player stepping
+            // into the surrender march does not restart the chase.
+            _ if leashed => {
+                let home = world.animal_home.get(id).copied().unwrap_or((ax, ay));
+                AnimalAction::Return(home)
+            }
             Some((pgob, dist)) if species.aggressive() && dist < aggro => AnimalAction::Chase(pgob),
             Some((pgob, dist)) if !species.aggressive() && dist < 200 => {
                 // Directional panic (session 83): hop straight AWAY from
@@ -390,6 +412,48 @@ impl Game {
                 // the threat (small while fighting, long while grazing);
                 // the serial phase only adds it to the current position.
                 (sx + step.0, sy + step.1)
+            }
+            AnimalAction::Return((hx, hy)) => {
+                // Aggro-leash surrender march (session 83). The
+                // hysteresis set holds the beast non-aggressive for the
+                // whole walk back; a duel it still holds is torn down
+                // HERE - server side - so the player is released the
+                // moment the chaser gives up (fight_del closes the
+                // fightview; the one-Fightview gate then lets the
+                // player's own click open their wanted fight again).
+                self.world.animal_surrender.insert(id);
+                let home_d = (sx - hx).abs() + (sy - hy).abs();
+                if home_d <= crate::state::AGGRO_ARRIVED {
+                    // Back inside the home circle: stand down, the set
+                    // release re-arms normal aggro.
+                    self.world.animal_surrender.remove(&id);
+                    return;
+                }
+                let duel_live = self.world.animal_fights.remove(&id).is_some()
+                    || self
+                        .world
+                        .players
+                        .iter()
+                        .any(|p| p.fight_target == Some(id));
+                if duel_live {
+                    // O(players) on a rare event; the DISENGAGE teardown
+                    // is the same triple (target, row, widget).
+                    if let Some(pidx) = self
+                        .world
+                        .players
+                        .iter()
+                        .position(|p| p.fight_target == Some(id))
+                    {
+                        let sid = self.world.players[pidx].session;
+                        self.world.players[pidx].fight_target = None;
+                        self.fight_del(sid, id);
+                        info!(
+                            target = id,
+                            "aggro leash: the chase is surrendered, the duel torn down"
+                        );
+                    }
+                }
+                (hx, hy)
             }
             AnimalAction::Wander => {
                 let jx = (self.world.next_ai_rand(15) - 7) * 22;
@@ -1408,6 +1472,8 @@ impl Game {
         self.broadcast_retract(target);
         self.world.animal_gobs.retain(|&g| g != target);
         self.world.animal_fights.remove(&target);
+        self.world.animal_home.remove(&target);
+        self.world.animal_surrender.remove(&target);
         self.world.guest_attackers.remove(&target);
         if let Some(pidx) = self.world.players.iter().position(|p| p.gob == tame.tamer) {
             let sid = self.world.players[pidx].session;
@@ -1523,6 +1589,8 @@ impl Game {
             self.broadcast_retract(target);
             self.world.animal_gobs.retain(|&g| g != target);
             self.world.animal_fights.remove(&target);
+            self.world.animal_home.remove(&target);
+            self.world.animal_surrender.remove(&target);
             for (res, count, label) in species.loot() {
                 for _ in 0..count {
                     self.spawn_drop_near(pos, res, 10, label);
@@ -1594,6 +1662,8 @@ impl Game {
             self.broadcast_retract(target);
             self.world.animal_gobs.retain(|&g| g != target);
             self.world.animal_fights.remove(&target);
+            self.world.animal_home.remove(&target);
+            self.world.animal_surrender.remove(&target);
             self.world.guest_attackers.remove(&target);
             for (res, count, label) in species.loot() {
                 for _ in 0..count {

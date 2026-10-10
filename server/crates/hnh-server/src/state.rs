@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use hnh_world::tile;
 
-use crate::fxhash::FxHashMap;
+use crate::fxhash::{FxHashMap, FxHashSet};
 use crate::resources::ResTable;
 
 pub const TICK_HZ: u64 = 10;
@@ -1256,6 +1256,15 @@ pub const INTENSITY_PER_BLOW: i32 = 2500;
 /// (POLICY: a hot battle cools in ~7 s of no blows).
 pub const INTENSITY_DECAY: i32 = 250;
 
+/// Aggro-leash give-up distance (session 83; POLICY: the wiki keeps no
+/// legacy number - a chase feels "won" by escape after a good sprint).
+/// An aggressor this far (Manhattan, subtiles) from its home anchor
+/// stops chasing, tears down its duel and walks home. ~55 tiles.
+pub const AGGRO_GIVEUP: i32 = 600;
+/// A surrendered aggressor is "home" again inside this radius of its
+/// anchor and may re-aggro (hysteresis that keeps the march back calm).
+pub const AGGRO_ARRIVED: i32 = 60;
+
 /// Taming progress for one animal (session 45; animals-and-husbandry.md
 /// taming service). Each successful Quell adds TAMENESS_PER_QUELL; at
 /// TAMENESS_FULL the animal is permanently tame (no more leash breaks).
@@ -1795,6 +1804,20 @@ pub struct World {
     pub animal_gobs: Vec<GobId>,
     /// Live animal engagements: offence/defence bars toward their target.
     pub animal_fights: FxHashMap<GobId, AnimalFight>,
+    /// Home anchor per aggressive animal (session 83: the aggro
+    /// leash). An aggressor spawns with one, chases only while it stays
+    /// inside AGGRO_GIVEUP of it, and surrenders beyond - an unleashed
+    /// chaser otherwise shadows the player forever (the live dairy
+    /// probe's boar held a forced duel for whole minutes of chase).
+    /// Runtime state: animals are not persisted, the anchor refills
+    /// from the seed on every grid (re)spawn.
+    pub animal_home: FxHashMap<GobId, (i32, i32)>,
+    /// Aggressors that surrendered a chase and are walking home. While
+    /// the id lives here the intent pass refuses a fresh aggro even
+    /// when a player wanders past (hysteresis: the beast must first
+    /// reach its home circle again) - otherwise a returning boar
+    /// re-aggros on every step of the way back.
+    pub animal_surrender: FxHashSet<GobId>,
     /// Growing crops by gob id (farming tick + harvest lookup).
     pub crops: FxHashMap<GobId, crate::farm::CropState>,
     /// Tile -> crop gob occupying it (one crop per tile).
@@ -2068,6 +2091,8 @@ impl World {
             by_session: HashMap::new(),
             animal_gobs: Vec::new(),
             animal_fights: FxHashMap::default(),
+            animal_home: FxHashMap::default(),
+            animal_surrender: FxHashSet::default(),
             crops: FxHashMap::default(),
             crop_at: HashMap::new(),
             tilth: HashMap::new(),
@@ -2366,6 +2391,8 @@ impl World {
                     species.speed(),
                 );
                 self.animal_gobs.push(id);
+                // The aggro-leash anchor: born where the beast spawns.
+                self.animal_home.insert(id, (px, py));
                 out.push(id);
                 break;
             }

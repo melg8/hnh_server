@@ -1175,6 +1175,10 @@ impl Game {
             self.world.gobs.kill(id);
             self.world.gobs.vis.insert(id, st.pos);
             self.world.animal_gobs.retain(|&a| a != id);
+            // The home anchor and surrender march are node-local AI
+            // state; the receiving node re-anchors on promote (below).
+            self.world.animal_home.remove(&id);
+            self.world.animal_surrender.remove(&id);
             // Tame rows never outlive local authority (the follow render
             // and AI skip are node-local; cross-node leashes are an open
             // MVP limitation recorded in the docs).
@@ -1633,6 +1637,12 @@ impl Game {
                 if !self.world.animal_gobs.contains(&id) {
                     self.world.animal_gobs.push(id);
                 }
+                // Re-anchor the aggro leash at the handoff point: the
+                // beast never carries home across the wire, so its
+                // chase budget restarts from the border (a beast that
+                // surrenders right after a transfer then walks back to
+                // the border, not to a foreign node's spawn).
+                self.world.animal_home.entry(id).or_insert(pos);
                 tracing::debug!(id, "animal authority claimed");
             }
             Kind::Drop { .. } => tracing::debug!(id, "drop authority claimed"),

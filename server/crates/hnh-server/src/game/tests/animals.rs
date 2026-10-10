@@ -1064,3 +1064,86 @@ async fn tamed_animals_persist_roundtrip() {
     assert_eq!(tameness, 40, "partial tameness survives");
     assert!(break_at > 0, "the leash window re-arms on load");
 }
+
+/// Session 83: the aggro leash. A boar that forces a duel on a player
+/// used to shadow them FOREVER - its 55 subt/s beats the 50 run gait,
+/// so the DISENGAGE axis never grows past 300 while the beast itself
+/// holds the gap, and the one-Fightview rule kept the forced duel (and
+/// the stolen fight window) alive for whole minutes of the live dairy
+/// probe. The leash: an aggressor past AGGRO_GIVEUP from its home
+/// anchor surrenders server-side - the duel is torn down (the player is
+/// RELEASED), and the beast walks home without re-aggroing (the
+/// surrender hysteresis), until it arrives back in its home circle.
+#[tokio::test]
+async fn aggro_leash_surrenders_the_chase_and_releases_the_duel() {
+    let (mut g, _rx, _raw) = entered_game("s83leash");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let boar = spawn_species_at(&mut g, pidx, 25, Species::Boar.max_hp(), Species::Boar);
+    let bslot = g.world.gobs.get(boar).unwrap();
+    let home = g.world.gobs.pos[bslot];
+    // The spawn anchor: the chase budget is measured from where the
+    // beast spawned (populate_animals fills this; the helper bypasses
+    // it, so the test plants it by hand).
+    g.world.animal_home.insert(boar, home);
+    // A live forced duel: the boar caught the player.
+    g.start_fight(1, boar, Species::Boar);
+    assert!(g.world.animal_fights.contains_key(&boar));
+    assert_eq!(g.world.players[pidx].fight_target, Some(boar));
+    // The player sprints the boar well past the give-up radius (the
+    // beast follows, so the PLAYER-beast gap stays small: only the
+    // HOME distance crosses the line).
+    let far = (home.0 + crate::state::AGGRO_GIVEUP + 100, home.1 + 20);
+    g.world.gobs.set_pos(bslot, far);
+    let pgob = g.world.players[pidx].gob;
+    let pslot = g.world.gobs.get(pgob).unwrap();
+    g.world.gobs.set_pos(pslot, (far.0 + 40, far.1)); // still in duel range
+    g.tick_animals();
+    assert_eq!(
+        g.world.players[pidx].fight_target, None,
+        "the surrender tears the forced duel down server-side"
+    );
+    assert!(
+        !g.world.animal_fights.contains_key(&boar),
+        "the fight row goes with it"
+    );
+    assert!(
+        g.world.animal_surrender.contains(&boar),
+        "the beast is in the surrender march (no fresh aggro)"
+    );
+    let mv = g.world.gobs.mv[bslot].expect("the boar walks home");
+    assert!(
+        (mv.tx - home.0).abs() + (mv.ty - home.1).abs() < 200,
+        "the march target is the home anchor, not the player"
+    );
+    // The hysteresis: a player standing RIGHT NEXT to the returning
+    // boar (well inside the 300 aggro circle) does not restart the
+    // chase - the walk home wins until the home circle is reached.
+    g.world.gobs.mv[bslot] = None; // let the intent pass run again
+    g.world.gobs.set_pos(pslot, (far.0 + 10, far.1)); // ~30 off the boar
+    g.tick_animals();
+    assert!(g.world.animal_surrender.contains(&boar));
+    assert!(
+        g.world.players[pidx].fight_target.is_none(),
+        "no re-aggro mid-march even at melee range"
+    );
+    // Arrived home: the set releases and normal aggro re-arms (the
+    // player is still inside the aggro circle - the boar may chase
+    // again; 200 off keeps it a CHASE, not an instant re-engage).
+    g.world.gobs.mv[bslot] = None;
+    g.world.gobs.set_pos(bslot, (home.0 + 30, home.1));
+    g.world.gobs.set_pos(pslot, (home.0 + 230, home.1));
+    g.tick_animals();
+    assert!(
+        !g.world.animal_surrender.contains(&boar),
+        "arrival releases the hysteresis"
+    );
+    // The release lands in the ARRIVAL tick's apply phase, so the fresh
+    // chase is the NEXT intent pass.
+    g.world.gobs.mv[bslot] = None;
+    g.tick_animals();
+    let mv = g.world.gobs.mv[bslot].expect("fresh aggro: the chase restarts");
+    assert!(
+        (mv.tx - (home.0 + 230)).abs() + (mv.ty - home.1).abs() < 100,
+        "the march target is the player again"
+    );
+}
