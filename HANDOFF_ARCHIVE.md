@@ -5775,3 +5775,69 @@ COMMITS: f183dee (dough: honeybun and pirozhki live), 904fd25
 (combat: one Fightview per player), be726b6 (e2e: the dairy probe
 tracks the fightview widget), 73e6cab (animals: the aggro leash -
 committed by the S84 continuation, recorded here as S83 work).
+
+## 2026-10-10 - Session 84 (type 4: the dairy e2e stabilization)
+
+SESSION TYPE ROTATION LOG: 81=3, 82=5, 83=3, 84=4. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: take the S83 dairy chain from "taming works, then the legs
+fall over" to one green end-to-end run - and fix each failure at
+its verified root cause (live-run traces + the server's own
+debug log), never by loosening the assert.
+
+DONE (five live-run failure shapes, eleven diary runs dairy1-11):
+
+- PURSUIT (dbg11 root cause): nav_walk's fixed pump schedule waits
+  1.2 s + d/50 per clicked segment while the walk takes d/50 - the
+  runner idles ~60% of every segment (measured ~18 subt/s < the
+  panicking cow's 30; distance oscillated 140-350 for a minute).
+  close_on_beast now re-aims at the beast's LIVE position every
+  0.25 s slice (each click restarts LinMove at full gait), BFS
+  waypoints around obstacles, and breaks a forced hostile duel
+  from inside the loop while it lives.
+- BUCKET ECONOMY: milk-draw consumes the single empty bucket; the
+  empty one returns ONLY at churn time (butter recipe) - so draw
+  and churn must alternate (all-draws-first starved draw 2 with
+  the honest server line "You need an empty bucket to milk a
+  cow."). Verified against
+  docs/mechanics/livestock/animals-and-husbandry.md.
+- RAISINS QUOTA: the recipe eats two grapes per one pack - the
+  leg now churns while the two-pack quota stands.
+- PLOWING: plow_tile accepts grass only (farming.rs) and the
+  mountain-side vines are not grass - walk_to_grass, then the
+  shared grass_tiles_near streamed-map spiral (which replaced the
+  fixed 5x5 sweeps of BOTH the wheat and carrot flows: a lone
+  grass pocket planted 1 of 5). Carrot maturity waits for wire
+  stage 4 (a 4-stage crop; the wheat flow's stage-3 wait hung
+  forever on a grown plant).
+- TREE EXHAUSTION: a tree caps at TREE_HARVESTS = 5 picks, the
+  next pick kills it for a Stump (gfx/terobjs/trees/log - the
+  old "stump" substring filter let the fruitless stump win the
+  nearest-tree race). gather_branches spends a fruitless tree and
+  takes the next nearest; find_any_tree skips log-stumps and a
+  caller skip-set.
+- TOOLING: ensure_server(log_path=...) lands RUST_LOG refusals in
+  target/dairy-server.log (the silent "plow refused"/"tree pick"
+  lines the client never sees).
+
+MEASURED/EVIDENCE: dairy11 live run - DAIRY: OK (chase ~6 s, quell
+x5 to Tameness 100, butter x3, planted 5 carrots + 5 wheat, grist
+7, apple pie + carrot cake + raisin butter-cake all baked q10 and
+eaten with the food uimsg). Gate green: fmt, clippy -D warnings,
+338 workspace tests (11 proto + 307 unit [2 ign] + 7 wire [1 ign]
++ 12 world) - the aggro-leash unit pin included.
+
+OPERATIONAL NOTE: long e2e runs survive a canceled tool call only
+when launched directly (no nohup/setsid wrapper); poll with short
+tail calls, never restart mid-run.
+
+NOT DONE / next session carries (S85 must NOT be type 4): GL e2e +
+Windows smoke of the fresh release binary; the multi-machine
+cluster profile; the vis delta-scan re-measure (gap #10b); CI push
+retry (the PAT still lacks the workflow scope); the remaining
+NOT-DONE dough legs from S79/S82 if any surface on a fresh world.
+
+COMMITS: 73e6cab (animals: the aggro leash - S83 work carried in
+this session's tree), 229ad0d (e2e: the dairy chain green), this
+handoff.

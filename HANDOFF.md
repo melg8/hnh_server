@@ -594,72 +594,6 @@ COMMITS: 18adc43 (dough: the pie leg live end to end), f18aac8
 batch own the tail), 6caa31f (perf: targeted retire), fe9388d
 (perf: zero-alloc finalizer records), this handoff.
 
-## 2026-10-10 - Session 84 (type 4: the dairy e2e stabilization)
-
-SESSION TYPE ROTATION LOG: 81=3, 82=5, 83=3, 84=4. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: take the S83 dairy chain from "taming works, then the legs
-fall over" to one green end-to-end run - and fix each failure at
-its verified root cause (live-run traces + the server's own
-debug log), never by loosening the assert.
-
-DONE (five live-run failure shapes, eleven diary runs dairy1-11):
-
-- PURSUIT (dbg11 root cause): nav_walk's fixed pump schedule waits
-  1.2 s + d/50 per clicked segment while the walk takes d/50 - the
-  runner idles ~60% of every segment (measured ~18 subt/s < the
-  panicking cow's 30; distance oscillated 140-350 for a minute).
-  close_on_beast now re-aims at the beast's LIVE position every
-  0.25 s slice (each click restarts LinMove at full gait), BFS
-  waypoints around obstacles, and breaks a forced hostile duel
-  from inside the loop while it lives.
-- BUCKET ECONOMY: milk-draw consumes the single empty bucket; the
-  empty one returns ONLY at churn time (butter recipe) - so draw
-  and churn must alternate (all-draws-first starved draw 2 with
-  the honest server line "You need an empty bucket to milk a
-  cow."). Verified against
-  docs/mechanics/livestock/animals-and-husbandry.md.
-- RAISINS QUOTA: the recipe eats two grapes per one pack - the
-  leg now churns while the two-pack quota stands.
-- PLOWING: plow_tile accepts grass only (farming.rs) and the
-  mountain-side vines are not grass - walk_to_grass, then the
-  shared grass_tiles_near streamed-map spiral (which replaced the
-  fixed 5x5 sweeps of BOTH the wheat and carrot flows: a lone
-  grass pocket planted 1 of 5). Carrot maturity waits for wire
-  stage 4 (a 4-stage crop; the wheat flow's stage-3 wait hung
-  forever on a grown plant).
-- TREE EXHAUSTION: a tree caps at TREE_HARVESTS = 5 picks, the
-  next pick kills it for a Stump (gfx/terobjs/trees/log - the
-  old "stump" substring filter let the fruitless stump win the
-  nearest-tree race). gather_branches spends a fruitless tree and
-  takes the next nearest; find_any_tree skips log-stumps and a
-  caller skip-set.
-- TOOLING: ensure_server(log_path=...) lands RUST_LOG refusals in
-  target/dairy-server.log (the silent "plow refused"/"tree pick"
-  lines the client never sees).
-
-MEASURED/EVIDENCE: dairy11 live run - DAIRY: OK (chase ~6 s, quell
-x5 to Tameness 100, butter x3, planted 5 carrots + 5 wheat, grist
-7, apple pie + carrot cake + raisin butter-cake all baked q10 and
-eaten with the food uimsg). Gate green: fmt, clippy -D warnings,
-338 workspace tests (11 proto + 307 unit [2 ign] + 7 wire [1 ign]
-+ 12 world) - the aggro-leash unit pin included.
-
-OPERATIONAL NOTE: long e2e runs survive a canceled tool call only
-when launched directly (no nohup/setsid wrapper); poll with short
-tail calls, never restart mid-run.
-
-NOT DONE / next session carries (S85 must NOT be type 4): GL e2e +
-Windows smoke of the fresh release binary; the multi-machine
-cluster profile; the vis delta-scan re-measure (gap #10b); CI push
-retry (the PAT still lacks the workflow scope); the remaining
-NOT-DONE dough legs from S79/S82 if any surface on a fresh world.
-
-COMMITS: 73e6cab (animals: the aggro leash - S83 work carried in
-this session's tree), 229ad0d (e2e: the dairy chain green), this
-handoff.
-
 ## 2026-10-10 - Session 85 (type 5: the vis delta-scan, gap #10b closed)
 
 SESSION TYPE ROTATION LOG: 82=5, 83=3, 84=4, 85=5. All six types
@@ -729,3 +663,77 @@ surface on a fresh world.
 COMMITS: 82ffc0f (perf: the vis delta-scan for a walking viewer,
 gap 10b - implementation + tests + load85.sh + the A/B numbers),
 this handoff.
+
+## 2026-10-10 - Session 86 (type 3: the multi-machine cluster profile)
+
+SESSION TYPE ROTATION LOG: 83=3, 84=4, 85=5, 86=3. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the long-carried "multi-machine cluster profile" - take the
+cluster machinery that existed (mesh, grid ownership, guests, cross-
+node relays - all verified in-process by unit tests and profiled by
+profile_multinode.sh) and give it the PRODUCT surface: one command to
+boot it, one command per machine for real multi-machine, and an e2e
+gate that proves the profile against two live node processes.
+
+DONE:
+
+- cluster-up.sh (server/scripts): `up` boots a local 2..4-node
+  cluster with the windows/start-cluster.bat port layout (node i =
+  auth 1871+2i, game 1870+4i, res 1872+4i, mesh 18790+i; node 0
+  keeps the client-facing defaults, so the Java client, run-client
+  and every existing probe work unchanged). `remote` boots ONLY this
+  machine's node from CLUSTER_SPEC=host:mesh,... + SELF=N - one copy
+  per machine, same seed; the rendezvous-hash grid ownership splits
+  the world across machines (the actual multi-machine deployment).
+  `stop`/`status` manage both modes; per-node shard saves
+  (save/cluster_n<i>.json) stay stable across restarts; readiness =
+  the UDP game shard listening (NOT "sessions=" - that line only
+  appears once clients connect, which silently broke the first boot
+  wait).
+- test_cluster.sh: the cluster e2e gate. Boots a fresh 2-node
+  cluster (throwaway saves in /tmp), then proves MESH (cluster dial
+  link up), WORLD ENTRY through node 0, GUEST WALK across
+  peer-owned cells (node-1 log: peer-subscribed x4, guest-ingested
+  x2), and CHARACTER MIGRATION. Verdict: CLUSTER E2E: OK (all legs
+  seen green in the final run).
+- probe_cluster_entry.py + hnhlib.WireClient(host, auth_port,
+  game_port): one client now drives a session through ANY node - the
+  migration leg enters through node 1's own ports (auth 1873 / game
+  1874). auth_cookie gained the host parameter.
+- THE MIGRATION FIX (root cause, not a retry loop): the first
+  re-entry attempt answered "char query: nack (missing or online)"
+  - the creation session was STILL LIVE on node 0 (UDP silence times
+  out only after 60 s). The probe now sends MSG_CLOSE (twice - UDP
+  is fire-and-forget): the server persists the character on
+  SessionClosed immediately, and the re-entry takes the CharQuery
+  path the same second. Evidence lines: node 0 "char query: serving
+  snapshot to peer", node 1 "char migration received: entering
+  world".
+- probe_guest_walk.py: stale port docstring (9801/9800) refreshed to
+  the real profile; scripts/README.md documents the new surface.
+
+MEASURED/EVIDENCE: CLUSTER E2E: OK - mesh links up (node1 dials,
+node0 accepts), WORLD ENTRY: OK, 4/4 walk legs arrived over
+peer-owned cells (subscribed=4, ingested=2 on node 1), migration
+served=1 received=1. Gate: 339 workspace tests green (Rust code
+untouched this session - python/bash surface only); the final run's
+full output in the session log.
+
+OPERATIONAL NOTES: a leftover single-node server (S85 smoke) held
+port 1872 and killed node 0's boot with "cannot bind resource http
+port" - cluster-up.sh stop + pid files now clean that class; check
+`pgrep -af hnh-server` before booting a cluster. Canceled tool calls
+still orphan the script wrappers (they finish themselves); poll with
+short sleeps.
+
+NOT DONE / next session carries (S87 must NOT be type 3): GL e2e +
+Windows smoke of the fresh release binary; CI push retry (the PAT
+still lacks the workflow scope); the remaining NOT-DONE dough legs
+from S79/S82 if any surface on a fresh world; a remote-CLUSTER_SPEC
+smoke on two loopback addresses (127.0.0.1 + 127.0.0.2) to exercise
+the remote code path end to end in the sandbox.
+
+COMMITS: 7cd65c1 (cluster: the multi-machine profile, one command -
+cluster-up.sh, test_cluster.sh, probe_cluster_entry.py, WireClient
+node binding, the MSG_CLOSE migration fix, README), this handoff.
