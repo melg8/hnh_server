@@ -987,6 +987,233 @@ async fn vis_cache_patches_stationary_session() {
     let _ = base.len();
 }
 
+/// Walk the viewer one delta step and prove the Delta path was taken:
+/// the delta counter grew and no full scan fired for this session.
+/// Returns the new viewer position for chained steps.
+fn delta_walk_step(
+    g: &mut Game,
+    pgob: crate::state::GobId,
+    from: (i32, i32),
+    d: (i32, i32),
+) -> (i32, i32) {
+    let before_delta = g.world.perf.vis_delta;
+    let before_full = g.world.perf.vis_skipped;
+    let to = (from.0 + d.0, from.1 + d.1);
+    let slot = g.world.gobs.get(pgob).unwrap();
+    g.world.gobs.set_pos(slot, to);
+    g.world.gobs.vis.reposition(pgob, to);
+    g.tick();
+    assert!(
+        g.world.perf.vis_delta > before_delta,
+        "the walking viewer must be served by the delta scan, not a full rescan"
+    );
+    assert_eq!(
+        g.world.perf.vis_skipped, before_full,
+        "no full scan may fire while the walk stays inside one VIEW_RADIUS"
+    );
+    to
+}
+
+/// Compare the session's cached result against a fresh full scan at
+/// the viewer's current position (sorted, deduped - the wire does not
+/// care about order, only membership).
+fn assert_cache_equals_full_scan(g: &Game, sid: SessionId, px: i32, py: i32) {
+    let mut cached = g
+        .sessions
+        .get(&sid)
+        .and_then(|o| o.vis_cache.clone())
+        .expect("the delta scan must leave a cache");
+    let mut fresh = Vec::new();
+    g.scan_visible_into(px, py, &mut fresh);
+    cached.sort_unstable();
+    cached.dedup();
+    fresh.sort_unstable();
+    fresh.dedup();
+    assert_eq!(
+        cached, fresh,
+        "the delta result must equal a full rescan at the new position"
+    );
+}
+
+/// Session 85 delta-scan exactness: a viewer that walks within one
+/// VIEW_RADIUS of its last scan is served by the Delta path (re-filter
+/// the cached ids by current positions + the strip cells the walk
+/// opened), and the result must EQUAL a full rescan at every step -
+/// including STATIC enterers that spawn inside the strip (cells no
+/// previous scan ever judged - the overlap-test trap the strip walks
+/// around), mover enterers the touched lists carry, leavers that walk
+/// out, and deaths.
+#[tokio::test]
+async fn vis_delta_scan_matches_full_scan_for_a_walking_viewer() {
+    let (mut g, _rx, _raw) = entered_game("visdelta");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    let pslot = g.world.gobs.get(pgob).unwrap();
+    let (px, py) = g.world.gobs.pos[pslot];
+    let drop_res = g.world.res.intern("gfx/terobjs/items/branch");
+
+    // Prime the cache: the entry ticks already scanned (Full).
+    assert!(g.sessions.get(&1).unwrap().vis_cache.is_some());
+
+    // Step 1: walk east past one CELL so the strip is a real column of
+    // never-judged cells, and seed it:
+    // - a STATIC enterer inside the strip (spawned after the last scan
+    //   at a cell the old square never fully covered),
+    // - a mover enterer that walked into the new square (touched),
+    // - a leaver that walked out (touched at its old cell),
+    // - a death of a previously cached gob.
+    let static_enterer = g.world.gobs.spawn(
+        Kind::Drop {
+            resname_idx: drop_res,
+            inv_res_idx: g.world.res.intern("gfx/invobjs/branch"),
+            ql: 10,
+            label: "StripBranch",
+            count: 1,
+        },
+        // The far edge of the NEW square: dx = +110 + 300 = +410 in
+        // range, but its CELL [250..500) is not embedded in the old
+        // square [-300..300] - a pure strip static.
+        (px + 400, py + 100),
+        drop_res,
+        1,
+        0,
+    );
+    let mover_enterer = g.world.gobs.spawn(
+        Kind::Drop {
+            resname_idx: drop_res,
+            inv_res_idx: g.world.res.intern("gfx/invobjs/branch"),
+            ql: 10,
+            label: "MoverBranch",
+            count: 1,
+        },
+        // Starts far outside the old square...
+        (px + 900, py - 900),
+        drop_res,
+        1,
+        0,
+    );
+    let leaver = g.world.gobs.spawn(
+        Kind::Drop {
+            resname_idx: drop_res,
+            inv_res_idx: g.world.res.intern("gfx/invobjs/branch"),
+            ql: 10,
+            label: "LeaverBranch",
+            count: 1,
+        },
+        (px - 100, py - 100),
+        drop_res,
+        1,
+        0,
+    );
+    let doomed = g.world.gobs.spawn(
+        Kind::Drop {
+            resname_idx: drop_res,
+            inv_res_idx: g.world.res.intern("gfx/invobjs/branch"),
+            ql: 10,
+            label: "DoomedBranch",
+            count: 1,
+        },
+        (px - 200, py + 200),
+        drop_res,
+        1,
+        0,
+    );
+    // Let the world see them once so they are in the cached result.
+    g.tick();
+    {
+        let vis = g.sessions.get(&1).unwrap();
+        assert!(vis.visible.contains(&leaver) && vis.visible.contains(&doomed));
+    }
+    // ...then the mover walks into the new square's edge.
+    let mslot = g.world.gobs.get(mover_enterer).unwrap();
+    g.world.gobs.set_pos(mslot, (px + 380, py + 200));
+    g.world
+        .gobs
+        .vis
+        .reposition(mover_enterer, (px + 380, py + 200));
+    // The leaver walks out of even the 2x hysteresis ring.
+    let lslot = g.world.gobs.get(leaver).unwrap();
+    g.world.gobs.set_pos(lslot, (px - 100, py - 1200));
+    g.world.gobs.vis.reposition(leaver, (px - 100, py - 1200));
+    // The doomed one dies (broadcast purges the visible set too).
+    g.world.gobs.kill(doomed);
+    g.broadcast_retract(doomed);
+
+    let pos = delta_walk_step(&mut g, pgob, (px, py), (110, 40));
+    assert_cache_equals_full_scan(&g, 1, pos.0, pos.1);
+    let sess = g.sessions.get(&1).unwrap();
+    assert!(
+        sess.visible.contains(&static_enterer),
+        "the strip static enterer must be spawned by the delta scan"
+    );
+    assert!(
+        sess.visible.contains(&mover_enterer),
+        "the touched mover enterer must be spawned by the delta scan"
+    );
+    assert!(
+        !sess.visible.contains(&doomed),
+        "the dead gob must be retracted"
+    );
+
+    // Step 2: keep walking (delta chains: the previous delta result is
+    // the new cache) - now north, with another strip static on the
+    // other axis and a fresh leaver.
+    let static2 = g.world.gobs.spawn(
+        Kind::Drop {
+            resname_idx: drop_res,
+            inv_res_idx: g.world.res.intern("gfx/invobjs/branch"),
+            ql: 10,
+            label: "NorthStrip",
+            count: 1,
+        },
+        (pos.0 - 250, pos.1 + 390),
+        drop_res,
+        1,
+        0,
+    );
+    let pos2 = delta_walk_step(&mut g, pgob, pos, (30, 120));
+    assert_cache_equals_full_scan(&g, 1, pos2.0, pos2.1);
+    assert!(
+        g.sessions.get(&1).unwrap().visible.contains(&static2),
+        "the north-walk strip static must be spawned too"
+    );
+
+    // Step 3: a quiet walk with nothing new - the delta path still
+    // equals a full rescan (pure re-filter correctness).
+    let pos3 = delta_walk_step(&mut g, pgob, pos2, (-90, -20));
+    assert_cache_equals_full_scan(&g, 1, pos3.0, pos3.1);
+}
+
+/// Beyond one VIEW_RADIUS of the last scan (teleport, grid handoff)
+/// the delta window is invalid: the full scan is the cheaper shape and
+/// must fire (vis_skipped grows, vis_delta does not).
+#[tokio::test]
+async fn vis_delta_falls_back_to_full_after_a_teleport() {
+    let (mut g, _rx, _raw) = entered_game("vistele");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    let pslot = g.world.gobs.get(pgob).unwrap();
+    let (px, py) = g.world.gobs.pos[pslot];
+    assert!(g.sessions.get(&1).unwrap().vis_cache.is_some());
+
+    let before_delta = g.world.perf.vis_delta;
+    let before_full = g.world.perf.vis_skipped;
+    // Teleport far beyond one VIEW_RADIUS (2x + margin).
+    let to = (px + 2 * crate::state::VIEW_RADIUS + 50, py);
+    g.world.gobs.set_pos(pslot, to);
+    g.world.gobs.vis.reposition(pgob, to);
+    g.tick();
+    assert_eq!(
+        g.world.perf.vis_delta, before_delta,
+        "a teleport must not take the delta path"
+    );
+    assert!(
+        g.world.perf.vis_skipped > before_full,
+        "a teleport must issue a full rescan"
+    );
+    assert_cache_equals_full_scan(&g, 1, to.0, to.1);
+}
+
 // ------------------------------------------------------------------
 // Session 31: cross-node crop harvest relay
 // ------------------------------------------------------------------

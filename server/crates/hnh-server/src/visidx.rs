@@ -232,6 +232,50 @@ impl VisIndex {
             }
         }
     }
+
+    /// Session 85 delta-scan strip: the gobs of every cell that
+    /// intersects the view square at the NEW position (px, py) but is
+    /// NOT fully embedded in the square the last scan covered (ox, oy).
+    /// A cell fully inside the old square cannot hold a static gob the
+    /// cached result missed - every point of it was in range at scan
+    /// time - while a cell that merely OVERLAPS the old square can (the
+    /// overlap test the naive strip would use skips those edge cells
+    /// and misses static enterers). Together with the touched lists
+    /// (which cover every mover, spawn and death) this is exactly the
+    /// candidate set a moved viewer must add to its re-filtered cache.
+    /// MAY CONTAIN ids that are out of range (cell buckets over-cover
+    /// the exact square) and duplicates - the caller filters and
+    /// dedups. Allocation-free: `out` is cleared first and refilled.
+    pub fn strip_in_view_into(
+        &self,
+        px: i32,
+        py: i32,
+        ox: i32,
+        oy: i32,
+        span: i32,
+        out: &mut Vec<GobId>,
+    ) {
+        out.clear();
+        let (cx0, cx1) = cell_range(px - span, px + span);
+        let (cy0, cy1) = cell_range(py - span, py + span);
+        let (old_x0, old_x1) = (ox - span, ox + span);
+        let (old_y0, old_y1) = (oy - span, oy + span);
+        for cy in cy0..=cy1 {
+            // This cell's y span [cy * CELL, (cy + 1) * CELL).
+            let cy_embedded = cy * CELL >= old_y0 && (cy + 1) * CELL <= old_y1;
+            for cx in cx0..=cx1 {
+                let cx_embedded = cx * CELL >= old_x0 && (cx + 1) * CELL <= old_x1;
+                if cx_embedded && cy_embedded {
+                    // Fully inside the old square: every static gob here
+                    // was already judged by the last scan.
+                    continue;
+                }
+                if let Some(v) = self.cells.get(&(cx, cy)) {
+                    out.extend_from_slice(v);
+                }
+            }
+        }
+    }
 }
 
 fn cell_range(lo: i32, hi: i32) -> (i32, i32) {

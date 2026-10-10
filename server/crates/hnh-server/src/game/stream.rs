@@ -4,6 +4,25 @@
 
 use super::*;
 
+/// The per-session visibility scan mode (session 85 delta-scan).
+/// Full = walk the view square's cells from scratch. Patch = the
+/// viewer did not move: keep the cached ids minus the touched
+/// leavers, add the touched enterers (every visibility-relevant
+/// change lands in the touched lists by construction, so an
+/// untouched cached id is provably still in range - no per-id
+/// position lookups on the hot path). Delta = the viewer moved
+/// within one VIEW_RADIUS of the last scan: re-filter the cached ids
+/// by current positions and add the strip cells the walk opened plus
+/// the touched enterers. Beyond that window (teleport, grid handoff)
+/// the full scan is the cheaper shape, and a touched set near the
+/// view population (a dense mover herd) flips any cached mode to
+/// Full.
+enum ScanKind {
+    Full,
+    Patch,
+    Delta,
+}
+
 impl Game {
     pub(super) fn on_mapreq(&mut self, sid: SessionId, gc: (i32, i32)) {
         // Track which grids this client holds (tile-mutation re-sends).
@@ -373,39 +392,50 @@ impl Game {
                 Some((*sid, self.world.gobs.pos[pslot]))
             })
             .collect();
-        // to_scan slot 4: true = Patch (cached), false = Full rescan.
-        let mut to_scan: Vec<(SessionId, (i32, i32), bool, bool)> = Vec::new();
+        // to_scan slot 4 (session 85): the scan mode per session -
+        // see ScanKind above scan_for_entry_into.
+        let mut to_scan: Vec<(SessionId, (i32, i32), bool, ScanKind)> = Vec::new();
         for (sid, (px, py)) in candidates {
             let cell = crate::visidx::cell_of(px, py);
             let cell_moved = self.sessions[&sid].vis_cell != Some(cell);
-            let cache_valid =
-                self.sessions[&sid].vis_cache_pos == Some((px, py)) && self.vis_cache_len(sid) > 0;
-            if !cache_valid {
-                // Position changed (or no cache yet): full rescan.
+            let cache_len = self.vis_cache_len(sid);
+            let cache_pos = self.sessions[&sid].vis_cache_pos;
+            let cache_valid = cache_pos == Some((px, py)) && cache_len > 0;
+            let delta_ok = !cache_valid
+                && cache_len > 0
+                && cache_pos.is_some_and(|(ox, oy)| {
+                    (px - ox).abs() <= VIEW_RADIUS && (py - oy).abs() <= VIEW_RADIUS
+                });
+            if !cache_valid && !delta_ok {
+                // No cache, or the last scan is too far away (teleport,
+                // grid handoff): full rescan.
                 self.world.perf.vis_skipped += 1; // full scans issued
                 if let Some(out) = self.sessions.get_mut(&sid) {
                     out.vis_cell = Some(cell);
                 }
-                to_scan.push((sid, (px, py), cell_moved, false));
+                to_scan.push((sid, (px, py), cell_moved, ScanKind::Full));
                 continue;
             }
-            // Size guard: patch work is proportional to the touched set.
-            // When it approaches the view population (a dense-mover view,
-            // e.g. a 1000-bot herd walking), a full rescan is cheaper than
-            // re-examining every touched id - cap the patch at 128.
+            // Size guard: cached-mode work is proportional to the
+            // touched set. When it approaches the view population (a
+            // dense-mover view, e.g. a 1000-bot herd walking), a full
+            // rescan is cheaper than re-examining every touched id -
+            // cap the patch/delta at 128.
             let touched_n = self
                 .world
                 .gobs
                 .vis
                 .touched_count_in_view(px, py, VIEW_RADIUS);
-            if touched_n > 0 && touched_n <= 128 {
-                // Position unchanged, few touched gobs in view: patch.
-                self.world.perf.vis_cached += 1;
+            if touched_n > 128 {
+                // Dense view: the cache exists but a full rescan wins.
+                self.world.perf.vis_skipped += 1;
                 if let Some(out) = self.sessions.get_mut(&sid) {
                     out.vis_cell = Some(cell);
                 }
-                to_scan.push((sid, (px, py), cell_moved, true));
-            } else if touched_n == 0 {
+                to_scan.push((sid, (px, py), cell_moved, ScanKind::Full));
+                continue;
+            }
+            if cache_valid && touched_n == 0 {
                 // Position unchanged, nothing touched in view: the
                 // result is provably unchanged. No candidate work this
                 // tick; the retract sweep keeps its own cadence.
@@ -417,14 +447,26 @@ impl Game {
                     self.retract_sweep_due(sid, px, py);
                 }
                 self.world.perf.visible_total += self.sessions[&sid].visible.len();
-            } else {
-                // Dense view: the cache exists but a full rescan wins.
-                self.world.perf.vis_skipped += 1;
-                if let Some(out) = self.sessions.get_mut(&sid) {
-                    out.vis_cell = Some(cell);
-                }
-                to_scan.push((sid, (px, py), cell_moved, false));
+                continue;
             }
+            if cache_valid {
+                self.world.perf.vis_cached += 1;
+            } else {
+                self.world.perf.vis_delta += 1;
+            }
+            if let Some(out) = self.sessions.get_mut(&sid) {
+                out.vis_cell = Some(cell);
+            }
+            to_scan.push((
+                sid,
+                (px, py),
+                cell_moved,
+                if cache_valid {
+                    ScanKind::Patch
+                } else {
+                    ScanKind::Delta
+                },
+            ));
         }
         // --- Phase A2: grid-owner-partitioned candidate scan (parallel
         // when multiple sessions are present). Scan indices group by the
@@ -616,24 +658,33 @@ impl Game {
     }
 
     /// Resolve one to_scan entry to its in-range list (Phase A2 helper,
-    /// pure read, rayon-friendly). Full = scan_visible; Patch = re-filter
-    /// the cached list by current positions and add touched enterers.
+    /// pure read, rayon-friendly). Full = scan_visible; Patch = keep the
+    /// cached ids minus the touched leavers, add the touched enterers;
+    /// Delta = the same plus the strip cells a short viewer walk opened.
     /// Allocation-free scan: writes the in-range id list into `out`
     /// (cleared first); `scratch` is a reusable buffer for the patch
     /// path's touched-id candidates. One (out, scratch) pair serves the
     /// whole scan pass per worker (perf-drain-reuse / mem-reuse-collections).
     fn scan_for_entry_into(
         &self,
-        e: &(SessionId, (i32, i32), bool, bool),
+        e: &(SessionId, (i32, i32), bool, ScanKind),
         out: &mut Vec<GobId>,
         scratch: &mut Vec<GobId>,
     ) {
-        // Slot 4: true = Patch (patch the cached result), false = Full.
-        // The cached list is BORROWED (read) - no per-tick clone on the
-        // hot path; all access here is immutable so rayon shares &self.
-        let (sid, (px, py), _moved, patch) = (e.0, e.1, e.2, e.3);
-        match self.sessions.get(&sid).and_then(|o| o.vis_cache.as_deref()) {
-            Some(cached) if patch => self.patch_vis_cache_into(px, py, cached, out, scratch),
+        let (sid, (px, py), _moved, kind) = (e.0, e.1, e.2, &e.3);
+        let sess = self.sessions.get(&sid);
+        match sess.and_then(|o| o.vis_cache.as_deref()) {
+            Some(cached) if matches!(kind, ScanKind::Patch) => {
+                self.patch_vis_cache_into(px, py, cached, out, scratch);
+            }
+            Some(cached) if matches!(kind, ScanKind::Delta) => {
+                match sess.and_then(|o| o.vis_cache_pos) {
+                    Some(origin) => {
+                        self.delta_vis_cache_into((px, py), origin, cached, out, scratch);
+                    }
+                    None => self.scan_visible_into(px, py, out),
+                }
+            }
             _ => self.scan_visible_into(px, py, out),
         }
     }
@@ -642,6 +693,15 @@ impl Game {
     /// cached id still alive and in range (this re-filters leavers and
     /// purges deaths by construction), then add touched ids that are now
     /// in range and were not cached (enterers).
+    ///
+    /// Session 85 note: a binary-search-skip variant (skip the position
+    /// lookup for cached ids absent from the touched list - provably
+    /// still visible when every change lands in the touched lists) was
+    /// measured at the 1000-bot saturated herd and LOST ~1.3 ms of
+    /// phase_vis p50 per tick: the herd's touched lists approach the
+    /// cache size, and N cache-warm position lookups beat N binary
+    /// searches over a cold ~300-entry scratch. The linear re-filter
+    /// stays; the delta path below is this session's win.
     ///
     /// The cached list is kept SORTED by the caller, so membership tests
     /// are binary searches - no per-tick HashSet allocation. The result
@@ -686,6 +746,79 @@ impl Game {
             .gobs
             .vis
             .touched_in_view_into(px, py, VIEW_RADIUS, scratch);
+        scratch.sort_unstable();
+        scratch.dedup();
+        for &id in scratch.iter() {
+            if in_range(id) && out.binary_search(&id).is_err() {
+                out.push(id);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+
+    /// Delta-scan for a viewer that MOVED within one VIEW_RADIUS of its
+    /// last scan (session 85): re-filter the cached ids by their CURRENT
+    /// positions (the viewer-side distance changed - here the lookups
+    /// are unavoidable), then add the touched enterers near the new
+    /// square and the STRIP cells the walk opened (VisIndex::
+    /// strip_in_view_into: new-square cells not embedded in the old
+    /// square - the only cells that can hold a STATIC gob the cached
+    /// result missed). A full rescan walks every cell of the square;
+    /// this walks the cache list plus the strip - a step or two of
+    /// walking moves at most a cell column into the strip, so the
+    /// steady-state ratio is roughly half or better.
+    /// Same allocation-free buffer contract as the patch path.
+    fn delta_vis_cache_into(
+        &self,
+        pos: (i32, i32),
+        origin: (i32, i32),
+        cached: &[GobId],
+        out: &mut Vec<GobId>,
+        scratch: &mut Vec<GobId>,
+    ) {
+        let (px, py) = pos;
+        let (ox, oy) = origin;
+        let in_range = |id: GobId| -> bool {
+            let gpos = self
+                .world
+                .gobs
+                .get(id)
+                .map(|slot| self.world.gobs.pos[slot])
+                .or_else(|| self.world.guests.get(&id).map(|g| g.pos));
+            match gpos {
+                Some((gx, gy)) => (gx - px).abs() <= VIEW_RADIUS && (gy - py).abs() <= VIEW_RADIUS,
+                None => false, // dead/retracted: never kept
+            }
+        };
+        out.clear();
+        out.reserve(cached.len() + 32);
+        // Leavers: cached ids whose CURRENT position (gob moved, or the
+        // walk itself carried the viewer past them) is out of range.
+        for &id in cached {
+            if in_range(id) {
+                out.push(id);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        // Movers near the new square: enterers and position refreshers.
+        self.world
+            .gobs
+            .vis
+            .touched_in_view_into(px, py, VIEW_RADIUS, scratch);
+        for &id in scratch.iter() {
+            if in_range(id) && out.binary_search(&id).is_err() {
+                out.push(id);
+            }
+        }
+        // The strip: the cells the walk opened. Static gobs there were
+        // never judged by the last scan; movers were already handled by
+        // the touched pass (a duplicate is removed by the final dedup).
+        self.world
+            .gobs
+            .vis
+            .strip_in_view_into(px, py, ox, oy, VIEW_RADIUS, scratch);
         for &id in scratch.iter() {
             if in_range(id) && out.binary_search(&id).is_err() {
                 out.push(id);

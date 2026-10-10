@@ -1937,6 +1937,11 @@ pub struct Perf {
     /// Session-ticks served from the cached scan result (patch or clean
     /// skip) instead of a full view rescan (session 30).
     pub vis_cached: u64,
+    /// Session-ticks served by the DELTA scan (session 85): the viewer
+    /// moved within one VIEW_RADIUS of the last scan, the cache was
+    /// re-filtered and the strip cells added instead of a full square
+    /// walk. vis_skipped + vis_cached + vis_delta = scans issued.
+    pub vis_delta: u64,
     pub vis_cells: usize,
     /// Node-link publishes sent (cumulative) and guest rows ingested
     /// (cumulative) - cluster-mode counters for the perf report.

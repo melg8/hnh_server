@@ -286,6 +286,7 @@ impl Game {
             vis_gob_scans = self.world.perf.vis_gob_scans,
             vis_skipped = self.world.perf.vis_skipped,
             vis_cached = self.world.perf.vis_cached,
+            vis_delta = self.world.perf.vis_delta,
             vis_cells = self.world.perf.vis_cells,
             guests = self.world.guests.len(),
             guest_pub = self.world.perf.guest_pub,
