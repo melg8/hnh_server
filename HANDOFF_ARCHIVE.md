@@ -6541,3 +6541,58 @@ AGENTS.md sections), 89163ac (handoff: the rust.yml retry note),
 1070a8d (docs: crafting + food consolidation), and the final S91
 commit (scripts/jogl/run-breeding-gl-e2e.sh + its AGENTS.md harness
 entry + this handoff update).
+## 2026-10-10 - Session 92 (type 4: the breeding GL e2e - livestock agent mode + the pixel-exact cow verdict)
+
+SESSION TYPE ROTATION LOG: 88=0, 89=4, 90=3, 91=0, 92=4. Pick the next
+type freely - just NOT 4 (0/1/2/3/5 all open).
+
+GOAL (type 4, per the rotation): close the oldest carried gap - "GL e2e
+of the breeding vertical on the REAL Java client". The session-91 prep
+(run-breeding-gl-e2e.sh) existed but had never been run green.
+
+DONE:
+
+- First live run (breedgl): the interrupted pre-summary context ran the
+  harness as shipped; the server leg was green (v8 save restored 5,
+  herd re-bound on login, 3 calves born 13:50:15) but the ANIMALS
+  verdict fell back - the DriveAgent hunts PREDATORS (wolf/boar only),
+  and no predator ever spawns near a breeding save site, while the
+  herd follows the player OFF-viewport-edge during the hunt phases.
+- Root fix (DriveAgent.java): `-Dhaven.drivelivestock=true` retargets
+  the ANIMALS phase at the herd species (cow/bull/calf/sheep/aurochs)
+  - tamed animals FOLLOW the player, so they walk into the viewport by
+  themselves. Rebuilt driveagent.jar (javac + jar, JDK8 toolchain).
+- Second live run (breedgl2, full foreground call): ALL green -
+  restore 5 -> re-bound on login -> 3 calves born at 14:10:56 while
+  the client rendered -> `ANIMALS SCREENSHOT: saved kritter at 294,369
+  res=gfx/kritter/cow/body/standing/standing-0` -> full corpus verdicts
+  MOVEMENT/SPEED/EQUIPVIS/CURSOR/GROUNDDROP/CLUSTER OK -> script
+  verdicts HERD RENDERS: OK + LIVE BIRTH: OK.
+- VLM counter-evidence investigated honestly: a VLM read of the
+  screenshot claimed ZERO cows ("a rabbit"). Resolved by pixels, not
+  opinions: scripts/verify_cow_pixels.py template-matches the exact
+  27x43 cow standing-0 sprite against the frame - COW PIXEL MATCH: OK
+  (dist=0.0 at image-origin 282,338 = the agent-reported 294,369 minus
+  the sprite offset 21,14; the hare template scores 135+ at its best,
+  so the match discriminates species). Lesson recorded: VLM eyeballing
+  of 27x43 px sprites is NOT evidence (horns read as ears); pixel
+  template matching is.
+- The pixel verdict is now part of the harness: run-breeding-gl-e2e.sh
+  prints COW PIXELS: OK/FAIL via verify_cow_pixels.py (exit-coded,
+  machine-readable). AGENTS.md harness entry updated (livestock mode +
+  the three-verdict contract).
+- HANDOFF housekeeping: S90 archived (keep-last-two), the session-index
+  S84 entry repaired (its tail had been orphaned onto the S91 line by
+  the S89 archival), S92 index line added.
+
+NOT DONE / next session carries: Windows smoke of the fresh release
+binary (run-client.bat path - sandbox has no wine; needs the human or
+a wine session); the remaining dough legs (S79/S82 oven-fired doughs);
+CI push still blocked on the PAT workflow scope (human action; the
+valid rust.yml ships untracked); breeding depth per the livestock doc
+Open questions (sheep e2e, heifer gate, calf drawables, quality
+mutation roll). S93 must NOT be type 4.
+
+COMMITS: aff4e3d (e2e: livestock agent mode + pixel-exact cow proof),
+this handoff.
+
