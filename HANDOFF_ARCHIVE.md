@@ -6078,3 +6078,76 @@ surface on a fresh world.
 COMMITS: 82ffc0f (perf: the vis delta-scan for a walking viewer,
 gap 10b - implementation + tests + load85.sh + the A/B numbers),
 this handoff.
+## 2026-10-10 - Session 86 (type 3: the multi-machine cluster profile)
+
+SESSION TYPE ROTATION LOG: 83=3, 84=4, 85=5, 86=3. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the long-carried "multi-machine cluster profile" - take the
+cluster machinery that existed (mesh, grid ownership, guests, cross-
+node relays - all verified in-process by unit tests and profiled by
+profile_multinode.sh) and give it the PRODUCT surface: one command to
+boot it, one command per machine for real multi-machine, and an e2e
+gate that proves the profile against two live node processes.
+
+DONE:
+
+- cluster-up.sh (server/scripts): `up` boots a local 2..4-node
+  cluster with the windows/start-cluster.bat port layout (node i =
+  auth 1871+2i, game 1870+4i, res 1872+4i, mesh 18790+i; node 0
+  keeps the client-facing defaults, so the Java client, run-client
+  and every existing probe work unchanged). `remote` boots ONLY this
+  machine's node from CLUSTER_SPEC=host:mesh,... + SELF=N - one copy
+  per machine, same seed; the rendezvous-hash grid ownership splits
+  the world across machines (the actual multi-machine deployment).
+  `stop`/`status` manage both modes; per-node shard saves
+  (save/cluster_n<i>.json) stay stable across restarts; readiness =
+  the UDP game shard listening (NOT "sessions=" - that line only
+  appears once clients connect, which silently broke the first boot
+  wait).
+- test_cluster.sh: the cluster e2e gate. Boots a fresh 2-node
+  cluster (throwaway saves in /tmp), then proves MESH (cluster dial
+  link up), WORLD ENTRY through node 0, GUEST WALK across
+  peer-owned cells (node-1 log: peer-subscribed x4, guest-ingested
+  x2), and CHARACTER MIGRATION. Verdict: CLUSTER E2E: OK (all legs
+  seen green in the final run).
+- probe_cluster_entry.py + hnhlib.WireClient(host, auth_port,
+  game_port): one client now drives a session through ANY node - the
+  migration leg enters through node 1's own ports (auth 1873 / game
+  1874). auth_cookie gained the host parameter.
+- THE MIGRATION FIX (root cause, not a retry loop): the first
+  re-entry attempt answered "char query: nack (missing or online)"
+  - the creation session was STILL LIVE on node 0 (UDP silence times
+  out only after 60 s). The probe now sends MSG_CLOSE (twice - UDP
+  is fire-and-forget): the server persists the character on
+  SessionClosed immediately, and the re-entry takes the CharQuery
+  path the same second. Evidence lines: node 0 "char query: serving
+  snapshot to peer", node 1 "char migration received: entering
+  world".
+- probe_guest_walk.py: stale port docstring (9801/9800) refreshed to
+  the real profile; scripts/README.md documents the new surface.
+
+MEASURED/EVIDENCE: CLUSTER E2E: OK - mesh links up (node1 dials,
+node0 accepts), WORLD ENTRY: OK, 4/4 walk legs arrived over
+peer-owned cells (subscribed=4, ingested=2 on node 1), migration
+served=1 received=1. Gate: 339 workspace tests green (Rust code
+untouched this session - python/bash surface only); the final run's
+full output in the session log.
+
+OPERATIONAL NOTES: a leftover single-node server (S85 smoke) held
+port 1872 and killed node 0's boot with "cannot bind resource http
+port" - cluster-up.sh stop + pid files now clean that class; check
+`pgrep -af hnh-server` before booting a cluster. Canceled tool calls
+still orphan the script wrappers (they finish themselves); poll with
+short sleeps.
+
+NOT DONE / next session carries (S87 must NOT be type 3): GL e2e +
+Windows smoke of the fresh release binary; CI push retry (the PAT
+still lacks the workflow scope); the remaining NOT-DONE dough legs
+from S79/S82 if any surface on a fresh world; a remote-CLUSTER_SPEC
+smoke on two loopback addresses (127.0.0.1 + 127.0.0.2) to exercise
+the remote code path end to end in the sandbox.
+
+COMMITS: 7cd65c1 (cluster: the multi-machine profile, one command -
+cluster-up.sh, test_cluster.sh, probe_cluster_entry.py, WireClient
+node binding, the MSG_CLOSE migration fix, README), this handoff.

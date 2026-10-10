@@ -434,80 +434,6 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
   slices, milk draw <-> butter churn alternation, raisins quota,
   streamed-map grass spirals, tree-exhaustion switching; 338
   tests green.
-## 2026-10-10 - Session 86 (type 3: the multi-machine cluster profile)
-
-SESSION TYPE ROTATION LOG: 83=3, 84=4, 85=5, 86=3. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: the long-carried "multi-machine cluster profile" - take the
-cluster machinery that existed (mesh, grid ownership, guests, cross-
-node relays - all verified in-process by unit tests and profiled by
-profile_multinode.sh) and give it the PRODUCT surface: one command to
-boot it, one command per machine for real multi-machine, and an e2e
-gate that proves the profile against two live node processes.
-
-DONE:
-
-- cluster-up.sh (server/scripts): `up` boots a local 2..4-node
-  cluster with the windows/start-cluster.bat port layout (node i =
-  auth 1871+2i, game 1870+4i, res 1872+4i, mesh 18790+i; node 0
-  keeps the client-facing defaults, so the Java client, run-client
-  and every existing probe work unchanged). `remote` boots ONLY this
-  machine's node from CLUSTER_SPEC=host:mesh,... + SELF=N - one copy
-  per machine, same seed; the rendezvous-hash grid ownership splits
-  the world across machines (the actual multi-machine deployment).
-  `stop`/`status` manage both modes; per-node shard saves
-  (save/cluster_n<i>.json) stay stable across restarts; readiness =
-  the UDP game shard listening (NOT "sessions=" - that line only
-  appears once clients connect, which silently broke the first boot
-  wait).
-- test_cluster.sh: the cluster e2e gate. Boots a fresh 2-node
-  cluster (throwaway saves in /tmp), then proves MESH (cluster dial
-  link up), WORLD ENTRY through node 0, GUEST WALK across
-  peer-owned cells (node-1 log: peer-subscribed x4, guest-ingested
-  x2), and CHARACTER MIGRATION. Verdict: CLUSTER E2E: OK (all legs
-  seen green in the final run).
-- probe_cluster_entry.py + hnhlib.WireClient(host, auth_port,
-  game_port): one client now drives a session through ANY node - the
-  migration leg enters through node 1's own ports (auth 1873 / game
-  1874). auth_cookie gained the host parameter.
-- THE MIGRATION FIX (root cause, not a retry loop): the first
-  re-entry attempt answered "char query: nack (missing or online)"
-  - the creation session was STILL LIVE on node 0 (UDP silence times
-  out only after 60 s). The probe now sends MSG_CLOSE (twice - UDP
-  is fire-and-forget): the server persists the character on
-  SessionClosed immediately, and the re-entry takes the CharQuery
-  path the same second. Evidence lines: node 0 "char query: serving
-  snapshot to peer", node 1 "char migration received: entering
-  world".
-- probe_guest_walk.py: stale port docstring (9801/9800) refreshed to
-  the real profile; scripts/README.md documents the new surface.
-
-MEASURED/EVIDENCE: CLUSTER E2E: OK - mesh links up (node1 dials,
-node0 accepts), WORLD ENTRY: OK, 4/4 walk legs arrived over
-peer-owned cells (subscribed=4, ingested=2 on node 1), migration
-served=1 received=1. Gate: 339 workspace tests green (Rust code
-untouched this session - python/bash surface only); the final run's
-full output in the session log.
-
-OPERATIONAL NOTES: a leftover single-node server (S85 smoke) held
-port 1872 and killed node 0's boot with "cannot bind resource http
-port" - cluster-up.sh stop + pid files now clean that class; check
-`pgrep -af hnh-server` before booting a cluster. Canceled tool calls
-still orphan the script wrappers (they finish themselves); poll with
-short sleeps.
-
-NOT DONE / next session carries (S87 must NOT be type 3): GL e2e +
-Windows smoke of the fresh release binary; CI push retry (the PAT
-still lacks the workflow scope); the remaining NOT-DONE dough legs
-from S79/S82 if any surface on a fresh world; a remote-CLUSTER_SPEC
-smoke on two loopback addresses (127.0.0.1 + 127.0.0.2) to exercise
-the remote code path end to end in the sandbox.
-
-COMMITS: 7cd65c1 (cluster: the multi-machine profile, one command -
-cluster-up.sh, test_cluster.sh, probe_cluster_entry.py, WireClient
-node binding, the MSG_CLOSE migration fix, README), this handoff.
-
 ## 2026-10-10 - Session 87 (type 4: the remote-profile e2e + the client move-semantics fix)
 
 SESSION TYPE ROTATION LOG: 84=4, 85=5, 86=3, 87=4. Pick the next
@@ -586,3 +512,62 @@ real client has not walked the 127.0.0.2 leg yet).
 
 COMMITS: (this session) scripts: the remote-profile e2e gate + the
 Java-exact move semantics for probes, this handoff.
+
+## 2026-10-10 - Session 88 (type 0: the cluster surfaces land in the agent/user docs)
+
+SESSION TYPE ROTATION LOG: 85=5, 86=3, 87=4, 88=0. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: type 0 (docs hygiene) - the S86/S87 cluster surfaces existed
+only in scripts/README.md and the session records; AGENTS.md (the
+agent contract) and the root README (the user contract) never
+mentioned them. Also the standing CI-retry rule was exercised.
+
+DONE:
+
+- AGENTS.md: new "Multi-Node Cluster Surfaces (run + verify)" section
+  - cluster-up.sh up/remote/stop/status, the node-i port formula
+  (auth 1871+2i, game 1870+4i, res 1872+4i, mesh 18790+i), the two
+  e2e gates and WHEN they are mandatory (grid_owner.rs, nodes.rs,
+  game/cluster.rs, hnh-proto node messages, session/stream changes).
+  The probe-client parity contract is pinned in prose: hnhlib mirrors
+  src/haven/OCache.java (OD_MOVE never cancels a live LinMove; the
+  final LINSTEP l >= c is the arrival marker) and echoes OBJACK like
+  the real SWorker.
+- AGENTS.md GitNexus block: explicit fallback rule for environments
+  with no .gitnexus index (fresh sandbox / env restart): rebuild, or
+  text search + reading for that one session, stated in the handoff -
+  never silently skip impact analysis, never treat a grep count as a
+  graph verdict. (This sandbox itself has no index - the rule now
+  covers that case instead of it being folklore in session notes.)
+- README.md: "Quick start (multi-machine cluster)" section (one
+  command locally; the per-machine CLUSTER_SPEC/SELF commands; the
+  port formula; migration on re-login), both cluster gates in the
+  verification block, and the stale "316 tests" refreshed to 339.
+- HANDOFF.md header ("How to continue work"): step 6 now leads with
+  cluster-up.sh (raw --cluster/--node stays referenced via the
+  archive); new step 7 makes the two cluster e2e gates part of the
+  standing next-session checklist.
+- CI push retry (once per session, per AGENTS.md): restored
+  .github/workflows/rust.yml from the session-50 archive snippet
+  (fixing its corrupted `branches: aster]` line to [master]) as
+  67a8cb9 and pushed - REFUSED again ("refusing to allow a Personal
+  Access Token to create or update workflow without workflow
+  scope"). The commit was rolled back and the file deleted so master
+  stays pushable with this PAT; the snippet lives on in
+  HANDOFF_ARCHIVE.md. The PAT owner must add the workflow scope (or
+  push that one commit manually) to ever make CI real.
+
+MEASURED/EVIDENCE: docs-only session - no Rust, no scripts touched;
+the 339-test count and the gate verdict lines quoted in the docs come
+straight from the S87 run. master pushable (8490fc3 on the remote;
+the rollback verified with a follow-up push).
+
+NOT DONE / next session carries (S89 must NOT be type 0): GL e2e +
+Windows smoke of the fresh release binary; a Java-client live pass
+over the REMOTE profile; the remaining NOT-DONE dough legs from
+S79/S82; the PAT workflow-scope fix is a human action, not a session
+task.
+
+COMMITS: 8490fc3 (docs: the cluster surfaces land in AGENTS/README,
+the handoff header points at the gates), this handoff.
