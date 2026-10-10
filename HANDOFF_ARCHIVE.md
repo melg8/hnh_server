@@ -6289,3 +6289,76 @@ task.
 
 COMMITS: 8490fc3 (docs: the cluster surfaces land in AGENTS/README,
 the handoff header points at the gates), this handoff.
+
+## 2026-10-10 - Session 89 (type 4: the real GL client e2e over the REMOTE profile + two server fixes it forced)
+
+SESSION TYPE ROTATION LOG: 86=3, 87=4, 88=0, 89=4. Pick the next
+type freely - just NOT 4 (0/1/2/3/5 all open).
+
+GOAL: the carried "Java-client live pass over the REMOTE profile" -
+the actual GL render path through the two-machine deployment shape,
+which is the last unverified cell of the cluster matrix (S87 proved
+it with wire probes; the real client had never entered through
+machine B's own address). The gate failed twice; both failures were
+genuine server bugs, found and fixed in the same session.
+
+DONE:
+
+- scripts/jogl/run-remote-e2e.sh: the REAL GL client against the
+  REMOTE profile. STAGED (up / legA / legB / down / all) because this
+  sandbox evicts long-lived idle wrapper processes (an unmodified
+  monolithic runner died on a bare `sleep 1` twice); every stage is
+  one short foreground call, the Xvfb+JVM pair lives exactly as long
+  as the client renders through it, the nodes survive detached
+  (cluster-up.sh nohup+setsid). Subshell gotcha documented in-source:
+  `cd build && Xvfb &` backgrounds the WHOLE chain - java then runs
+  from the repo root and the relative classpath dies.
+- Server fix 1 - session timeout was fiction: the old loop bumped
+  last_recv +4 s on every server beat, so the silence clock
+  oscillated 1..5 s forever and 60 s was unreachable; a crashed
+  client kept its character "online" until restart, NACKing every
+  re-login. last_beat now only throttles our beats;
+  HNH_SESSION_TIMEOUT_SECS overrides (net.rs).
+- Server fix 2 - clustered nodes bound the game UDP socket to
+  0.0.0.0: machine B's replies carried the primary route address
+  (127.0.0.1) as source, and the real Java client (Session.java
+  RWorker: `!p.getAddress().equals(server) -> continue`) silently
+  dropped ALL of B's traffic - leg B hung at the character list
+  while python probes (no source filter) stayed green, which is
+  exactly the class of bug only the REAL client catches. net::spawn
+  now binds the node's OWN CLUSTER_SPEC address; single-node keeps
+  the wildcard contract (bots, local clients).
+- Client: -Dhaven.authport (default 1871) / -Dhaven.gameport
+  (default 1870) - entering through any node's own address needs
+  only the port overrides. DriveAgent: -Dhaven.drivequick (stop
+  after MOVEMENT) and -Dhaven.driveexit (WINDOW_CLOSING -> MSG_CLOSE
+  -> instant persist). hnhlib.WireClient mirrors the Java sworker
+  5 s idle beat through one _send() funnel - the server's 60 s
+  timeout is live now, so long pumps must look idle-but-alive.
+- AGENTS.md: the staged gate joins the mandatory cluster surfaces;
+  the own-address bind contract is spelled out next to the port
+  formula.
+
+MEASURED/EVIDENCE (all through the real client, REMOTE profile):
+REMOTE GL MESH: OK. leg A (machine A entry, full corpus): MOVEMENT
+MOVED, SPEED VERDICT OK (3.43 tiles/s), NO TELEPORT OK, 5/5 walk
+directions ARRIVED, EQUIPVIS OK, CURSOR OK, GROUNDDROP OK, CLUSTER
+VERDICT OK (foreign-authority gobs render), guest-ingested-on-B=5,
+clean exit -> "session closed" persist on A. leg B (machine B's own
+address 127.0.0.2:1873/1874): charlist renders, char pick, A serves
+the snapshot (served=1), B receives the migration (received=1), the
+character re-enters ON ITS PERSISTED POSITION and walks ->
+REMOTE GL MIGRATION: OK, REMOTE GL CLIENT: OK. Regressions: 339
+rust tests green; REMOTE CLUSTER: OK and CLUSTER E2E: OK (probe
+gates); WORLD ENTRY + CATTR: OK. RELAYFIGHT reported NO-TARGET (the
+chased kritter roamed out of reach) - not a gate line, logged as-is.
+
+NOT DONE / next session carries (S90 must NOT be type 4): GL e2e +
+Windows smoke of the fresh release binary on the WINDOWS port side;
+the remaining NOT-DONE dough legs (S79/S82); CI push still blocked
+on the PAT workflow scope (human action); the loadtest one-command
+demo could adopt the staged-gate pattern for sandbox-hostile CI.
+
+COMMITS: 1db150a (server: true 60s session timeout + own-address
+game bind), 751b812 (client+gate: per-node port overrides, agent
+quick/exit modes, staged remote GL e2e), this handoff.

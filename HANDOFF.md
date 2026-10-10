@@ -282,7 +282,7 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
 48=3, 49=2, 50=4, 51=3, 52=5, 53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5,
 60=3, 61=2, 62=3, 63=4, 64=1, 65=5, 66=3, 67=4, 68=5, 69=3, 70=2, 71=3,
 72=4, 73=5, 74=0, 75=1, 76=2, 77=3, 78=5, 79=3, 80=4, 81=3, 82=5, 83=3,
-84=4, 85=5, 86=3, 87=4, 88=0, 89=4, 90=3. Pick type freely - NOT 3 next.
+84=4, 85=5, 86=3, 87=4, 88=0, 89=4, 90=3, 91=0. Pick type freely - NOT 0 next.
 
 ## Session index (one line each; full entries in the archive)
 
@@ -437,82 +437,10 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
 - S88 (type 0): the cluster surfaces land in AGENTS/README + the handoff header points at the gates.
 - S89: true 60s session timeout + own-address game bind (Java source filter); real GL client e2e over the REMOTE profile, staged run-remote-e2e.sh; -Dhaven.authport/gameport client overrides.
 - S90: the breeding pipeline - sexes, breed rows, scaled gestation, calves with inherited rows, maturation gate, honest milk refusals, v8 persist + restart reload; MCache-parity grid streaming for probes (the nav-flake root).
+- S91: documentation de-pollution - the livestock doc consolidated (dup + stale chronicle removed, breeding notes landed), AGENTS.md session-protocol + Windows sections; GitNexus index re-bootstrapped.
   slices, milk draw <-> butter churn alternation, raisins quota,
   streamed-map grass spirals, tree-exhaustion switching; 338
   tests green.
-
-## 2026-10-10 - Session 89 (type 4: the real GL client e2e over the REMOTE profile + two server fixes it forced)
-
-SESSION TYPE ROTATION LOG: 86=3, 87=4, 88=0, 89=4. Pick the next
-type freely - just NOT 4 (0/1/2/3/5 all open).
-
-GOAL: the carried "Java-client live pass over the REMOTE profile" -
-the actual GL render path through the two-machine deployment shape,
-which is the last unverified cell of the cluster matrix (S87 proved
-it with wire probes; the real client had never entered through
-machine B's own address). The gate failed twice; both failures were
-genuine server bugs, found and fixed in the same session.
-
-DONE:
-
-- scripts/jogl/run-remote-e2e.sh: the REAL GL client against the
-  REMOTE profile. STAGED (up / legA / legB / down / all) because this
-  sandbox evicts long-lived idle wrapper processes (an unmodified
-  monolithic runner died on a bare `sleep 1` twice); every stage is
-  one short foreground call, the Xvfb+JVM pair lives exactly as long
-  as the client renders through it, the nodes survive detached
-  (cluster-up.sh nohup+setsid). Subshell gotcha documented in-source:
-  `cd build && Xvfb &` backgrounds the WHOLE chain - java then runs
-  from the repo root and the relative classpath dies.
-- Server fix 1 - session timeout was fiction: the old loop bumped
-  last_recv +4 s on every server beat, so the silence clock
-  oscillated 1..5 s forever and 60 s was unreachable; a crashed
-  client kept its character "online" until restart, NACKing every
-  re-login. last_beat now only throttles our beats;
-  HNH_SESSION_TIMEOUT_SECS overrides (net.rs).
-- Server fix 2 - clustered nodes bound the game UDP socket to
-  0.0.0.0: machine B's replies carried the primary route address
-  (127.0.0.1) as source, and the real Java client (Session.java
-  RWorker: `!p.getAddress().equals(server) -> continue`) silently
-  dropped ALL of B's traffic - leg B hung at the character list
-  while python probes (no source filter) stayed green, which is
-  exactly the class of bug only the REAL client catches. net::spawn
-  now binds the node's OWN CLUSTER_SPEC address; single-node keeps
-  the wildcard contract (bots, local clients).
-- Client: -Dhaven.authport (default 1871) / -Dhaven.gameport
-  (default 1870) - entering through any node's own address needs
-  only the port overrides. DriveAgent: -Dhaven.drivequick (stop
-  after MOVEMENT) and -Dhaven.driveexit (WINDOW_CLOSING -> MSG_CLOSE
-  -> instant persist). hnhlib.WireClient mirrors the Java sworker
-  5 s idle beat through one _send() funnel - the server's 60 s
-  timeout is live now, so long pumps must look idle-but-alive.
-- AGENTS.md: the staged gate joins the mandatory cluster surfaces;
-  the own-address bind contract is spelled out next to the port
-  formula.
-
-MEASURED/EVIDENCE (all through the real client, REMOTE profile):
-REMOTE GL MESH: OK. leg A (machine A entry, full corpus): MOVEMENT
-MOVED, SPEED VERDICT OK (3.43 tiles/s), NO TELEPORT OK, 5/5 walk
-directions ARRIVED, EQUIPVIS OK, CURSOR OK, GROUNDDROP OK, CLUSTER
-VERDICT OK (foreign-authority gobs render), guest-ingested-on-B=5,
-clean exit -> "session closed" persist on A. leg B (machine B's own
-address 127.0.0.2:1873/1874): charlist renders, char pick, A serves
-the snapshot (served=1), B receives the migration (received=1), the
-character re-enters ON ITS PERSISTED POSITION and walks ->
-REMOTE GL MIGRATION: OK, REMOTE GL CLIENT: OK. Regressions: 339
-rust tests green; REMOTE CLUSTER: OK and CLUSTER E2E: OK (probe
-gates); WORLD ENTRY + CATTR: OK. RELAYFIGHT reported NO-TARGET (the
-chased kritter roamed out of reach) - not a gate line, logged as-is.
-
-NOT DONE / next session carries (S90 must NOT be type 4): GL e2e +
-Windows smoke of the fresh release binary on the WINDOWS port side;
-the remaining NOT-DONE dough legs (S79/S82); CI push still blocked
-on the PAT workflow scope (human action); the loadtest one-command
-demo could adopt the staged-gate pattern for sandbox-hostile CI.
-
-COMMITS: 1db150a (server: true 60s session timeout + own-address
-game bind), 751b812 (client+gate: per-node port overrides, agent
-quick/exit modes, staged remote GL e2e), this handoff.
 
 ## 2026-10-10 - Session 90 (type 3: the breeding pipeline - sexes, breed rows, gestation, birth, maturation, v8 persist)
 
@@ -608,3 +536,63 @@ average, not the doc's mutation roll - revisit against docs/).
 COMMITS: 043bcb5 (animals: the breeding pipeline + v8 persist),
 f547ea9 (e2e: the breeding probe green live + MCache-parity grid
 streaming + keep_save), this handoff.
+
+## 2026-10-10 - Session 91 (type 0: documentation de-pollution - the livestock doc consolidated, the breeding notes landed, AGENTS.md gaps closed)
+
+SESSION TYPE ROTATION LOG: 88=0, 89=4, 90=3, 91=0. Pick the next type
+freely - just NOT 0 (1/2/3/4/5 all open).
+
+GOAL (type 0, per the rotation): close the documentation debt S90 left
+(the breeding vertical landed WITHOUT its domain-doc update, violating
+the AGENTS.md same-changeset rule) and de-pollute the polluted docs
+that keep costing every fresh context their re-read budget.
+
+DONE:
+
+- docs/mechanics/livestock/animals-and-husbandry.md: the six
+  per-session chronicle sections (45/45-duplicate/46/47/48/62/77) are
+  consolidated into ONE current-state "Server implementation notes
+  (this repo)" section with domain subsections (taming, roster/morph,
+  production/feeding/starvation, breeding, persistence). The chronicle
+  had a VERBATIM DUPLICATE of the session-45 entry (254 lines of
+  chronicle replaced; the doc went 693 -> 679 lines while GAINING the
+  breeding notes). Old contradictions ("animals are not persisted",
+  "breeding is out of scope") are gone.
+- The session-90 breeding notes landed as their own subsection,
+  cross-checked against the code (state.rs constants, game.rs Phase D,
+  animals.rs spawn_calf/refusals, persist.rs v8): sexes, per-animal
+  rows (wild 9..11), gestation 3 888 000 ticks / maturation
+  8 640 000 ticks, BREED_SEEK_RADIUS 55, twins 5%, the nursing +
+  BREED_CLUSTER_CAP=8 runaway guards, inheritance (average + spread
+  +0..=2/-0..=1, sire softcap), HNH_BREED_SCALE, v8 persist with
+  tamer-key rebinding, the SIGTERM flush.
+- Open questions refreshed: the stale "breeding out of scope" bullet
+  became the honest gap list (no sheep e2e, the calf milk-drinking
+  reservation flow not modeled, lactation gated on adulthood+sex
+  instead of the doc's never-calved heifer gate, no calf/bull
+  drawable, the single-average quality drift vs the doc's mutation
+  roll, fodder-average product quality still open).
+- AGENTS.md: added the two sections a fresh context was missing -
+  "Session Protocol (read HANDOFF.md FIRST)" (rotation rule, keep-
+  last-two, commit discipline) and "Windows quick start (the
+  user-facing contract)" (windows/run-client.bat as THE one command;
+  .bat flow must keep working). CI paragraph refreshed (session 53 ->
+  session 91: the workflow file still has not landed).
+- GitNexus: the .gitnexus/ index was MISSING in this environment
+  (sandbox eviction); re-bootstrapped via `bunx gitnexus@latest
+  analyze --index-only` - the tool call reported canceled but the
+  index actually landed and `node .gitnexus/run.cjs status` verifies:
+  registered index at commit 51ebff2 (10/10/2026). The 130 MB .gitnexus
+  tree is fully git-ignored (internal `*` .gitignore). This session
+  edited documentation only - no code symbols - so no impact analysis
+  was required; the index is ready for the next session's code work.
+
+NOT DONE / next session carries: everything unchanged from S90 except
+the doc debt - GL e2e + Windows smoke of the fresh release binary;
+the remaining dough legs (S79/S82); CI push still blocked on the PAT
+workflow scope (human action); the breeding-depth items now honestly
+listed in the livestock doc's Open questions (sheep e2e, heifer gate,
+calf drawables, quality mutation roll).
+
+COMMITS: this handoff records the docs commit (livestock
+consolidation + breeding notes + AGENTS.md sections).

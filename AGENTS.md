@@ -18,6 +18,36 @@ repository MUST be in English.
 
 ---
 
+## Session Protocol (read HANDOFF.md FIRST)
+
+This repo is developed in 2-hour sessions with rotating goals; your
+context may be cut at any moment.
+
+- **Read `HANDOFF.md` before doing anything else** - it carries the
+  session-type rotation log (one goal per session, never repeat the
+  previous session's type), the last session's DONE/NOT-DONE, and the
+  carried gaps. Keep its entries to the last two sessions (archive
+  older records into `HANDOFF_ARCHIVE.md`).
+- Commit small and push often - never leave work uncommitted when the
+  2-hour budget is close.
+- The shared agent worklog lives outside the repo at
+  `/home/z/my-project/worklog.md` (session-level, not committed).
+
+---
+
+## Windows quick start (the user-facing contract)
+
+The user plays from Windows; `windows/README.md` is the entry point and
+`windows/run-client.bat` is THE one command - it rebuilds the client jar
+when stale, regenerates `gameres/` when older than the tree, auto-starts
+the seed-42 server when it is not answering, waits for the auth and
+resource ports, then launches the Java client into the persistent world.
+Any change to boot, ports, resources, or client startup MUST keep the
+`windows/*.bat` flow working (see also `windows/start-cluster.bat`,
+`windows/loadtest.bat`, `windows/collect-logs.bat`).
+
+---
+
 ## MANDATORY: Use and Maintain docs/mechanics/ (Game Mechanics Reference)
 
 `docs/mechanics/` is the golden source of truth for game mechanics. Its index
@@ -179,8 +209,8 @@ relevant one when your change touches its domain.
 
 CI: the intended contract is fmt + clippy + `cargo test --workspace`
 on every push/PR to master via `.github/workflows/rust.yml`. As of
-session 53 the workflow file itself has never landed on the remote
-(the PAT lacks the `workflow` scope; the file content is preserved in
+session 91 the workflow file still has not landed on the remote (the
+PAT lacks the `workflow` scope; the file content is preserved in
 HANDOFF_ARCHIVE.md, session-50 addendum) - retry that push once per
 session. Until it lands, the green local run of the three commands
 above is the ONLY gate: do not rely on CI to catch what you can

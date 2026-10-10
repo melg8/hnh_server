@@ -380,261 +380,248 @@ required; Legacy:Hunting). Rules:
 - Persistence: animals, troughs, coops, and hives are claim-adjacent persistent
   structures; write them with the same durability as tiles.
 
-## Server implementation notes (this repo, session 45)
+## Server implementation notes (this repo)
 
-- Taming MVP is live (single-node authority): the Quell pagina
-  (paginae/atk/quell) gates and resolves through the real combat
-  model. Selection-time gates: 2 IP available (req_ip 2), advantage
-  >= 3 (req_adv 30 tenths), target is a LOCAL animal, a rope
-  (gfx/invobjs/rope) equipped in ANY slot (weapon-slot-only is a
-  documented NEXT check), the tamer's rope not already bound, and the
-  beast not already quelled. Guest (cross-node) animals refuse quell
-  in the MVP.
-- Resolution: the queued quell intercepts the animal swing cadence
-  (same offence-bar economics as a normal swing; no defence chip, no
-  damage) and applies +20 tameness (TAMENESS_PER_QUELL). The battle
-  ends on the first quell (out of animal_fights, fight window torn
-  down), the beast follows the tamer client-side via a batched
-  OD_FOLLOW broadcast (gob ids are global - no per-session patching;
-  Following.java renders it), and the rope binds (one partially-tamed
-  beast per tamer; binding ends at full tameness or on a break).
-- Leash lifecycle: the break deadline is game-tick based (10 minutes
-  = 6000 ticks, the docs' 5-15 min floor as policy) rearmed on every
-  quell below 100; at 100 (TAMENESS_FULL) the beast never breaks.
-  Damaging the beast kills ALL tameness (server policy) and frees the
-  rope. The tick sweep (before the batch fan-out) breaks due leashes,
-  sends the OD_FOLLOW removal (oid -1), and chats the tamer.
-- Tamed animals skip animal AI entirely (no wander, no aggro) while
-  the tame row lives; tame rows never outlive local authority (a
-  transferred animal drops the row + follow render). Animals are
-  spawned wildlife in this server (not persisted), so taming state is
-  runtime world state with the same scope - recorded in Open
-  questions.
+Consolidated in session 91 from the per-session chronicle (sessions
+45-90) into one current-state section, because the chronicle had grown a
+verbatim duplicate of the session-45 entry and early claims that later
+sessions overturned ("animals are not persisted", "breeding is out of
+scope"). Constants live in `crates/hnh-server/src/state.rs`; behaviors in
+`src/game/animals.rs` (fight/tame/production plumbing), `src/game.rs`
+(the production + breeding sweeps), `src/persist.rs` (save format) and
+`src/game/lifecycle.rs` (flush). The legacy-contract sections above stay
+the WHY; this section is the WHAT that is live.
 
-## Server implementation notes (this repo, session 45)
+### Taming (Quell the Beast)
 
-- Taming MVP is live (single-node authority): the Quell pagina
-  (paginae/atk/quell) gates and resolves through the real combat
-  model. Selection-time gates: 2 IP available (req_ip 2), advantage
-  >= 3 (req_adv 30 tenths), target is a LOCAL animal, a rope
-  (gfx/invobjs/rope) equipped in ANY slot (weapon-slot-only is a
-  documented NEXT check), the tamer's rope not already bound, and the
-  beast not already quelled. Guest (cross-node) animals refuse quell
-  in the MVP.
-- Resolution: the queued quell intercepts the animal swing cadence
-  (same offence-bar economics as a normal swing; no defence chip, no
-  damage) and applies +20 tameness (TAMENESS_PER_QUELL). The battle
-  ends on the first quell (out of animal_fights, fight window torn
-  down), the beast follows the tamer client-side via a batched
-  OD_FOLLOW broadcast (gob ids are global - no per-session patching;
-  Following.java renders it), and the rope binds (one partially-tamed
-  beast per tamer; binding ends at full tameness or on a break).
-- Leash lifecycle: the break deadline is game-tick based (10 minutes
-  = 6000 ticks, the docs' 5-15 min floor as policy) rearmed on every
-  quell below 100; at 100 (TAMENESS_FULL) the beast never breaks.
-  Damaging the beast kills ALL tameness (server policy) and frees the
-  rope. The tick sweep (before the batch fan-out) breaks due leashes,
-  sends the OD_FOLLOW removal (oid -1), and chats the tamer.
-- Tamed animals skip animal AI entirely (no wander, no aggro) while
-  the tame row lives; tame rows never outlive local authority (a
-  transferred animal drops the row + follow render). Animals are
-  spawned wildlife in this server (not persisted), so taming state is
-  runtime world state with the same scope - recorded in Open
-  questions.
+- Selection gates (paginae/atk/quell): 2 IP available (req_ip 2),
+  advantage >= 3 (req_adv 30 tenths), battle intensity == 0, target is a
+  LOCAL animal, a rope (gfx/invobjs/rope) equipped in ANY slot, the
+  tamer's rope not already bound, the beast not already quelled, and the
+  Animal Husbandry skill bought (400 LP, requires Hunting - enforced
+  inside buy()). Guest (cross-node) animals refuse quell.
+- Intensity bar per AnimalFight: +2500/10000 per landed blow in EITHER
+  direction, -250 per combat tick without a blow (a hot fight cools in
+  ~7 s). The meter exists only server-side (the legacy Fightview
+  rendered intensity from the relation; this server keeps 0 there).
+- Resolution: the queued quell rides the animal swing cadence (offence
+  economics; no defence chip, no damage) and applies +20 tameness
+  (TAMENESS_PER_QUELL; five cycles to TAMENESS_FULL = 100). The battle
+  ends on the first quell; the beast follows the tamer through a batched
+  OD_FOLLOW broadcast (gob ids are global, no per-session patching) and
+  the rope binds one partially-tamed beast per tamer.
+- Leash lifecycle: the break deadline is 6000 game ticks (~10 real
+  minutes, the docs' 5-15 min floor as policy), rearmed on every quell
+  below 100; full tameness never breaks. A TIME-based break (session 83)
+  BANKS the accumulated tameness (`loose` - wild AI resumes, the rope
+  frees, a later quell re-leashes and adds on top); a DAMAGE-based break
+  wipes the whole row. LEASH_FOLLOW_DIST (30 subtiles) walks a tamed
+  beast to the tamer's heel.
+- Wild AI is off for tamed rows, and rows never outlive local authority.
+  Every aggressive chase is bounded by AGGRO_GIVEUP subtiles from a
+  spawn-time home anchor (surrender march home before re-aggro); passive
+  species panic-flee straight away from the threat (18-subtile hops in
+  a fight, 165 grazing, deterministic (tick, slot) splitmix32 jitter so
+  the parallel intent pass stays race-free). Dev knobs for live probes:
+  HNH_LEASH_TICKS, HNH_NO_AGGRO, HNH_FAST_TAME - the legacy five-round
+  tame stack itself stays unit-covered.
 
-## Server implementation notes (this repo, session 46)
+### Roster, morph, and spawn
 
-- Animal Husbandry gate (docs step 1): `ahusb` joins the skill
-  catalog with the documented legacy cost (400 LP) and prerequisite
-  (requires Hunting); the prerequisite is enforced inside `buy()`, so
-  the wallet can never be charged out of order, and the nsk list
-  renders it from the shipped `gfx/hud/skills/ahusb.res`.
-  `quell_gate` refuses the quell selection without the skill.
-- Battle intensity (docs step 2, Jorb's list): every animal fight row
-  (AnimalFight) carries an intensity bar. A landed blow in EITHER
-  direction raises it by INTENSITY_PER_BLOW (2500/10000, policy);
-  every combat tick without a blow de-escalates it by
-  INTENSITY_DECAY (250 - a hot fight cools in ~7 s). `quell_gate`
-  refuses the selection while intensity > 0, so the working pattern
-  is: build advantage, stop swinging, wait out the de-escalation,
-  quell.
-- Species morph (docs step 6): at full tameness the animal
-  metamorphoses in place. Species::morph() maps mouflon -> sheep and
-  aurochs -> cow; the boar maps to None because the 2009 pack ships
-  no pig kritter (policy recorded below). The morph rewrites the
-  Kind, the drawable resource (sheep/cow cdv), max_hp and speed,
-  clamps the current hp (no healing), and broadcasts a headerless
-  OD_RES block through the packed start batch with a per-session wire
-  id patch - the native client re-render path (Session.java OD_RES =
-  2 -> OCache.cres -> ResDrawable reset).
-- Roster: Species gains Mouflon (index 7) and Sheep (index 8). The
-  node-link discriminant stays append-only (0-6 frozen); the mouflon
-  joins the wild spawn roll, the sheep NEVER spawns wild (it is only
-  reached through the morph, matching the wiki's "Must domesticate a
-  Mouflon to obtain a Sheep"). Sheep-family loot carries the wool
-  that feeds the session-46 cloth craft chain.
+- Eleven species with append-only node-link discriminants (0-8 frozen;
+  bear 9, hen 10 - both kritter pose sets verified in the 2009 pack).
+  The sheep NEVER spawns wild (tame a mouflon, per the wiki); the bear
+  (hp 120, aggressive, speed 40) and hen (hp 10, speed 20) join the
+  flat-weight wild roll.
+- Species morph at full tameness: mouflon -> sheep, aurochs -> cow. The
+  morph rewrites Kind, resource, vitals and clamps hp (no healing), then
+  re-renders every viewer via a headerless OD_RES block through the
+  packed start batch (Session.java OD_RES = 2 -> OCache.cres). Boar maps
+  to None: the 2009 pack ships no pig kritter (a fully tamed boar stays
+  a boar - see Open questions).
 
-## Server implementation notes (this repo, session 47)
+### Production, feeding, and starvation
 
-- Production meters (docs "Animal products and collection flows"):
-  TameState carries `milk_units` (0.01 L units, cows), `wool` (sheep)
-  and a shared integer accumulator `prod_acc`. Milk accrues at the
-  doc's `Milk Quantity * 0.01` L / 10 min: quantity 10 (server policy,
-  no verified bred-stat numbers) adds 10 units per 6000 ticks, i.e.
-  exactly the doc's 0.1 L / 10 min example. Wool accrues 1 per 8 real
-  hours at Wool Quantity 5, scaled linearly with quantity (acc += q
-  per tick; one unit per 240000 quantity-ticks). Both meters cap
-  exactly as documented (10 L / 3 wool); at the cap the accumulator
-  stops banking time, so production resumes from zero after collection.
-- Grazing gate (docs "Feeding: troughs and grazing"): the production
-  sweep (two-phase, O(tamed), same shape as tick_animals) advances a
-  meter only while the animal stands on a moor/heath/grassland tile -
-  the doc's quality-10 foods. Off the pasture production PAUSES and
-  the accumulator freezes (no starvation deaths; the Food Trough
-  object is not implemented yet, so free grazing is the only feeding
-  path - see Open questions). Products inherit the grazing quality
-  (q10, GRAZE_PRODUCT_QL).
-- Collection flows: clicking a fully tamed producer opens the
-  collection flower menu instead of the fight window (tamed livestock
-  cannot be aggroed, so a producer never fights). Cow: the Milk petal
-  consumes ONE empty bucket (`gfx/invobjs/buckete` - inventory first,
-  then any equipment slot, the same any-slot policy as the crafting
-  tool scan and the taming rope check), drains MILK_PER_BUCKET_UNITS
-  (1 L = 100 units; the doc names the bucket but carries no volume -
-  1 L is server policy) and grants `gfx/invobjs/bucket-milk` at q10.
-  Sheep: the Shear petal is barehand (the doc names no shear tool) and
-  grants the whole stored `gfx/invobjs/wool` stack. An empty meter
-  never opens a menu - the click answers with a hint chat line instead
-  ("The cow has no milk yet." / "The sheep has no wool to shear.");
-  the menu re-validates the live meter and the bucket on the choice,
-  so a stale menu cannot overdraw the cow.
-- Tamed-animal persistence (docs "Pens, ownership, and persistence"):
-  rows with tameness > 0 persist as SavedAnimal (species index, tile,
-  hp clamped to the species max on load, tameness, tamer key, meters,
-  accumulator; save v6, additive). The saved species IS the domestic
-  morph - a fully tamed mouflon reloads as a sheep. The tamer gob id
-  cannot survive restarts (gob ids are runtime identities), so the row
-  stores the tamer's character save key when online; a fully tamed
-  beast never re-arms its leash window, a partially tamed one re-arms
-  it at load, and either way the tamer binding re-establishes on the
-  next quell (apply_quell overwrites the row's tamer). Spawned
-  wildlife is seed-regenerated and never saved.
-- Persistence bugfix found while wiring animals in: `flush()` never
-  copied `tile_overrides` into the save document, so furrows and other
-  terraforming silently reverted on every restart even though the
-  in-memory world_state carried them. Both fields now round-trip.
+- Meters (session 47 + 90): cows accrue `milk_units` (0.01 L units) at
+  the doc's `Milk Quantity * 0.01` L / 10 min - quantity q adds q units
+  per MILK_ACC_PER_UNIT (6000) ticks, driven by the per-animal
+  prod_quantity row; sheep accrue wool at 1 per 8 real hours scaled
+  linearly by quantity (WOOL_ACC_PER_UNIT = 240000 quantity-ticks; rams
+  and ewes both grow wool). Caps exactly as documented (10 L / 3 wool);
+  at the cap the accumulator stops banking time. Only adult FEMALES
+  lactate (bulls sire); lambs and calves bank maturation instead of
+  product while juvenile.
+- Feeding resolves per producer: nearest trough with fodder within 18
+  tiles (euclidean subtiles) beats the grazing fallback
+  (moor/heath/grassland = q10). Off-pasture production pauses with no
+  starvation while any trough feeds; with NO food at all the animal
+  accrues hunger and dies at STARVE_DEATH_TICKS (3 in-game days; no
+  corpse - the corpse pipeline is death-drop loot, see below).
+- Consumption (docs Legacy:Cattle): a cow eats 4.8 fodder units per
+  in-game day plus 0.1 unit per liter produced (bound to the production
+  rate: 1 unit per 60000 ticks at quantity 10); sheep 2.4/day (half a
+  cow - policy, the doc quotes no sheep number). Integer nano-units per
+  tick, persisted.
+- Collection: clicking a fully tamed producer opens the collection menu
+  only when there is something to draw; otherwise an honest refusal line
+  ("The bull gives no milk." / "The calf is not yet grown." / "The cow
+  has no milk yet." / "The lamb is not yet grown." / "The sheep has no
+  wool to shear."). The Milk petal consumes ONE empty bucket
+  (gfx/invobjs/buckete, inventory first then equipment - the any-slot
+  policy) and drains 1 L (MILK_PER_BUCKET_UNITS = 100; the doc names no
+  volume - 1 L is policy); Shear is barehand and grants the whole wool
+  stack. The menu re-validates the live meter, so a stale menu cannot
+  overdraw. Product quality: `min(breed_ql, GRAZE_PRODUCT_QL = 10)` -
+  bred stock grades the product up to its row, but feed stays the
+  ceiling.
+- Food Trough (buildable after the smelter, branch x4 single stage -
+  policy): 200-unit cap, one fodder unit per item, running-average
+  quality following the doc's arithmetic (q5 + q12 + q16 -> q11);
+  consumption drains units but NOT the quality history. Fodder table =
+  the doc's list intersected with the 2009 jar: any gfx/invobjs/seed-*
+  plus flaxseed, apple, apple core, mulberry, straw, pumpkin flesh,
+  carrot, poppy flower. Non-fodder refused untouched ("The trough does
+  not accept that as fodder.").
+- Lift and transfer (session 62): a one-petal Lift menu retracts the
+  placed trough and rides it on the player (Player.carried_trough - one
+  at a time, persisted per-character, survives restarts and cross-node
+  migration); re-placement is a plain map click through the same
+  reach/terrain/occupancy validations a build commit runs. Clicking
+  another trough while carrying transfers min(carried, cap - dest)
+  units at the SOURCE's running average. Guest (peer-node) troughs
+  offer no petal. The 2x1 footprint stays out of scope (the gob occupies
+  its tile like any structure).
+- Death drops follow the doc's butcher table verbatim for intestines
+  (Aurochs/Cattle/Bear x4, Deer x3, Boar/Sheep x2, Fox x1, mouflon 1 by
+  policy) with meat counts at this server's scaled-down death-drop
+  policy; every species drops bones (see Open questions).
 
-## Server implementation notes (this repo, session 48)
+### Domestic breeding (session 90)
 
-- Food Trough (docs "Feeding: troughs and grazing" + paginae/build/
-  trough + gfx/terobjs/trough, both shipped in the 2009 pack): a new
-  Buildable (id "trough") joins the build tree after the smelter.
-  Build demand is server policy - branch x4, single stage (the doc
-  carries no build materials; the wiki page is lost). Completing the
-  plan opens an empty fodder store (world.troughs) keyed by the gob.
-  The doc's 2x1 footprint and the lift-and-right-click trough-to-
-  trough fodder transfer stay out of scope until a lift mechanic
-  exists (no lift handling anywhere in this server yet).
-- Fodder table (docs fodder list intersected with the 2009 jar): one
-  fodder unit per item for any `gfx/invobjs/seed-*` resource plus
-  flaxseed, apple, apple core, mulberry, straw, pumpkin flesh, carrot
-  and the poppy flower. Blueberries, Chantrelles, Bloated Bolete,
-  Peapod and Beetroot/Leaves have NO invobj resources in the 2009 pack
-  and therefore cannot be matched; Giant Pumpkin (worth 16 seeds) is
-  likewise absent. Loading is itemact on the finished trough, ONE item
-  per click (the oven-fuel accounting policy keeps the quality average
-  exact); a non-fodder item is refused untouched ("The trough does not
-  accept that as fodder."), a full trough refuses at the 200-unit cap
-  (doc "Capacity 200 fodder units").
-- Fodder quality: the store keeps a running sum/count of every unit
-  ever placed; the average follows the doc's arithmetic (q5 + q12 +
-  q16 -> q11). Consumption drains units but NOT the quality history.
-  Product quality stays the session-47 policy (GRAZE_PRODUCT_QL) -
-  linking the milk/wool quality to the consumed fodder average is an
-  Open question.
-- Feeding preference (docs "animals inside a trough's radius prefer
-  the trough over grazing"): the production sweep now resolves food
-  per producer - nearest trough with fodder within 18 tiles
-  (TROUGH_RADIUS, euclidean over subtiles, 11 subtiles per tile) wins
-  over the grazing fallback (moor/heath/grass = q10). Feeding from the
-  trough keeps production running on ANY tile (e.g. a sand pen around
-  a trough), grazing feeds only on the pasture tiles.
-- Consumption rates (docs Legacy:Cattle): a cow eats 4.8 fodder units
-  per in-game day (1 in-game day = 8 real hours per the farming doc),
-  plus the lactating surcharge 0.1 unit per liter of milk produced -
-  bound to the production rate (1/60000 L per tick at quantity 10 =
-  0.1 unit per 60000 ticks), exactly the doc's wording. The doc quotes
-  no sheep number: 2.4 units/day (half a cow) is server policy. Rates
-  accumulate as integer nano-units per tick (feed_acc_nano, persisted)
-  and drain ONE whole unit from the shared trough every ~60 000 ticks
-  at the cow rate.
-- Starvation (docs "kill or stop production"): a fully tamed producer
-  with NO food - no trough fodder in radius AND no grazing tile -
-  accumulates hunger each tick (hunger, persisted); at 3 in-game days
-  without a bite (STARVE_DEATH_TICKS = 864000) it dies. Death
-  despawns the animal, drops the tame row and chats the online tamer;
-  no corpse and no loot (the corpse pipeline is not implemented -
-  policy). Production is gated on feeding, so the stop-half is
-  implicit. Mid-taming beasts and wild animals are out of the
-  starvation scope (wildlife forages on its own).
-- Persistence (save v7, additive): SavedStructure carries the trough
-  fodder fields (units + the quality history) for trough rows;
-  SavedAnimal carries feed_acc_nano + hunger. Older saves load through
-  the per-field serde defaults (verified: a v6 file loads under the
-  v7 binary).
+- Sex is pure server state (the wire never carries it - the client
+  renders species only): Sex enum, 50/50 at birth, wild tames keep a
+  seeded sex. Per-animal breed rows: `prod_quantity` (Milk/Wool
+  Quantity - a wild tame draws 9..11 around the legacy constant) and
+  `breed_ql` (the doc's softcap row).
+- The production sweep's Phase D: a fed adult sire of the same species
+  within BREED_SEEK_RADIUS (55 subtiles = 5 tiles, policy - the doc
+  quotes no range) of a fed adult dam advances her `pregnant_acc` each
+  tick (scaled by HNH_BREED_SCALE); at GESTATION_TICKS (3 888 000 = the
+  doc's 4.5 real days) the calf is born beside its dam. CALF_TWINS_PCT
+  (5% = 1 in 20, the doc's "rare twins") rolls twins with a 5-subtile
+  offset so two calves never stack.
+- A newborn is a DOMESTIC-BORN juvenile: fully tamed from birth, never
+  leashed (break_at 0), bound to the dam's tamer (the leash follower
+  walks it to heel like any tamed beast), rendering the adult species
+  sprite (the pack ships no calf drawable - documented deviation).
+  Juveniles bank `juvenile_acc` only while fed and mature at
+  MATURATION_TICKS (8 640 000 = the doc's 10 real days); everything
+  wild-tamed starts adult.
+- Inheritance (breed_stat_child / breed_ql_child): the child's stat row
+  averages the parents (round-half-up) with a +0..=2 / -0..=1 spread,
+  softcapped by the SIRE's breeding quality (the doc's "softcapped by
+  the bull's breeding quality" - policy: the sire's row); the child's
+  breed_ql averages the parents with the same spread, capped by the
+  HIGHER parent. The wiki's own "+20 to -5" numbers are flagged
+  unverified; this server scales that percent shape down to a stat-row
+  spread (see Open questions).
+- Runaway guards (found live): the scaled pipeline has no natural
+  brake, and an unattended fed cluster doubled every ~30 s (a live
+  trace melted the process into a 160 MB log with 80k+ gobs). Two local
+  guards: NURSING - any maturing juvenile of the species inside the
+  seek radius postpones every birth in that cluster (the dam is raising
+  it; the scan reads the tame table, not the fed table); OVERCROWDING -
+  past BREED_CLUSTER_CAP (8) fed adults of the species in the radius,
+  breeding stops outright.
+- HNH_BREED_SCALE multiplies the per-tick pregnancy and maturation
+  accumulators only (thresholds stay legacy-true; 1 = real-time) - the
+  legacy 4.5 d / 10 d cannot be verified live.
 
-## Server implementation notes (this repo, session 62: the lift mechanic)
+### Persistence
 
-- Lift (docs "Food Trough: a 2x1 lift-able object"): clicking a placed
-  Food Trough opens a one-petal flower menu ("Lift"); choosing it
-  retracts the gob for every viewer, frees the tile, and the fodder
-  store (units + the running quality history) rides the player as
-  `Player.carried_trough`. One carried object at a time; the trough
-  re-enters the world by a plain map click (the mapview `place` path)
-  at a tile that passes the same reach / terrain / occupancy
-  validations a build commit runs.
-- Trough-to-trough transfer (docs "lift-and-right-click on another
-  trough transfers fodder like a liquid"): clicking a placed trough
-  while carrying moves `min(carried, cap - dest)` units into it; the
-  moved units carry the SOURCE's running average, so the destination's
-  quality mixes by the same arithmetic the load path uses
-  (q10*100 + q12*50 -> q10). The source keeps its full quality history
-  (the session-48 rule "consumption drains units but NOT the quality
-  history") - an emptied trough keeps its average.
-- Persistence: `carried_trough` is a per-character save field (v7,
-  additive, bincode-safe `default`); a lifted trough with its fodder
-  survives restarts and cross-node character migration (CharData now
-  boxes the snapshot row). The system lines "You lift the trough (N
-  fodder units)." / "You place the trough (N fodder units)." /
-  "Transferred N fodder units." name every outcome on the wire.
-- Scope notes: the trough's 2x1 footprint stays out of scope (the gob
-  occupies its tile like any structure); a trough owned by a PEER node
-  offers no Lift petal to a guest (the click is a validated no-op) -
-  cross-node lift/transfer relays are future work, and the carried
-  trough's avatar render (the legacy carry pose) is client-side art
-  the server does not stream yet.
-
-## Server implementation notes (this repo, session 77: bear, hen, casings)
-
-- **The roster grows to eleven.** The bear (hp 120, aggressive, speed
-  40 - all policy; the doc's creature table lists it as an
-  attacker-on-sight) and the hen (hp 10, speed 20) join the wild spawn
-  picker at the same flat weight as the original roster. Both ship
-  full kritter pose sets in the 2009 jar (`kritter/bear`, `kritter/hen`
-  - verified before landing; the pose tables extended 9 -> 11 and the
-  node-link discriminants APPEND 9/10, values 0-8 stay frozen).
-  `Raw Chicken Meat` (fep.conf HHP:5) and `Bear Meat` now have world
-  sources; the roast map already carried their keys.
-- **Intestines are the sausage casing.** The butcher loot follows the
-  doc's table verbatim: Aurochs/Cattle/Bear x4, Deer x3, Boar/Sheep
-  x2, Fox x1; the mouflon row is undocumented (policy 1); Wolf, Hare
-  and Hen drop none per their doc rows. The bear also drops the raw
-  bear hide (x1) and Meat x8 per its row (the doc's Bear Tooth has no
-  item resource in the pack - Open questions); the hen drops Chicken
-  Feather x3. Meat counts otherwise stay at this server's death-drop
-  policy scale (the note above).
+- Save v8 (additive-only; every step verified to load the previous
+  version through per-field serde defaults): v6 wrote SavedAnimal
+  (species = the domestic morph, tile, hp, tameness, tamer key, meters,
+  accumulators) plus the tile_overrides round-trip bugfix; v7 added
+  trough stores (units + quality history), feed_acc_nano, hunger and
+  the carried trough; v8 adds the breeding fields (sex, prod_quantity,
+  breed_ql, pregnant_acc, juvenile_acc). Pre-v8 rows load as female
+  adult non-pregnant stock at the flat constants.
+- The tamer binding survives restarts by key (gob ids are runtime
+  identities): the row stores the tamer's character save key when
+  online and re-binds on the boot restore. A fully tamed beast never
+  re-arms its leash; a partially tamed one re-arms at load; either way
+  the next quell overwrites the tamer. Spawned wildlife is
+  seed-regenerated and never saved.
+- SIGTERM shutdown flushes the whole world through
+  save_all_and_flush (lifecycle.rs) - the herd actually lands in the
+  save file on a controlled stop (live-verified in the session-90 e2e:
+  10 tamed animals with v8 rows written by the flush and reloaded by
+  the restart boot).
 
 ## Open questions (animals)
+
+- The intensity meter's client rendering: the bar exists only
+  server-side (the legacy Fightview rendered intensity from the uimsg
+  relation, which this server keeps at 0).
+- Breeding depth beyond the live vertical: sheep/wool breeding is
+  implemented in the shared pipeline but has no e2e probe (the
+  session-90 probe covers cattle only); the calf's milk-drinking
+  reservation flow (the doc's "calves drink stored milk, so
+  reservations matter") is NOT modeled - juveniles grow from the same
+  grazing/trough feeding as adults; lactation is gated on adulthood +
+  sex, NOT on having calved (the doc's "heifers produce nothing"
+  implies a never-calved adult should not lactate - decide whether the
+  first calf should arm the meter, or keep the simpler adult-female
+  gate); there is no calf/bull drawable (a standalone cow/bull.res sex
+  variant is unverified against the cdv layering).
+- The breeding quality formula's exact spread and softcap (the wiki's
+  own "+20 -> -5 (someone please check my numbers there)" is flagged as
+  unverified): this server implements a single average+spread roll per
+  stat row scaled from that percent shape - revisit the mutation-roll
+  interpretation if a legacy capture surfaces.
+- Tamed-animal production depth: per-animal rows ARE live (session 90)
+  - wild tames draw 9..11, calves inherit - but linking the milk/wool
+  product quality to the CONSUMED FODDER average (not the grazing
+  constant) is still open; the doc's 2x1 trough footprint, the
+  cross-node lift/transfer relays, and the doc's fodder items with no
+  2009-pack resources (blueberries, chantrelles, bloated bolete,
+  peapod, beetroot/leaves, giant pumpkin) remain out of scope.
+- The boar morph is unreachable: the 2009 pack ships no pig kritter
+  directory, so a fully tamed boar stays a boar. When a pig drawable
+  surfaces (a later resource pack or the legacy client's own pack), add
+  (Boar, Pig) to Species::morph().
+- Session 36 bone drops: every species now drops `gfx/invobjs/bone` on
+  death (Deer/Aurochs/Cow/Boar/Wolf x2, Fox/Hare x1) so the Bone Arrow
+  recipe has an in-world source. The legacy butcher table above carries
+  bigger numbers (Bone Material x6 deer/cattle, x4 boar, x2 fox), but
+  this server's death-drop policy scales the whole loot table down
+  (meat x3/x4 against legacy x10) and the bone counts follow the same
+  proportion; reconcile all counts against the Legacy butcher pages
+  when a source is reachable.
+- Exact aggro radii and leash/disengage distances per species; the only
+  numeric hint is the union client's 100-unit (about 9-tile) circle for
+  boar/bear (`src/haven/MapView.java`). Determine by observation or
+  emulator prior art.
+- Full per-species movement speeds (the `v` parameter of OD_HOMING) and
+  wander cadence; not documented anywhere. Capture from a legacy
+  session.
+- Mouflon butcher quantities (the wiki leaves them as "x?"); recover
+  from the legacy client resource files or a capture.
+- Whether wild-spawned cow/bull/sheep/pig exist in legacy or every
+  domestic animal traces to a tamed wild adult (the wiki implies the
+  latter: "Must domesticate a Mouflon to obtain a Sheep").
+- Animal ownership attribution inside claims (who may interact with
+  whose cow) and whether animals inherit the owner's claim protection
+  when led outside - not documented; decide policy after reading
+  `docs/mechanics/world/` claim documents.
+- Whether troll spawn is player-proximity-aggro from creation ("suspected
+  instant agro to responsible player for its spawn" per Legacy:Creatures)
+  and what triggers troll spawns.
+- Exact critical (`kritter/*`) resource names per species and their
+  stage/variant sprite structure; requires the full legacy resource pack
+  (the local `res/` tree has none of them).
+
 
 - Taming state (post session-47): the "battle intensity == 0",
   Animal Husbandry skill, species-morph prerequisite and tamed-state
