@@ -6230,3 +6230,62 @@ real client has not walked the 127.0.0.2 leg yet).
 
 COMMITS: (this session) scripts: the remote-profile e2e gate + the
 Java-exact move semantics for probes, this handoff.
+
+## 2026-10-10 - Session 88 (type 0: the cluster surfaces land in the agent/user docs)
+
+SESSION TYPE ROTATION LOG: 85=5, 86=3, 87=4, 88=0. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: type 0 (docs hygiene) - the S86/S87 cluster surfaces existed
+only in scripts/README.md and the session records; AGENTS.md (the
+agent contract) and the root README (the user contract) never
+mentioned them. Also the standing CI-retry rule was exercised.
+
+DONE:
+
+- AGENTS.md: new "Multi-Node Cluster Surfaces (run + verify)" section
+  - cluster-up.sh up/remote/stop/status, the node-i port formula
+  (auth 1871+2i, game 1870+4i, res 1872+4i, mesh 18790+i), the two
+  e2e gates and WHEN they are mandatory (grid_owner.rs, nodes.rs,
+  game/cluster.rs, hnh-proto node messages, session/stream changes).
+  The probe-client parity contract is pinned in prose: hnhlib mirrors
+  src/haven/OCache.java (OD_MOVE never cancels a live LinMove; the
+  final LINSTEP l >= c is the arrival marker) and echoes OBJACK like
+  the real SWorker.
+- AGENTS.md GitNexus block: explicit fallback rule for environments
+  with no .gitnexus index (fresh sandbox / env restart): rebuild, or
+  text search + reading for that one session, stated in the handoff -
+  never silently skip impact analysis, never treat a grep count as a
+  graph verdict. (This sandbox itself has no index - the rule now
+  covers that case instead of it being folklore in session notes.)
+- README.md: "Quick start (multi-machine cluster)" section (one
+  command locally; the per-machine CLUSTER_SPEC/SELF commands; the
+  port formula; migration on re-login), both cluster gates in the
+  verification block, and the stale "316 tests" refreshed to 339.
+- HANDOFF.md header ("How to continue work"): step 6 now leads with
+  cluster-up.sh (raw --cluster/--node stays referenced via the
+  archive); new step 7 makes the two cluster e2e gates part of the
+  standing next-session checklist.
+- CI push retry (once per session, per AGENTS.md): restored
+  .github/workflows/rust.yml from the session-50 archive snippet
+  (fixing its corrupted `branches: aster]` line to [master]) as
+  67a8cb9 and pushed - REFUSED again ("refusing to allow a Personal
+  Access Token to create or update workflow without workflow
+  scope"). The commit was rolled back and the file deleted so master
+  stays pushable with this PAT; the snippet lives on in
+  HANDOFF_ARCHIVE.md. The PAT owner must add the workflow scope (or
+  push that one commit manually) to ever make CI real.
+
+MEASURED/EVIDENCE: docs-only session - no Rust, no scripts touched;
+the 339-test count and the gate verdict lines quoted in the docs come
+straight from the S87 run. master pushable (8490fc3 on the remote;
+the rollback verified with a follow-up push).
+
+NOT DONE / next session carries (S89 must NOT be type 0): GL e2e +
+Windows smoke of the fresh release binary; a Java-client live pass
+over the REMOTE profile; the remaining NOT-DONE dough legs from
+S79/S82; the PAT workflow-scope fix is a human action, not a session
+task.
+
+COMMITS: 8490fc3 (docs: the cluster surfaces land in AGENTS/README,
+the handoff header points at the gates), this handoff.

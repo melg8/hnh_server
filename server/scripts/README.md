@@ -52,6 +52,8 @@ taming) that are easier to drive from python.
 | test_bake.py | baking chain: saw+bucket crafts, wheat farm, bucket fill, quern grind, dough craft, oven bake (session 71; fast-crop isolated server) | `BAKE: OK` |
 | test_pottery.py | pottery chain: shore clay picks -> kiln build -> jar + mug molded -> both fired into wares (session 79) | `POTTERY: OK` |
 | test_dough.py | dough chains: forage handfuls (grapes/blueberries/chantrelles/onions), apple-tree picks + degradation, hive honey (bucket-gated), raisins hand recipe, raw apple eat (session 81) | `DOUGH: OK` |
+| test_dairy.py | dairy chain: quell-tame a cow (fast-tame isolated server), rope equip, milk draw through the flower petal, butter churn x3, carrot/wheat plant + harvest, apple pie + carrot cake + raisin butter-cake baked and eaten (session 84) | `DAIRY: OK` |
+| test_breeding.py | breeding vertical: tame cow (female row) + aurochs bull (male row), scaled gestation -> calf born beside the dam with inherited rows, maturation, heifer milked through the inherited row / honest bull refusal, SIGTERM restart -> v8 herd rows reloaded (session 90; fast-breed isolated server) | `BREEDING: OK` |
 | load43.sh | 1000-bot duel cohort perf window | p95 histograms |
 
 ## Utilities
