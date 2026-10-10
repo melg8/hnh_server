@@ -142,6 +142,15 @@ async fn stationary_player_kills_predator() {
             // Hold position next to the predator (stationary player).
             g.world.gobs.set_pos(pslot, (ax + 5, ay));
         }
+        // Session 83: a swing at an ANIMAL needs a selected attack (the
+        // Fightview queue rule). The wolf opens the duel itself (Chase
+        // from reach); arm the free Punch once the duel lives, and
+        // re-arm after any teardown the pack swap causes.
+        if g.world.players[0].fight_target.is_some()
+            && g.sessions.get(&1).unwrap().fight.atk_cur.is_none()
+        {
+            g.on_maneuver(1, "pow");
+        }
         g.tick();
         // The target may vanish (killed): check both paths.
         if !g.world.gobs.alive[pred_slot] {
@@ -416,10 +425,27 @@ async fn quell_tames_and_binds_the_rope() {
         g.world.players[pidx].fight_target, None,
         "the engagement clears"
     );
-    // The bound rope refuses a second beast.
+    // The bound rope refuses a second beast. NOTE (session 83): the
+    // refusal must NOT leave a selection behind - arm_quell's helper
+    // asserts acceptance, so drive this one by hand and require BOTH
+    // the empty tame row AND the empty attack slot (the stale-atk_cur
+    // leak used to satisfy the old assert vacuously after the first
+    // fight's window closed).
     let deer2 = spawn_deer_at(&mut g, pidx, 40, Species::Deer.max_hp());
     g.start_fight(1, deer2, Species::Deer);
-    arm_quell(&mut g, 1, deer2);
+    {
+        let out = g.sessions.get_mut(&1).unwrap();
+        let rel = out.fight.rel_mut(deer2).unwrap();
+        rel.ip_self = 5;
+        rel.adv = 40;
+        rel.sync_balance();
+    }
+    g.on_maneuver(1, "quell");
+    assert_eq!(
+        g.sessions.get(&1).unwrap().fight.atk_cur,
+        None,
+        "a refused quell never selects"
+    );
     assert!(
         !g.world.tamed.contains_key(&deer2),
         "the second quell must be refused while the rope is bound"
@@ -440,14 +466,80 @@ async fn damage_kills_tameness_and_leashes_break() {
         g.world.tamed.is_empty(),
         "damage removes the tame row entirely"
     );
-    // Re-tame, then the leash breaks on the tick sweep.
+    // Re-tame, then the leash breaks on the tick sweep: the ROW survives
+    // with the tameness BANKED (session 83 - docs: "a tameness-decay
+    // timer that re-enables the animal's hostile state unless quelled
+    // again"), the beast goes wild-again (loose) instead of forgetting
+    // its progress.
     g.apply_quell(pidx, 1, deer);
+    assert_eq!(g.world.tamed.get(&deer).unwrap().tameness, 20);
     g.world.tamed.get_mut(&deer).unwrap().break_at_tick = g.world.tick + 1;
     g.tick();
-    assert!(
-        g.world.tamed.is_empty(),
-        "the sweep breaks the leash past the deadline"
+    let row = g
+        .world
+        .tamed
+        .get(&deer)
+        .expect("the row survives the break");
+    assert!(row.loose, "the sweep flips the row to loose");
+    assert_eq!(row.tameness, 20, "the tameness stays banked");
+    // The banked progress stacks: the NEXT quell re-leashes the row and
+    // climbs toward the full 100 (the five-cycle protocol).
+    g.apply_quell(pidx, 1, deer);
+    let row = g.world.tamed.get(&deer).expect("the row re-leashes");
+    assert_eq!(
+        row.tameness, 40,
+        "the second quell stacks on the banked row"
     );
+    assert!(!row.loose, "apply_quell re-leashes the beast");
+    assert!(row.break_at_tick > g.world.tick, "the break timer re-arms");
+}
+
+#[tokio::test]
+async fn loose_beast_runs_wild_ai_and_a_fresh_fight_needs_a_fresh_quell() {
+    let (mut g, _rx, _raw) = entered_game("loosewild");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    let pslot = g.world.gobs.get(pgob).expect("player gob");
+    let (px, _py) = g.world.gobs.pos[pslot];
+    let deer = spawn_deer_at(&mut g, pidx, 20, Species::Deer.max_hp());
+    g.apply_quell(pidx, 1, deer);
+    g.world.tamed.get_mut(&deer).unwrap().loose = true;
+    // A loose beast is wild again: the AI filter must include it (only
+    // on-leash rows skip AI) - it panics away from the nearby player.
+    let dslot = g.world.gobs.get(deer).expect("deer gob");
+    g.world.gobs.mv[dslot] = None;
+    g.tick_animals();
+    let hop = g.world.gobs.mv[dslot].expect("the loose beast runs the wild AI");
+    assert!(
+        (hop.tx - (px + 20)) > 0,
+        "the loose beast panics AWAY from the player (tx={})",
+        hop.tx - (px + 20)
+    );
+    // The quell gate passes on a loose beast (banked progress, wild
+    // again): the docs' "quell again" step.
+    equip_rope(&mut g, pidx);
+    grant_ahusb(&mut g, pidx);
+    let why = g.quell_gate(pidx, deer);
+    assert!(why.is_none(), "a loose beast is quellable: {:?}", why);
+    // The rope is NOT bound by a loose row: a second beast is quellable
+    // in parallel (docs step 4: "until it is tamed or breaks loose").
+    let deer2 = spawn_deer_at(&mut g, pidx, 40, Species::Deer.max_hp());
+    let why2 = g.quell_gate(pidx, deer2);
+    assert!(why2.is_none(), "a loose row frees the rope: {:?}", why2);
+    // The stale-selection leak (session 83 live trace): atk_cur must NOT
+    // survive the fight window closing. A quell selected in fight one
+    // resolved 0.9 s into fight two with advantage 0 - the swing tick
+    // trusted a selection whose gates ran in the PREVIOUS fight.
+    g.start_fight(1, deer2, Species::Deer);
+    arm_quell(&mut g, 1, deer2);
+    g.fight_del(1, deer2);
+    assert_eq!(
+        g.sessions.get(&1).unwrap().fight.atk_cur,
+        None,
+        "the selected attack dies with the fight window"
+    );
+    // And the loose row keeps pointing at the tamer for the next quell.
+    assert_eq!(g.world.tamed.get(&deer).unwrap().tamer, pgob);
 }
 
 #[tokio::test]
@@ -541,6 +633,13 @@ async fn cow_production_accrues_on_pasture_only() {
     let slot = g.world.gobs.get(cow).unwrap();
     let sub = g.world.gobs.pos[slot];
     force_tile(&mut g, sub, hnh_world::gen::tile::GRASS);
+    // Session 83: the leash walk shepherds a tamed beast standing far
+    // behind its tamer - park the tamer BESIDE the cow so the beast
+    // stays on this test's controlled tile.
+    {
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        g.world.gobs.set_pos(pslot, sub);
+    }
     for _ in 0..601 {
         g.tick();
     }
@@ -772,8 +871,12 @@ async fn wild_and_midtaming_animals_keep_the_fight_path() {
         "a wild cow opens the fight"
     );
     // Mid-taming: the beast still runs the leash protocol, not the
-    // production menu.
-    let mid = spawn_species_at(&mut g, pidx, 60, Species::Sheep.max_hp(), Species::Sheep);
+    // production menu. Session 83: melee engagement opens only from
+    // swing reach (33), so the click lands from dist 30. One Fightview
+    // per player: the click is refused while the wild duel lives, so
+    // the test first walks the DISENGAGE path (fight row gone, target
+    // reset) before re-clicking.
+    let mid = spawn_species_at(&mut g, pidx, 30, Species::Sheep.max_hp(), Species::Sheep);
     let mut tame = crate::state::TameState::new(pgob, g.world.tick + 6000);
     tame.tameness = 40;
     g.world.tamed.insert(mid, tame);
@@ -781,8 +884,130 @@ async fn wild_and_midtaming_animals_keep_the_fight_path() {
     assert!(g.sessions.get(&1).unwrap().animal_menu.is_none());
     assert_eq!(
         g.world.players[pidx].fight_target,
+        Some(wild),
+        "one Fightview: the click cannot steal the live wild duel"
+    );
+    // DISENGAGE-equivalent teardown, then the mid-taming beast DOES
+    // engage (still the fight path, never the production menu).
+    g.world.players[pidx].fight_target = None;
+    g.world.animal_fights.remove(&wild);
+    g.player_interact(1, pgob, mid, (0, 0));
+    assert!(g.sessions.get(&1).unwrap().animal_menu.is_none());
+    assert_eq!(
+        g.world.players[pidx].fight_target,
         Some(mid),
         "a mid-taming beast opens the fight"
+    );
+    // Session 83: a click from BEYOND swing reach is refused instead of
+    // opening a fight the next DISENGAGE tick would tear down (the
+    // client streams the beast's older position while it bolts). The
+    // live engagement stays untouched.
+    let far = spawn_species_at(&mut g, pidx, 120, Species::Cow.max_hp(), Species::Cow);
+    g.player_interact(1, pgob, far, (0, 0));
+    assert_eq!(
+        g.world.players[pidx].fight_target,
+        Some(mid),
+        "an out-of-reach beast never engages (the live fight stays)"
+    );
+    assert!(
+        !g.world.animal_fights.contains_key(&far),
+        "no fight row for the out-of-reach beast"
+    );
+}
+
+/// Session 83: the panic hop must run straight AWAY from the player.
+/// The old random ±550 scatter regularly bounded THROUGH the player
+/// and starved the quell swing cadence of its 33-subtile reach - the
+/// live dairy probe never landed a quell. A beast already IN a fight
+/// additionally keeps its hops small enough that the swing reach
+/// re-closes within a tick or two of the tamer's chase.
+#[tokio::test]
+async fn panic_hops_away_and_fighting_beasts_stay_reachable() {
+    let (mut g, _rx, _raw) = entered_game("s83panic");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    let pslot = g.world.gobs.get(pgob).expect("player gob");
+    let (px, py) = g.world.gobs.pos[pslot];
+
+    // A grazing cow 100 units east of the player bounds further away.
+    let cow = spawn_species_at(&mut g, pidx, 100, Species::Cow.max_hp(), Species::Cow);
+    g.tick_animals();
+    let cslot = g.world.gobs.get(cow).expect("cow gob");
+    let hop = g.world.gobs.mv[cslot].expect("the grazing cow hopped");
+    assert!(
+        (hop.tx - px).abs() > 150,
+        "the panic hop must out-distance the old position (tx={})",
+        hop.tx - px
+    );
+    assert!(
+        (hop.tx - (px + 100)) > 0,
+        "the hop must move away from the player, not toward it (tx={})",
+        hop.tx - px
+    );
+    assert!(
+        (hop.ty - py).abs() < 80,
+        "the cross-axis scatter stays bounded (ty={})",
+        hop.ty - py
+    );
+
+    // A fighting beast hops small: the whole step stays inside a
+    // disengage-scale neighborhood so the 33-subtile swing reach
+    // re-closes on the next chase tick.
+    let aurochs = spawn_species_at(&mut g, pidx, 40, Species::Cow.max_hp(), Species::Aurochs);
+    g.start_fight(1, aurochs, Species::Aurochs);
+    g.tick_animals();
+    let aslot = g.world.gobs.get(aurochs).expect("aurochs gob");
+    let hop = g.world.gobs.mv[aslot].expect("the fighting beast hopped");
+    let step = ((hop.tx - (px + 40)).abs(), (hop.ty - py).abs());
+    assert!(
+        step.0.max(step.1) < 40,
+        "a fighting beast's hop stays small (step=({},{}))",
+        step.0,
+        step.1
+    );
+    assert!(
+        (hop.tx - px).abs() > 40,
+        "the small hop still moves away from the player (tx={})",
+        hop.tx - px
+    );
+}
+
+/// Session 83: the tamed beast follows its tamer SERVER-side (docs
+/// step 4/6: "the animal follows the tamer (leashed)"), not just in
+/// the client's OD_FOLLOW render - grazing and production read the
+/// server tile under the beast. A beast stranded far behind walks
+/// toward the tamer; a beast already at the heel stays put.
+#[tokio::test]
+async fn tamed_beast_follows_the_tamer() {
+    let (mut g, _rx, _raw) = entered_game("s83follow");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    let pslot = g.world.gobs.get(pgob).expect("player gob");
+    let (px, _py) = g.world.gobs.pos[pslot];
+
+    // Stranded 100 east: walks back toward the tamer's position.
+    let far = spawn_species_at(&mut g, pidx, 100, Species::Cow.max_hp(), Species::Cow);
+    let mut tame = crate::state::TameState::new(pgob, 0);
+    tame.tameness = 40;
+    g.world.tamed.insert(far, tame);
+    // Already at the heel (20 < LEASH_FOLLOW_DIST): stays put.
+    let near = spawn_species_at(&mut g, pidx, 20, Species::Cow.max_hp(), Species::Cow);
+    g.world
+        .tamed
+        .insert(near, crate::state::TameState::new(pgob, 0));
+
+    g.tick();
+    let fslot = g.world.gobs.get(far).expect("far cow gob");
+    let walk = g.world.gobs.mv[fslot].expect("the stranded cow walks");
+    assert!(
+        (walk.tx - px).abs() < 100,
+        "the follow walk heads toward the tamer (tx-px={})",
+        walk.tx - px
+    );
+    let nslot = g.world.gobs.get(near).expect("near cow gob");
+    assert!(
+        g.world.gobs.mv[nslot].is_none(),
+        "a cow at the heel does not thrash start_move"
     );
 }
 

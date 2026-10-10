@@ -237,6 +237,7 @@ impl Game {
                 prod_acc: tame.prod_acc,
                 feed_acc_nano: tame.feed_acc_nano,
                 hunger: tame.hunger,
+                loose: tame.loose,
             });
         }
         self.save.world_state.animals = animals;

@@ -298,6 +298,26 @@ impl Game {
         crate::state::HONEY_PICK_LP
     }
 
+    /// True when the session's player stands inside the 33-subtile
+    /// swing reach of the gob at `tslot` (the same per-axis check the
+    /// swing cadence applies in tick_combat). Session 83: a melee
+    /// engagement only opens from swing reach so the DISENGAGE pass
+    /// never tears the fresh fight down on the very next tick (the
+    /// client streams the beast's OLDER position while it bolts, so a
+    /// chase-click routinely lands far away).
+    fn player_in_reach_of(&self, sid: SessionId, tslot: usize) -> bool {
+        const REACH: i32 = 33;
+        let Some(&pidx) = self.world.by_session.get(&sid) else {
+            return false;
+        };
+        let Some(pslot) = self.world.gobs.get(self.world.players[pidx].gob) else {
+            return false;
+        };
+        let (px, py) = self.world.gobs.pos[pslot];
+        let (tx, ty) = self.world.gobs.pos[tslot];
+        (px - tx).abs() <= REACH && (py - ty).abs() <= REACH
+    }
+
     pub(super) fn player_interact(
         &mut self,
         sid: SessionId,
@@ -516,6 +536,20 @@ impl Game {
                 // the fight window (archery.rs; the aim meter is the
                 // accuracy meter of Legacy:Combat_Actions).
                 if self.start_aim(sid, target) {
+                    return;
+                }
+                // Session 83: melee engagement opens only from swing
+                // reach (the same 33-subtile check the swing cadence
+                // applies). A click from beyond reach used to open a
+                // fight the very next DISENGAGE tick tore down - the
+                // client streams the beast's OLDER position while it
+                // bolts, so a chase-click lands far away - and the
+                // whole maneuver series then talked to a closed fight
+                // ("You are not fighting anyone"). Legacy attack
+                // clicks require adjacency; the client re-clicks once
+                // it has actually closed in.
+                if !self.player_in_reach_of(sid, tslot) {
+                    self.system_line(sid, "You are too far away to attack.");
                     return;
                 }
                 self.start_fight(sid, target, species);

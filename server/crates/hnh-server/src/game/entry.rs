@@ -407,9 +407,13 @@ impl Game {
                 // stone-tool batch (saw/pickaxe/scythe/sprucecap) is also
                 // reachable without first harvesting; world gathering
                 // (bough/stone picking) remains future work.
+                // Session 83: the third string lets a fresh character
+                // spin a Rope (string x3) - the taming gate's equipped
+                // weapon - so the cow -> milk -> butter dairy chain is
+                // playable out of the box too.
                 ("gfx/invobjs/branch", 10, 10, ""),
                 ("gfx/invobjs/stone", 6, 10, ""),
-                ("gfx/invobjs/string", 2, 10, ""),
+                ("gfx/invobjs/string", 3, 10, ""),
                 ("gfx/invobjs/meat", 1, 10, "Beef"),
                 // Farming starter seeds: the plow pagina is pushed to
                 // every session, so the full plant-grow-harvest loop is

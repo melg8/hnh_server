@@ -681,6 +681,9 @@ async fn relay_swing_ships_relayattack_and_fightbars_resync() {
     let (mut g, _rx, _raw, mut mesh_rx) = clustered_game("swinger", 0, 2);
     let gid = relay_wolf_guest(&mut g, 30, 50);
     g.start_fight(1, gid, Species::Wolf);
+    // Session 83: a swing at an ANIMAL needs a selected attack (the
+    // Fightview queue rule) - arm the free Punch so the cadence fires.
+    g.on_maneuver(1, "pow");
     // Full offence bar + no cooldown: the next tick must swing.
     g.sessions.get_mut(&1).unwrap().fight.own_off = crate::fight::BAR_FULL;
     g.sessions.get_mut(&1).unwrap().fight.atkc = 0;

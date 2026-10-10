@@ -16,14 +16,18 @@ async fn bow_click_opens_aim_instead_of_fight() {
     let p = &g.world.players[pidx];
     assert_eq!(p.aim.map(|a| a.target), Some(deer), "aim started");
     assert_eq!(p.fight_target, None, "no melee fight for a bow carrier");
-    // Without a bow the same click opens the melee fight.
+    // Without a bow the same click opens the melee fight. Session 83:
+    // melee engagement opens only from swing reach (33 subtiles), so
+    // the bow-less leg clicks a deer standing close by - the 66-unit
+    // deer is out of reach for a melee click.
     g.world.players[pidx].aim = None;
     g.world.players[pidx].equip[0] = None;
-    g.player_interact(1, pgob, deer, (0, 0));
+    let close = spawn_deer_at(&mut g, pidx, 20, 200);
+    g.player_interact(1, pgob, close, (0, 0));
     assert_eq!(
         g.world.players[pidx].fight_target,
-        Some(deer),
-        "melee fight opens without a bow"
+        Some(close),
+        "melee fight opens without a bow from swing reach"
     );
 }
 

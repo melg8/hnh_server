@@ -215,6 +215,13 @@ async fn trough_radius_bounds_feeding() {
         force_tile(&mut g, (fx + 220, fy), hnh_world::gen::tile::SAND);
     }
     full_tame(&mut g, cow, pgob);
+    // Session 83: the leash walk shepherds a tamed beast standing far
+    // behind its tamer - park the tamer BESIDE the cow so the beast
+    // stays on this test's controlled tile.
+    {
+        let pslot = g.world.gobs.get(pgob).unwrap();
+        g.world.gobs.set_pos(pslot, (fx + 220, fy));
+    }
     for _ in 0..601 {
         g.tick();
     }

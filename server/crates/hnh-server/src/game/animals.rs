@@ -199,14 +199,20 @@ impl Game {
         // guests or other nodes' authority; transferred out on crossing).
         // Tamed animals skip AI entirely: the client renders the leash
         // (OD_FOLLOW), the beast holds position and never re-aggros while
-        // the tame row lives (session 45).
+        // the tame row lives AND stays leashed (session 83). A LOOSE row
+        // (timer-based leash break, banked tameness) runs the wild AI
+        // again - the beast panics/bites until the next quell re-leashes
+        // it.
         let animal_ids: Vec<GobId> = self
             .world
             .animal_gobs
             .iter()
             .copied()
             .filter(|&id| match self.world.gobs.get(id) {
-                Some(slot) => self.is_authority_slot(slot) && !self.world.tamed.contains_key(&id),
+                Some(slot) => {
+                    self.is_authority_slot(slot)
+                        && !self.world.tamed.get(&id).map(|t| !t.loose).unwrap_or(false)
+                }
                 None => false,
             })
             .collect();
@@ -293,7 +299,35 @@ impl Game {
         }
         let action = match nearest {
             Some((pgob, dist)) if species.aggressive() && dist < aggro => AnimalAction::Chase(pgob),
-            Some((_pgob, dist)) if !species.aggressive() && dist < 200 => AnimalAction::Flee,
+            Some((pgob, dist)) if !species.aggressive() && dist < 200 => {
+                // Directional panic (session 83): hop straight AWAY from
+                // the threat. The old hop was a random ±550 scatter that
+                // regularly bounded THROUGH the player and kept the
+                // fight's swing cadence out of the 33-subtile reach for
+                // the whole ~20 s hop - the live dairy probe could never
+                // land a quell swing. A beast already IN a fight keeps
+                // its hops tiny (the tamer's chase closes within a tick
+                // or two); a grazing beast bounds away in longer hops
+                // that a run/sprint player (50/66 vs the cow's 30) can
+                // still run down.
+                let (px, py) = world
+                    .gobs
+                    .get(pgob)
+                    .map(|ps| world.gobs.pos[ps])
+                    .unwrap_or((ax, ay));
+                let (dx, dy) = (ax - px, ay - py);
+                let len = (dx.abs() + dy.abs()).max(1);
+                let in_fight = world.animal_fights.contains_key(id);
+                let hop = if in_fight { 18 } else { 165 };
+                // Deterministic jitter (the same (tick, slot) splitmix32
+                // family as the wander branch) keeps the parallel pass
+                // race-free; ±8 while fighting, ±40 at large.
+                let h =
+                    (tick as u32).wrapping_mul(0x9E3779B9) ^ (slot as u32).wrapping_mul(0x85EBCA6B);
+                let (span, mid) = if in_fight { (17u32, 8) } else { (81u32, 40) };
+                let j = ((h >> 8) % span) as i32 - mid;
+                AnimalAction::Flee((dx * hop / len + j, dy * hop / len + j))
+            }
             _ if tick % 20 == (slot as u64) % 20 => {
                 // Deterministic (tick, slot) hash stands in for the shared
                 // RNG so the parallel pass stays race-free (splitmix32).
@@ -351,12 +385,11 @@ impl Game {
                 let cap = 200.min(d);
                 (sx + dx * cap / d, sy + dy * cap / d)
             }
-            AnimalAction::Flee => {
-                // Run away from the nearest player (approximately: random
-                // opposite direction).
-                let jx = (self.world.next_ai_rand(21) - 10) * 55;
-                let jy = (self.world.next_ai_rand(21) - 10) * 55;
-                (sx + jx, sy + jy)
+            AnimalAction::Flee(step) => {
+                // The pure intent pass already aimed this hop away from
+                // the threat (small while fighting, long while grazing);
+                // the serial phase only adds it to the current position.
+                (sx + step.0, sy + step.1)
             }
             AnimalAction::Wander => {
                 let jx = (self.world.next_ai_rand(15) - 7) * 22;
@@ -475,6 +508,19 @@ impl Game {
                 // Every swing relays one (dmg, chip) pair: the owner
                 // applies the chip to its authoritative bar and decides on
                 // its own opening; landing locally is only UI prediction.
+                // Session 83, guest ANIMAL: no selected attack, no swing
+                // (the HnH Fightview queue rule; see the local animal
+                // path below for the full rationale). Guest PLAYERS keep
+                // the legacy bare-fisted auto swing (PvP model).
+                let guest_is_player = matches!(guest.kind, crate::nodes::GuestKind::Player { .. });
+                if !guest_is_player
+                    && self
+                        .sessions
+                        .get(&sid)
+                        .is_some_and(|o| o.fight.atk_cur.is_none())
+                {
+                    continue;
+                }
                 let relay: (i32, i32) = {
                     let Some(out) = self.sessions.get_mut(&sid) else {
                         continue 'player;
@@ -531,8 +577,6 @@ impl Game {
                     // HP and the knockout path live with the session,
                     // same authority split as PvpArrow) - not the cell
                     // owner, which is where a guest ANIMAL's bars live.
-                    let guest_is_player =
-                        matches!(guest.kind, crate::nodes::GuestKind::Player { .. });
                     if guest_is_player {
                         let home = self.node_of_gob(target);
                         c.mesh.send(
@@ -579,9 +623,15 @@ impl Game {
                     // Shared movement entry point (client-consistent timing;
                     // see start_move).
                     let t_c = Instant::now();
-                    self.start_move(pslot, (tx, ty));
+                    let moved = self.start_move(pslot, (tx, ty));
                     chase_us += t_c.elapsed().as_micros() as u64;
                     chase_n += 1;
+                    if !moved && self.world.tick.is_multiple_of(10) {
+                        debug!(
+                            sid,
+                            target, px, py, tx, ty, "chase blocked: no clear path to the target"
+                        );
+                    }
                 }
                 continue;
             }
@@ -735,6 +785,18 @@ impl Game {
                 if out.fight.own_off < crate::fight::SWING_SPEND || out.fight.atkc > 0 {
                     continue;
                 }
+                // Session 83: a swing against an ANIMAL needs a selected
+                // attack (the HnH Fightview queue rule: no queued attack,
+                // no damage swing - the player stands guard). The live
+                // taming trace showed why: after a REFUSED quell ("too
+                // heated", atk_cur stays None) the cadence happily fired
+                // ~50 free auto-swings over the 40 s wait and killed the
+                // aurochs long before any quell could resolve. PvP melee
+                // keeps the legacy auto-swing (the load duelers and the
+                // melee probe both model bare-fisted auto attacks).
+                if out.fight.atk_cur.is_none() {
+                    continue;
+                }
                 // Swing: spend offence, chip defence, land damage on an opening.
                 out.fight.own_off -= crate::fight::SWING_SPEND;
                 out.fight.atkc = crate::fight::ATKC_TICKS;
@@ -743,6 +805,9 @@ impl Game {
                 // (the IP/adv/rope gates ran at selection time, so the
                 // attempt is valid here by construction).
                 let quell = out.fight.atk_cur == Some("paginae/atk/quell");
+                if quell {
+                    debug!(sid, target, "quell swing resolves");
+                }
                 if quell {
                     Some((true, None))
                 } else {
@@ -1070,6 +1135,18 @@ impl Game {
     /// already bound to a partially-tamed beast, and the beast not
     /// already tamed. Returns the refusal reason or None.
     pub(super) fn quell_gate(&mut self, pidx: usize, target: GobId) -> Option<String> {
+        let why = self.quell_gate_inner(pidx, target);
+        debug!(
+            pidx,
+            target,
+            refused = why.is_some(),
+            reason = why.as_deref().unwrap_or(""),
+            "quell gate"
+        );
+        why
+    }
+
+    fn quell_gate_inner(&mut self, pidx: usize, target: GobId) -> Option<String> {
         let tslot = self.world.gobs.get(target)?;
         if !matches!(self.world.gobs.kind[tslot], Kind::Animal { .. }) {
             return Some("You can only quell an animal.".to_owned());
@@ -1083,8 +1160,14 @@ impl Game {
         if self.world.guests.contains_key(&target) {
             return Some("That beast is beyond your rope's reach.".to_owned());
         }
-        if self.world.tamed.contains_key(&target) {
-            return Some("That beast is already quelled.".to_owned());
+        if let Some(tame) = self.world.tamed.get(&target) {
+            if !tame.loose {
+                return Some("That beast is already quelled.".to_owned());
+            }
+            // A LOOSE row is banked tameness on a wild-again beast: the
+            // docs' five-cycle protocol re-quells the SAME beast ("a
+            // quelled beast re-aggros on its own ... quell again"), so
+            // the gate passes and apply_quell re-leashes it.
         }
         if !self.rope_equipped(pidx) {
             return Some("You need a rope equipped to quell a beast.".to_owned());
@@ -1097,13 +1180,15 @@ impl Game {
             }
         }
         // The rope binds to one animal until it turns hostile again
-        // (tameness reaches full = permanently tame, binding ends).
+        // (tameness reaches full = permanently tame, binding ends). A
+        // LOOSE beast frees the rope (docs step 4: "until it is tamed or
+        // breaks loose") - only on-leash mid-taming rows bind.
         let my_gob = self.world.players[pidx].gob;
         let bound = self
             .world
             .tamed
             .values()
-            .any(|t| t.tamer == my_gob && t.tameness < crate::state::TAMENESS_FULL);
+            .any(|t| !t.loose && t.tamer == my_gob && t.tameness < crate::state::TAMENESS_FULL);
         if bound {
             return Some(
                 "Your rope is bound to another beast until it is tamed or breaks loose.".to_owned(),
@@ -1130,10 +1215,14 @@ impl Game {
     /// leash-break timer starts (docs steps 3-5). At 100 tameness the
     /// animal is permanently tame and never breaks loose again.
     pub(super) fn apply_quell(&mut self, pidx: usize, sid: SessionId, target: GobId) {
+        debug!(sid, target, "apply quell");
         let tamer_gob = self.world.players[pidx].gob;
         // End the battle: the beast stops biting (out of animal_fights).
         self.world.animal_fights.remove(&target);
-        // Accumulate tameness.
+        // Accumulate tameness. A LOOSE row (banked progress after a
+        // timer-based leash break) re-leashes in place: the entry survives
+        // the break, so the five cycles stack 20 -> 40 -> ... -> 100 on
+        // the SAME beast (session 83; docs step 5 "quell again").
         let (tameness, full) = {
             let entry = self
                 .world
@@ -1141,11 +1230,14 @@ impl Game {
                 .entry(target)
                 .or_insert_with(|| crate::state::TameState::new(tamer_gob, 0));
             entry.tamer = tamer_gob;
+            entry.loose = false;
             entry.tameness = (entry.tameness + crate::state::TAMENESS_PER_QUELL)
                 .min(crate::state::TAMENESS_FULL);
             // The leash-break deadline: ~10 minutes from NOW on every
-            // quell below full (docs step 5; game-time based).
-            entry.break_at_tick = self.world.tick + crate::state::LEASH_BREAK_TICKS;
+            // quell below full (docs step 5; game-time based). The
+            // HNH_LEASH_TICKS dev knob shrinks the live-verification
+            // spacing (see state::leash_break_ticks).
+            entry.break_at_tick = self.world.tick + crate::state::leash_break_ticks();
             if entry.tameness >= crate::state::TAMENESS_FULL {
                 entry.break_at_tick = 0;
                 (entry.tameness, true)
@@ -1341,6 +1433,37 @@ impl Game {
             self.chat_line(
                 sid,
                 &format!("The beast breaks its leash {reason}!"),
+                Some((255, 128, 128)),
+            );
+        }
+    }
+
+    /// Timer-based leash break (session 83): the docs model it as "a
+    /// tameness-decay timer that re-enables the animal's hostile state
+    /// unless quelled again" - the beast goes wild again (wild AI, follow
+    /// off, rope free) but the accumulated tameness stays BANKED in the
+    /// row. The next quell re-leashes the beast and adds on top; only a
+    /// damage-based break (break_leash) wipes the progress. Fully tamed
+    /// beasts never reach here (break_at_tick stays 0).
+    pub(super) fn leash_expire(&mut self, target: GobId) {
+        let (tamer, tameness) = {
+            let Some(tame) = self.world.tamed.get_mut(&target) else {
+                return;
+            };
+            if tame.tameness >= crate::state::TAMENESS_FULL {
+                return;
+            }
+            tame.loose = true;
+            (tame.tamer, tame.tameness)
+        };
+        self.stream_follow_off(target);
+        let tamer_pidx = self.world.players.iter().position(|p| p.gob == tamer);
+        if let Some(pidx) = tamer_pidx {
+            let sid = self.world.players[pidx].session;
+            debug!(?target, tameness, "leash expired; tameness banked");
+            self.chat_line(
+                sid,
+                "The beast breaks its leash and re-attacks!",
                 Some((255, 128, 128)),
             );
         }

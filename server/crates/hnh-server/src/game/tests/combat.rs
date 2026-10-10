@@ -448,6 +448,49 @@ async fn combat_indexes_resolve_victims_and_first_engagement() {
     );
 }
 
+/// Session 83: one Fightview per player. A boar that reaches swing
+/// reach mid-duel used to re-enter start_fight on EVERY combat tick
+/// (the live trace showed "fight started" ten times a second), each
+/// call re-opening the frv widget and STEALING fight_target from the
+/// beast being quelled. The gate: an engaged player never opens
+/// another duel - the chaser's engage attempt is a no-op until the
+/// live fight ends (DISENGAGE, death or exit reset fight_target).
+#[tokio::test]
+async fn engaged_player_cannot_be_forced_into_a_second_duel() {
+    let (mut g, _rx, _raw) = entered_game("s83gate");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let cow = spawn_species_at(&mut g, pidx, 25, Species::Cow.max_hp(), Species::Cow);
+    g.start_fight(1, cow, Species::Cow);
+    assert_eq!(g.world.players[pidx].fight_target, Some(cow));
+    // The boar's per-tick engage attempt (apply_animal_action's Chase
+    // branch calls start_fight from swing reach): refused while the
+    // cow duel lives, no matter how many ticks it repeats.
+    let boar = spawn_species_at(&mut g, pidx, 25, Species::Boar.max_hp(), Species::Boar);
+    for _ in 0..3 {
+        g.start_fight(1, boar, Species::Boar);
+        g.tick_combat();
+    }
+    assert_eq!(
+        g.world.players[pidx].fight_target,
+        Some(cow),
+        "the boar cannot steal the live cow duel"
+    );
+    assert!(
+        !g.world.animal_fights.contains_key(&boar),
+        "no fight row is ever created for the refused chaser"
+    );
+    // DISENGAGE-equivalent teardown: the next engage attempt (the same
+    // beast or another) opens normally.
+    g.world.players[pidx].fight_target = None;
+    g.world.animal_fights.remove(&cow);
+    g.start_fight(1, boar, Species::Boar);
+    assert_eq!(
+        g.world.players[pidx].fight_target,
+        Some(boar),
+        "a free player still engages normally"
+    );
+}
+
 /// Session-43 stale-row guard: a player knocked out during the player
 /// phase (PvP) keeps a stale engaged-animal row for the rest of the
 /// tick; the live fight_target re-check must stop the deer from

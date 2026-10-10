@@ -288,6 +288,33 @@ async fn starter_kit_covers_the_bow_chain() {
     }
 }
 
+/// Session 83: the dairy chain's gate is the taming rope (string x3),
+/// and the kit composition is the server policy that keeps it craftable
+/// with zero foraging (the flax-fibre string economy needs a farming
+/// detour the fresh character cannot take yet).
+#[tokio::test]
+async fn starter_kit_covers_the_rope_chain() {
+    let (mut g, _rx, _raw) = entered_game("ropekit");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let gidx = g.world.res.intern("gfx/invobjs/string");
+    let strings: u32 = g.world.players[pidx]
+        .inv
+        .iter()
+        .filter(|s| s.res == gidx)
+        .map(|s| s.count)
+        .sum();
+    assert!(strings >= 3, "the rope needs three strings (got {strings})");
+    assert!(
+        g.craft_once(1, "rope"),
+        "rope spins straight out of the kit"
+    );
+    let rope_gidx = g.world.res.intern("gfx/invobjs/rope");
+    assert!(
+        g.world.players[pidx].inv.iter().any(|s| s.res == rope_gidx),
+        "the rope landed in the inventory"
+    );
+}
+
 // ------------------------------------------------------------------
 // Bow ranged combat (session 37, archery.rs)
 // ------------------------------------------------------------------

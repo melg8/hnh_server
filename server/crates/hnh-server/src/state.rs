@@ -1285,6 +1285,16 @@ pub struct TameState {
     /// no grazing tile). Reset on any feeding; at STARVE_DEATH_TICKS the
     /// animal dies (session 48 starvation policy). Persisted.
     pub hunger: u64,
+    /// True after a TIME-based leash break (session 83): the beast runs
+    /// wild AI again, the follow render is off and the rope is free, but
+    /// the accumulated tameness stays BANKED - the docs model the break
+    /// as "a tameness-decay timer that re-enables the animal's hostile
+    /// state unless quelled again" and "Tameness is per-animal
+    /// persistent server state". The next quell re-leashes the beast
+    /// (loose=false, break timer re-armed) and adds on top of the banked
+    /// value. A DAMAGE-based break still wipes the whole row. Ignored at
+    /// full tameness (never loose).
+    pub loose: bool,
 }
 
 impl TameState {
@@ -1298,6 +1308,7 @@ impl TameState {
             prod_acc: 0,
             feed_acc_nano: 0,
             hunger: 0,
+            loose: false,
         }
     }
 }
@@ -1310,6 +1321,31 @@ pub const TAMENESS_FULL: i32 = 100;
 /// "about ten minutes (5-15, variable)" - the floor as server policy).
 /// 600 s / TICK_MS(100) = 6000 ticks.
 pub const LEASH_BREAK_TICKS: u64 = 6000;
+
+/// Leash follow distance (session 83): a tamed beast standing farther
+/// than this behind its tamer walks toward them (docs step 4/6: "the
+/// animal follows the tamer (leashed)"). 30 subtiles keeps the beast
+/// within the combat swing reach (33), so a quelled herd stays at the
+/// tamer's heel instead of freezing wherever the quell landed.
+pub const LEASH_FOLLOW_DIST: i32 = 30;
+
+/// Session 83: `HNH_LEASH_TICKS` overrides the leash-break deadline in
+/// game ticks for live verification - the legacy deadline spaces the
+/// five quell cycles of one taming out over ~50 real minutes, which no
+/// e2e probe can sit out. The value floors at 1 tick (a 0 would break
+/// the leash on the arming tick itself); unset or malformed falls back
+/// to the legacy constant. The tamed table is empty in the steady
+/// state, so this stays a dev-only knob like HNH_MILK_RATE.
+pub fn leash_break_ticks() -> u64 {
+    static TICKS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *TICKS.get_or_init(|| {
+        std::env::var("HNH_LEASH_TICKS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v >= 1)
+            .unwrap_or(LEASH_BREAK_TICKS)
+    })
+}
 
 // --- Production meters (session 47; animals-and-husbandry.md "Animal
 // products and collection flows"). ---
@@ -1340,6 +1376,82 @@ pub const MILK_PER_BUCKET_UNITS: u32 = 100;
 /// heath and grassland as food of quality level 10, so the product
 /// quality follows at 10 (server policy pending bred-stat systems).
 pub const GRAZE_PRODUCT_QL: u8 = 10;
+
+/// Session 83: `HNH_MILK_RATE` multiplies tame-cow milk production for
+/// developer playability - the legacy rate needs ~100 real minutes for
+/// one bucket (MILK_ACC_PER_UNIT / MILK_QUANTITY ticks per unit x
+/// MILK_PER_BUCKET_UNITS), which no live verification can sit out.
+/// The scale multiplies the per-tick accumulator only (the stored
+/// meters and the drawn-per-bucket volume stay legacy-true); 1 is
+/// legacy real-time. Malformed values fall back to 1 rather than wedge
+/// boot. Wool follows its own doc rate and is left untouched.
+pub fn milk_rate() -> u32 {
+    static RATE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *RATE.get_or_init(|| {
+        std::env::var("HNH_MILK_RATE")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v >= 1)
+            .unwrap_or(1)
+    })
+}
+
+#[cfg(test)]
+mod milk_rate_tests {
+    use super::*;
+
+    /// The scale contract: whatever the environment holds (tests run
+    /// without HNH_MILK_RATE set, and a stray value would still be
+    /// pinned at >= 1), the gain never drops below the legacy rate and
+    /// the saturating product cannot panic on absurd scales.
+    #[test]
+    fn milk_rate_never_scales_below_legacy() {
+        assert!(milk_rate() >= 1);
+        let gain = MILK_QUANTITY.saturating_mul(milk_rate());
+        assert!(gain >= MILK_QUANTITY);
+        assert_eq!(u32::MAX.saturating_mul(milk_rate()), u32::MAX);
+    }
+
+    /// The legacy bucket math the live dairy probe leans on: at rate 1
+    /// one full bucket needs the documented accumulator walk (100
+    /// units x MILK_ACC_PER_UNIT / MILK_QUANTITY per tick), and scaling
+    /// divides the wait by exactly the rate factor (ceil, so a partial
+    /// rate still fills the bucket within one extra tick).
+    #[test]
+    fn milk_bucket_walk_is_rate_scaled() {
+        let rate = milk_rate() as u64;
+        let legacy = (MILK_PER_BUCKET_UNITS as u64 * MILK_ACC_PER_UNIT as u64)
+            .div_ceil(MILK_QUANTITY as u64);
+        let per_tick = MILK_QUANTITY as u64 * rate;
+        let ticks = legacy.div_ceil(per_tick);
+        // The walk covers the bucket (>=) without overshooting it by a
+        // full rate window (< legacy + rate): the ceil guarantee.
+        assert!(ticks * per_tick >= legacy);
+        assert!((ticks - 1) * per_tick < legacy);
+        // The documented legacy number: 6000 ticks per unit x 100 units
+        // at quantity 10 per tick = 60000 ticks = 100 real minutes.
+        assert_eq!(legacy, 60_000);
+    }
+}
+
+#[cfg(test)]
+mod leash_ticks_tests {
+    use super::*;
+
+    /// The knob contract: tests run without HNH_LEASH_TICKS, so the
+    /// deadline must fall back to the documented legacy floor (6000
+    /// ticks = 10 real minutes); a floor-1 value can never arm a
+    /// leash that breaks on the arming tick itself (>= 1), and the
+    /// save/apply paths add it to `world.tick` unchanged.
+    #[test]
+    fn leash_break_ticks_falls_back_to_legacy() {
+        let t = leash_break_ticks();
+        assert!(t >= 1, "the deadline must be at least one tick");
+        if std::env::var("HNH_LEASH_TICKS").is_err() {
+            assert_eq!(t, LEASH_BREAK_TICKS);
+        }
+    }
+}
 
 // --- Food Trough + feeding (session 48; animals-and-husbandry.md
 // "Feeding: troughs and grazing"). ---

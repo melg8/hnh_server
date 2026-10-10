@@ -223,6 +223,11 @@ pub struct SavedAnimal {
     /// Consecutive unfed ticks (session 48 starvation timer).
     #[serde(default)]
     pub hunger: u64,
+    /// True when the leash broke on the timer while mid-taming: the
+    /// saved tameness is banked, the beast is wild again and the next
+    /// quell re-leashes it (session 83; docs: "unless quelled again").
+    #[serde(default)]
+    pub loose: bool,
 }
 
 impl SaveData {
@@ -748,6 +753,7 @@ mod tests {
                         prod_acc: 0,
                         feed_acc_nano: 0,
                         hunger: 0,
+                        loose: false,
                     })
                     .collect(),
             }

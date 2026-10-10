@@ -496,13 +496,18 @@ impl Game {
             );
             world.animal_gobs.push(gob);
             if saved.tameness > 0 {
-                let break_at = if saved.tameness >= crate::state::TAMENESS_FULL {
+                // A LOOSE saved row is a wild-again beast with BANKED
+                // tameness (session 83): restore the row loose - the
+                // sweep skips it (no follow, no re-break) and the next
+                // quell re-leashes it in place.
+                let break_at = if saved.loose || saved.tameness >= crate::state::TAMENESS_FULL {
                     0
                 } else {
-                    world.tick + crate::state::LEASH_BREAK_TICKS
+                    world.tick + crate::state::leash_break_ticks()
                 };
                 let mut tame = crate::state::TameState::new(0, break_at);
                 tame.tameness = saved.tameness;
+                tame.loose = saved.loose;
                 tame.milk_units = saved.milk_units;
                 tame.wool = saved.wool;
                 tame.prod_acc = saved.prod_acc;
@@ -905,20 +910,55 @@ impl Game {
         // Criminal-flag expiry: a rare-event O(players) scan kept out of
         // the phase histogram (it is empty in the steady state).
         self.tick_criminal_expiry();
-        // Leash-break sweep (session 45): a rare-event scan of the tame
-        // table (empty in the steady state; only beasts mid-taming live
-        // here). Runs before the batch fan-out so the follow-removal
-        // blocks ride the same packed datagram.
+        // Leash sweep (session 45; session 83 adds the walk): a
+        // rare-event scan of the tame table (empty in the steady
+        // state; only beasts mid-taming live here). Runs before the
+        // batch fan-out so the follow-removal blocks ride the same
+        // packed datagram.
         if !self.world.tamed.is_empty() {
             let tick = self.world.tick;
             let mut broke: Vec<GobId> = Vec::new();
+            // Follow walk (session 83): docs step 4/6 - "the animal
+            // follows the tamer (leashed)". The server POSITION must
+            // follow too, not just the client's OD_FOLLOW render:
+            // grazing/production checks read the server tile under
+            // the beast, and a beast frozen mid-field never grazes.
+            // A standing beast > LEASH_FOLLOW_DIST behind its ONLINE
+            // tamer walks toward them at its own gait (species speed);
+            // the walk stops inside the dist, so the pair settles into
+            // a leash-length follow without thrashing start_move.
+            // LOOSE rows (expired leash, banked tameness) run wild AI
+            // instead - no follow, no break re-check (session 83).
+            let mut walk: Vec<(GobId, (i32, i32))> = Vec::new();
             for (&id, tame) in self.world.tamed.iter() {
+                if tame.loose {
+                    continue;
+                }
                 if tame.break_at_tick != 0 && tick >= tame.break_at_tick {
                     broke.push(id);
+                    continue;
+                }
+                let (Some(bslot), Some(tslot)) =
+                    (self.world.gobs.get(id), self.world.gobs.get(tame.tamer))
+                else {
+                    continue;
+                };
+                if self.world.gobs.mv[bslot].is_some() {
+                    continue;
+                }
+                let (bx, by) = self.world.gobs.pos[bslot];
+                let (tx, ty) = self.world.gobs.pos[tslot];
+                if (tx - bx).abs().max((ty - by).abs()) > crate::state::LEASH_FOLLOW_DIST {
+                    walk.push((id, (tx, ty)));
                 }
             }
             for id in broke {
-                self.break_leash(id, "and re-attacks");
+                self.leash_expire(id);
+            }
+            for (id, (tx, ty)) in walk {
+                if let Some(slot) = self.world.gobs.get(id) {
+                    self.start_move(slot, (tx, ty));
+                }
             }
         }
         // Production sweep (session 47; session 48 adds the Food Trough;
@@ -1047,7 +1087,12 @@ impl Game {
                 };
                 match species {
                     Species::Cow => {
-                        tame.prod_acc = tame.prod_acc.saturating_add(crate::state::MILK_QUANTITY);
+                        // Session 83: HNH_MILK_RATE scales the per-tick
+                        // accumulation (see state::milk_rate); the unit
+                        // threshold and bucket volume stay legacy-true.
+                        let gain =
+                            crate::state::MILK_QUANTITY.saturating_mul(crate::state::milk_rate());
+                        tame.prod_acc = tame.prod_acc.saturating_add(gain);
                         while tame.prod_acc >= crate::state::MILK_ACC_PER_UNIT
                             && tame.milk_units < crate::state::MILK_CAP_UNITS
                         {
@@ -1167,7 +1212,12 @@ impl Game {
 
 enum AnimalAction {
     Chase(GobId),
-    Flee,
+    /// Panic hop. The payload is the world-space step (dx, dy) away
+    /// from the threat, pre-aimed by the pure intent pass (session 83:
+    /// the old unit variant let apply_animal_action pick a random
+    /// ±550 scatter that bounded through the player and starved the
+    /// fight's swing cadence of its 33-subtile reach).
+    Flee((i32, i32)),
     Wander,
     Idle,
 }

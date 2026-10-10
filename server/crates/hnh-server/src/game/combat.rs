@@ -9,6 +9,24 @@ use super::*;
 
 impl Game {
     pub(super) fn start_fight(&mut self, sid: SessionId, target: GobId, species: Species) {
+        // One Fightview per player (docs combat-system.md): an engaged
+        // player never opens ANOTHER duel - not on a repeat click on the
+        // same beast, and not when an aggressive chaser (boar/wolf)
+        // reaches swing reach mid-taming. Session 83 live trace: an
+        // aggroed boar re-entered start_fight on EVERY combat tick,
+        // re-opening the frv widget ten times a second and stealing
+        // fight_target away from the beast being quelled, so the taming
+        // protocol never had a stable fight to talk to ("the fight
+        // never stayed open"). The fight lives until DISENGAGE, the
+        // target's death or the player's exit - all of which already
+        // reset fight_target.
+        if self
+            .world
+            .player(sid)
+            .is_some_and(|p| p.fight_target.is_some())
+        {
+            return;
+        }
         // Cluster: the target's authority lives on another node. The fight
         // UI and the attacker's offence bar stay LOCAL (they are session
         // state); the animal's defence bar and HP stay on its owner. Each
@@ -578,6 +596,16 @@ impl Game {
             if let Some(w) = w {
                 out.send(wdg::dst_wdg(w));
             }
+            // The fight window is gone: drop the SELECTED attack too
+            // (session 83). atk_cur used to survive the window close and
+            // leak into the NEXT fight - a quell selected in round one
+            // then resolved 0.9 s into round two with advantage 0,
+            // skipping every gate ("the gates ran at selection time"
+            // only holds within ONE fight). A fresh fight starts with a
+            // fresh selection.
+            out.fight.atk_cur = None;
+            out.fight.atk_next = None;
+            out.fight.blk = None;
         }
     }
 
@@ -595,8 +623,29 @@ impl Game {
             return;
         };
         let Some(&pidx) = self.world.by_session.get(&sid) else {
+            debug!(sid, id, "maneuver: no player index");
             return;
         };
+        debug!(
+            sid,
+            id,
+            target = self.world.players[pidx].fight_target,
+            ip = self
+                .sessions
+                .get(&sid)
+                .and_then(|o| o
+                    .fight
+                    .rel(self.world.players[pidx].fight_target.unwrap_or_default()))
+                .map(|r| r.ip_self),
+            adv = self
+                .sessions
+                .get(&sid)
+                .and_then(|o| o
+                    .fight
+                    .rel(self.world.players[pidx].fight_target.unwrap_or_default()))
+                .map(|r| r.adv),
+            "maneuver in"
+        );
         let pgob = self.world.players[pidx].gob;
         let Some(target) = self.world.players[pidx].fight_target else {
             self.chat_line(sid, "You are not fighting anyone.", Some((255, 128, 128)));
@@ -605,9 +654,18 @@ impl Game {
         // Requirements and costs first (refusals never mutate state).
         let refuse: Option<String> = {
             let Some(out) = self.sessions.get(&sid) else {
+                debug!(sid, id, "maneuver: session gone");
                 return;
             };
             let Some(rel) = out.fight.rel(target) else {
+                debug!(
+                    sid,
+                    id,
+                    target,
+                    nrels = out.fight.rels.len(),
+                    widget = out.fight.widget.is_some(),
+                    "maneuver: no relation for the live fight_target"
+                );
                 return;
             };
             if rel.ip_self < m.req_ip {
