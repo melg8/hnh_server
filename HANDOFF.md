@@ -594,60 +594,6 @@ COMMITS: 18adc43 (dough: the pie leg live end to end), f18aac8
 batch own the tail), 6caa31f (perf: targeted retire), fe9388d
 (perf: zero-alloc finalizer records), this handoff.
 
-## 2026-10-10 - Session 83 (type 3: the dairy vertical and animal behavior)
-
-SESSION TYPE ROTATION LOG: 80=4, 81=3, 82=5, 83=3. All six types
-served - pick freely, avoid repeating the previous session's type.
-
-GOAL: the milk/butter production chain as new functionality (the
-S79 recipe shapes had never run against a live tamed cow), plus the
-animal-behavior gaps the live probe exposed (forced duels that
-never end, panic hops through the player).
-
-DONE:
-
-- HONEYBUN + PIROZHKI (the S82 NOT-DONE doughs): test_dough.py
-  drives both cycles live end to end (honey: hive -> bucket craft
-  -> honey extraction; the doughs bake and eat). Committed f183dee.
-- ONE FIGHTVIEW PER PLAYER: an engaged player's attack click on a
-  second beast no longer opens a second fight window (combat.rs
-  start_fight gate + unit pins). This was the invisible killer of
-  the dairy taming chain: the server accepted both fights, the
-  client kept one widget, and the quell clicks went to a dead
-  window. Committed 904fd25.
-- FIGHTVIEW TRACKING IN THE PROBE: the dairy client tracks the
-  live frv window (frv_id/frv_cur/frv_rels) so the scenario can
-  SEE a forced duel and break it (sprint-break + re-approach).
-  test_dairy.py created: skills -> rope -> chase -> quell x5 ->
-  tamed cow -> milk -> butter. Committed be726b6.
-- DIRECTED PANIC-FLEE: a startled non-aggressive beast hops AWAY
-  from the player (the old jitter could hop through/onto the
-  chaser and starve the 33-subtile swing reach).
-- AGGRO LEASH (committed 73e6cab by the S84 continuation that
-  carried the work): an aggressor past AGGRO_GIVEUP (600) from
-  its spawn anchor surrenders - the apply phase tears down its
-  live duel server-side (fight_del releases the player's stolen
-  window for the one-Fightview gate) and marches home under the
-  animal_surrender hysteresis until AGGRO_ARRIVED (60). Without
-  it a boar that catches a tamer mid-approach shadows the player
-  forever (55 subt/s beats the 50 run gait) and the forced duel
-  lives for minutes.
-
-MEASURED/EVIDENCE: live traces dbg11 (the failed pursuit: nav_walk
-idled ~60% of every segment, ~18 subt/s effective against the
-panicking cow's 30) and dbg12 (the slice chase: gap 298->172->77,
-~6 s); taming verified live at Tameness 20/40/60/80/100 over five
-quells. The full chain went green only in S84 (below).
-
-NOT DONE / next session carries: the S84 stabilization itself (the
-scenario fixes); GL e2e + Windows smoke; multi-machine cluster
-profile; CI push retry (the PAT still lacks the workflow scope).
-
-COMMITS: f183dee (dough: honeybun and pirozhki live), 904fd25
-(combat: one Fightview per player), be726b6 (e2e: the dairy probe
-tracks the fightview widget), 73e6cab (animals: the aggro leash -
-committed by the S84 continuation, recorded here as S83 work).
-
 ## 2026-10-10 - Session 84 (type 4: the dairy e2e stabilization)
 
 SESSION TYPE ROTATION LOG: 81=3, 82=5, 83=3, 84=4. All six types
@@ -713,3 +659,73 @@ NOT-DONE dough legs from S79/S82 if any surface on a fresh world.
 COMMITS: 73e6cab (animals: the aggro leash - S83 work carried in
 this session's tree), 229ad0d (e2e: the dairy chain green), this
 handoff.
+
+## 2026-10-10 - Session 85 (type 5: the vis delta-scan, gap #10b closed)
+
+SESSION TYPE ROTATION LOG: 82=5, 83=3, 84=4, 85=5. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the carried gap #10b - "the full rescan per moving session is
+the remaining scan cost" (named S73, untouched since). A session
+that crossed a cell re-scanned its whole view square every scan;
+serve short walks from the cached result instead. The session began
+mid-implementation (the context loss left the working tree holding
+the whole feature, tests included, uncommitted); this continuation
+verified it, measured it honestly - including REVERTING a variant
+that lost - and closed it.
+
+DONE:
+
+- DELTA SCAN (stream.rs): a viewer that moved within one
+  VIEW_RADIUS of its last scan is served by re-filtering the cached
+  ids by their CURRENT positions, plus the touched enterers near
+  the new square, plus the STRIP cells the walk opened
+  (visidx.rs strip_in_view_into: new-square cells NOT fully
+  embedded in the old square - a naive overlap test misses static
+  enterers living on the edge cells). Beyond the window (teleport,
+  grid handoff) the full scan stays; a touched set near the view
+  population (a dense mover herd) still flips to Full. ScanKind
+  (Full/Patch/Delta) replaces the old bool; vis_delta joins the
+  perf counters (vis_skipped + vis_cached + vis_delta = issued).
+- UNIT PINS: vis_delta_scan_matches_full_scan_for_a_walking_viewer
+  (static strip enterer, mover enterer, leaver, death, chained
+  steps, a quiet step - the delta result must EQUAL a full rescan
+  every step) and vis_delta_falls_back_to_full_after_a_teleport.
+- THE REVERTED VARIANT (recorded in the patch doc comment): a
+  binary-search-skip patch (skip the position lookup for cached
+  ids absent from the touched list) was measured WORSE at the
+  1000-bot saturated herd - phase_vis p50 8845 us over two runs vs
+  7526 baseline. In a dense herd the touched lists approach the
+  cache size, and ~700 cache-warm position lookups beat ~700
+  binary searches over a cold ~300-entry scratch. Reverted to the
+  linear re-filter; the numbers stay in the comment so the idea is
+  not re-tried blind.
+- load85.sh: the A/B harness (load82.sh's shape + the vis scan-mix
+  and vis_scan_us/vis_cells columns; the perf line is a 5 s
+  snapshot, so the per-snapshot counters read as per-5s rates).
+
+MEASURED/EVIDENCE (load85.sh, 1000 saturated walking bots, 5 s
+snapshots, seed 42): phase_vis p50 7526 -> 6763 us, mean 15582 ->
+9398 (-40%), max 35912 -> 18530 (-48%); vis_scan_us max 26-32 ms
+-> 10.4 ms. Scan mix stable across runs (issued ~42-43k/5 s: full
+~23-26k, cached ~15-20k, delta 0.6-0.9k - the herd is dense, so
+delta serves the few sparse walkers and the burst tail). Gate
+green: fmt + clippy -D warnings, 339 workspace tests (11 proto +
+309 unit [2 ign] + 7 wire [1 ign] + 12 world). Live smoke on the
+release binary: WORLD ENTRY: OK + CATTR ORDER: OK.
+
+OPERATIONAL NOTES: a server launched bare (&) inside a bash tool
+call dies with the call's cancel - only the script-wrapper shape
+(load85.sh) survives a canceled call as an orphan and finishes
+itself; poll with SHORT calls (sleep 30), never sleep 240. The
+perf line fires every 5 s: rows=19 is a full DUR=90 steady window.
+
+NOT DONE / next session carries (S86 must NOT be type 5): GL e2e +
+Windows smoke of the fresh release binary; the multi-machine
+cluster profile; CI push retry (the PAT still lacks the workflow
+scope); the remaining NOT-DONE dough legs from S79/S82 if any
+surface on a fresh world.
+
+COMMITS: 82ffc0f (perf: the vis delta-scan for a walking viewer,
+gap 10b - implementation + tests + load85.sh + the A/B numbers),
+this handoff.

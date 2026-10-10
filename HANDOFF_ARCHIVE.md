@@ -5721,3 +5721,57 @@ generated pack is self-verified.
 
 COMMITS: 4a35d9d (client: serve the remote pack before the offline jar),
 e5c933b (repo: drop the stale server/gameres snapshot), this handoff.
+
+## 2026-10-10 - Session 83 (type 3: the dairy vertical and animal behavior)
+
+SESSION TYPE ROTATION LOG: 80=4, 81=3, 82=5, 83=3. All six types
+served - pick freely, avoid repeating the previous session's type.
+
+GOAL: the milk/butter production chain as new functionality (the
+S79 recipe shapes had never run against a live tamed cow), plus the
+animal-behavior gaps the live probe exposed (forced duels that
+never end, panic hops through the player).
+
+DONE:
+
+- HONEYBUN + PIROZHKI (the S82 NOT-DONE doughs): test_dough.py
+  drives both cycles live end to end (honey: hive -> bucket craft
+  -> honey extraction; the doughs bake and eat). Committed f183dee.
+- ONE FIGHTVIEW PER PLAYER: an engaged player's attack click on a
+  second beast no longer opens a second fight window (combat.rs
+  start_fight gate + unit pins). This was the invisible killer of
+  the dairy taming chain: the server accepted both fights, the
+  client kept one widget, and the quell clicks went to a dead
+  window. Committed 904fd25.
+- FIGHTVIEW TRACKING IN THE PROBE: the dairy client tracks the
+  live frv window (frv_id/frv_cur/frv_rels) so the scenario can
+  SEE a forced duel and break it (sprint-break + re-approach).
+  test_dairy.py created: skills -> rope -> chase -> quell x5 ->
+  tamed cow -> milk -> butter. Committed be726b6.
+- DIRECTED PANIC-FLEE: a startled non-aggressive beast hops AWAY
+  from the player (the old jitter could hop through/onto the
+  chaser and starve the 33-subtile swing reach).
+- AGGRO LEASH (committed 73e6cab by the S84 continuation that
+  carried the work): an aggressor past AGGRO_GIVEUP (600) from
+  its spawn anchor surrenders - the apply phase tears down its
+  live duel server-side (fight_del releases the player's stolen
+  window for the one-Fightview gate) and marches home under the
+  animal_surrender hysteresis until AGGRO_ARRIVED (60). Without
+  it a boar that catches a tamer mid-approach shadows the player
+  forever (55 subt/s beats the 50 run gait) and the forced duel
+  lives for minutes.
+
+MEASURED/EVIDENCE: live traces dbg11 (the failed pursuit: nav_walk
+idled ~60% of every segment, ~18 subt/s effective against the
+panicking cow's 30) and dbg12 (the slice chase: gap 298->172->77,
+~6 s); taming verified live at Tameness 20/40/60/80/100 over five
+quells. The full chain went green only in S84 (below).
+
+NOT DONE / next session carries: the S84 stabilization itself (the
+scenario fixes); GL e2e + Windows smoke; multi-machine cluster
+profile; CI push retry (the PAT still lacks the workflow scope).
+
+COMMITS: f183dee (dough: honeybun and pirozhki live), 904fd25
+(combat: one Fightview per player), be726b6 (e2e: the dairy probe
+tracks the fightview widget), 73e6cab (animals: the aggro leash -
+committed by the S84 continuation, recorded here as S83 work).
