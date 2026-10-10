@@ -1586,11 +1586,31 @@ pub fn breed_scale() -> u64 {
 /// The scale multiplies the per-tick accumulator only (the stored
 /// meters and the drawn-per-bucket volume stay legacy-true); 1 is
 /// legacy real-time. Malformed values fall back to 1 rather than wedge
-/// boot. Wool follows its own doc rate and is left untouched.
+/// boot.
 pub fn milk_rate() -> u32 {
     static RATE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *RATE.get_or_init(|| {
         std::env::var("HNH_MILK_RATE")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v >= 1)
+            .unwrap_or(1)
+    })
+}
+
+/// Session 93: `HNH_WOOL_RATE` multiplies sheep wool production for
+/// developer playability - the legacy rate needs one wool per 8 real
+/// hours at quantity 5 (WOOL_ACC_PER_UNIT / prod_quantity sweep ticks),
+/// which no live verification can sit out. The milk_rate pattern: the
+/// scale multiplies the per-tick accumulator only (the 3-wool cap and
+/// the stored meters stay legacy-true); 1 is legacy real-time; a
+/// malformed value falls back to 1 rather than wedge boot. Both rams
+/// and ewes grow wool (the doc rate), so the knob scales the whole
+/// herd's accrual.
+pub fn wool_rate() -> u32 {
+    static RATE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *RATE.get_or_init(|| {
+        std::env::var("HNH_WOOL_RATE")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|v| *v >= 1)
@@ -1633,6 +1653,40 @@ mod milk_rate_tests {
         // The documented legacy number: 6000 ticks per unit x 100 units
         // at quantity 10 per tick = 60000 ticks = 100 real minutes.
         assert_eq!(legacy, 60_000);
+    }
+}
+
+#[cfg(test)]
+mod wool_rate_tests {
+    use super::*;
+
+    /// The scale contract (the milk_rate pattern): whatever the
+    /// environment holds, the gain never drops below the legacy rate
+    /// and the saturating product cannot panic on absurd scales.
+    #[test]
+    fn wool_rate_never_scales_below_legacy() {
+        assert!(wool_rate() >= 1);
+        let gain = WOOL_QUANTITY.saturating_mul(wool_rate());
+        assert!(gain >= WOOL_QUANTITY);
+        assert_eq!(u32::MAX.saturating_mul(wool_rate()), u32::MAX);
+    }
+
+    /// The legacy wool math the live sheep probe leans on: at rate 1
+    /// one wool unit needs the documented accumulator walk
+    /// (WOOL_ACC_PER_UNIT / quantity per tick; 240000 / 5 = 48000
+    /// sweeps = 8 real hours at the sweep cadence), and the rate
+    /// divides the wait by exactly the factor (the ceil guarantee).
+    #[test]
+    fn wool_unit_walk_is_rate_scaled() {
+        let rate = wool_rate() as u64;
+        let legacy = WOOL_ACC_PER_UNIT as u64;
+        let per_tick = WOOL_QUANTITY as u64 * rate;
+        let ticks = legacy.div_ceil(per_tick);
+        assert!(ticks * per_tick >= legacy);
+        assert!((ticks - 1) * per_tick < legacy);
+        // The documented legacy number: one wool per 8 real hours at
+        // quantity 5 (session-90 notes).
+        assert_eq!(legacy, 240_000);
     }
 }
 

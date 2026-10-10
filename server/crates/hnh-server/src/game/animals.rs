@@ -1360,9 +1360,17 @@ impl Game {
         // first contact (session 90): the aurochs IS the wild bull of the
         // cattle family and the mouflon the wild ram of the sheep family
         // (both morph into their domestic species at full tameness and
-        // keep the row); every other species rolls 50/50. Wild stock
-        // draws its production row within +/-1 of the legacy constant.
-        // Rolled BEFORE the tamed-entry borrow below.
+        // keep the row). Session 93 fix: the mouflon rolls 50/50 like
+        // every non-cattle beast instead of the pinned Male - the sheep
+        // family has NO wild female (sheep never spawn wild, the cow is
+        // the cattle family's female), so a Male-only mouflon left the
+        // sheep pipeline with no reachable dam: ewes exist ONLY through
+        // the mouflon morph or a birth, and a birth already needs a dam
+        // (the chicken-egg deadlock). Wild mouflon herds carry both
+        // sexes in the legacy ecology; the domestic ewe now arrives
+        // through the female mouflon morph. Every other species rolls
+        // 50/50. Wild stock draws its production row within +/-1 of the
+        // legacy constant. Rolled BEFORE the tamed-entry borrow below.
         let wild_species =
             self.world
                 .gobs
@@ -1376,9 +1384,7 @@ impl Game {
                 crate::state::Species::Cow | crate::state::Species::Sheep => {
                     crate::state::Sex::Female
                 }
-                crate::state::Species::Aurochs | crate::state::Species::Mouflon => {
-                    crate::state::Sex::Male
-                }
+                crate::state::Species::Aurochs => crate::state::Sex::Male,
                 _ => {
                     if self.world.next_ai_rand(2) == 0 {
                         crate::state::Sex::Female

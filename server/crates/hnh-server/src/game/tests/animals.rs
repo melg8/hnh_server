@@ -615,6 +615,54 @@ async fn full_tame_morphs_the_species() {
     );
 }
 
+/// Session 93: the mouflon rolls its sex 50/50 (the aurochs stays the
+/// pinned wild BULL of the cattle family - the wild cow is that
+/// family's female). The sheep family has NO wild female (sheep never
+/// spawn wild), so pinning every mouflon Male deadlocked the sheep
+/// breeding pipeline: a birth needs a dam, and a dam (ewe) could only
+/// arrive through a mouflon morph or a birth - the chicken-egg
+/// deadlock. A quelled mouflon herd must reach BOTH sheep sexes (the
+/// fixed boot seed makes the roll set deterministic).
+#[tokio::test]
+async fn the_mouflon_morph_can_yield_a_ewe() {
+    let (mut g, _rx, _raw) = entered_game("sheepewe");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let mut females = 0usize;
+    let mut males = 0usize;
+    for i in 0..12 {
+        let m = spawn_species_at(
+            &mut g,
+            pidx,
+            20 + i * 7,
+            Species::Mouflon.max_hp(),
+            Species::Mouflon,
+        );
+        for _ in 0..5 {
+            g.apply_quell(pidx, 1, m);
+        }
+        let slot = g.world.gobs.get(m).unwrap();
+        assert!(
+            matches!(
+                g.world.gobs.kind[slot],
+                Kind::Animal {
+                    species: Species::Sheep
+                }
+            ),
+            "every quelled mouflon morphs to a sheep"
+        );
+        match g.world.tamed.get(&m).unwrap().sex {
+            crate::state::Sex::Female => females += 1,
+            crate::state::Sex::Male => males += 1,
+        }
+    }
+    assert!(
+        females > 0 && males > 0,
+        "a quelled mouflon herd must reach BOTH sheep sexes (F={} M={})",
+        females,
+        males
+    );
+}
+
 // ------------------------------------------------------------------
 // Tamed-animal production (session 47; animals-and-husbandry.md
 // "Animal products and collection flows").

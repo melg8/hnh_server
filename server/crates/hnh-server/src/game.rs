@@ -1276,7 +1276,13 @@ impl Game {
                     Species::Sheep => {
                         // Session 90: the per-animal Wool Quantity row
                         // drives the gain (rams and ewes both grow wool).
-                        tame.prod_acc = tame.prod_acc.saturating_add(u32::from(tame.prod_quantity));
+                        // Session 93: HNH_WOOL_RATE scales the
+                        // accumulator for live verification (the
+                        // milk_rate pattern; the 3-wool cap and the
+                        // drawn-per-shear volume stay legacy-true).
+                        let gain =
+                            u32::from(tame.prod_quantity).saturating_mul(crate::state::wool_rate());
+                        tame.prod_acc = tame.prod_acc.saturating_add(gain);
                         while tame.prod_acc >= crate::state::WOOL_ACC_PER_UNIT
                             && tame.wool < crate::state::WOOL_CAP
                         {

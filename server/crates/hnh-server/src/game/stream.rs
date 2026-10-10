@@ -67,7 +67,33 @@ impl Game {
                 out.send_raw(f);
             }
         }
+        // Session 93 fix: animals ride the grid stream ONLY inside the
+        // 2x-VIEW retract-hysteresis square around the REQUESTER. Their
+        // movement deltas fan out inside FANOUT_SPAN around the viewer
+        // and the visibility pass (re)spawns them at VIEW_RADIUS, so a
+        // far animal streamed with its grid parks a FROZEN GHOST on the
+        // client instead: the spawn block carries the position of the
+        // moment and nothing ever refreshes it (live trace: the sheep
+        // probe chased a mouflon's spawn-time position while the live
+        // beast had wandered 1100 subtiles away; the Java client renders
+        // the same phantom standing forever). Statics never move - the
+        // whole grid still streams for them, and the mapdata tiles are
+        // unaffected either way.
+        let ppos = self
+            .sessions
+            .get(&sid)
+            .and_then(|out| out.player_gob)
+            .and_then(|pg| self.world.gobs.get(pg))
+            .map(|s| self.world.gobs.pos[s]);
         for id in spawned {
+            if let (Some((px, py)), Some(slot)) = (ppos, self.world.gobs.get(id)) {
+                if matches!(self.world.gobs.kind[slot], Kind::Animal { .. }) {
+                    let (gx, gy) = self.world.gobs.pos[slot];
+                    if (gx - px).abs() > 2 * VIEW_RADIUS || (gy - py).abs() > 2 * VIEW_RADIUS {
+                        continue;
+                    }
+                }
+            }
             self.stream_spawn(sid, id);
         }
         info!(sid, ?gc, "mapdata sent");
@@ -386,7 +412,18 @@ impl Game {
             // The retract itself is a critical-loss block: a client
             // that misses OD_REM renders a phantom gob forever
             // (nothing re-retracts).
-            Self::record_unacked(out, id, rem_frame, m.finish(), true);
+            // Session 93 fix: send it IMMEDIATELY. record_unacked only
+            // REGISTERS the block for the retransmit sweep - it does
+            // not send (the spawn path calls send_raw separately). A
+            // retract that waited for the sweep sat behind its retry
+            // delay and the full-queue throttle, so out-of-range gobs
+            // stayed spawned on the client indefinitely: the diag run
+            // watched a mouflon 2600 subtiles out never receive its
+            // removal for 30 seconds while the sweep logged
+            // queue_full backpressure.
+            let block = m.finish();
+            out.send_raw(block.clone());
+            Self::record_unacked(out, id, rem_frame, block, true);
         } else {
             out.unacked.remove(&id);
             out.gob_acked.remove(&id);

@@ -433,12 +433,43 @@ the WHY; this section is the WHAT that is live.
   The sheep NEVER spawns wild (tame a mouflon, per the wiki); the bear
   (hp 120, aggressive, speed 40) and hen (hp 10, speed 20) join the
   flat-weight wild roll.
+- Wild sex rolls (session 93): every species rolls 50/50 EXCEPT the
+  aurochs, which stays the pinned wild BULL of the cattle family (the
+  cow does not spawn wild). The mouflon was pinned Male through
+  session 92, which deadlocked the sheep pipeline: a ewe could arrive
+  only through a mouflon morph or a birth, and a birth needs a dam -
+  the chicken-and-egg loop. The 50/50 roll (live-verified by the
+  session-93 e2e: one quell run reached a ram and a ewe) matches the
+  legacy ecology where wild mouflon herds carry both sexes.
 - Species morph at full tameness: mouflon -> sheep, aurochs -> cow. The
   morph rewrites Kind, resource, vitals and clamps hp (no healing), then
   re-renders every viewer via a headerless OD_RES block through the
   packed start batch (Session.java OD_RES = 2 -> OCache.cres). Boar maps
   to None: the 2009 pack ships no pig kritter (a fully tamed boar stays
   a boar - see Open questions).
+
+### Animal grid streaming (session 93)
+
+- A grid's MAPREQ no longer streams `Kind::Animal` gobs beyond
+  2*VIEW_RADIUS (600 axial subtiles) from the REQUESTER: their
+  movement deltas only fan out inside FANOUT_SPAN, so a far animal
+  streamed with its grid parked a FROZEN GHOST on the client - the
+  spawn block carried the position of the moment and nothing ever
+  refreshed it. The Java client renders the same phantom forever; the
+  live sheep probe chased a mouflon's spawn-time position while the
+  live beast stood 1100+ subtiles away, and the resulting "too far
+  away" attack refusals were client-side cache artifacts, not server
+  truth. Statics stream as before; the threshold IS the retract
+  hysteresis, so a streamed animal never flickers on the boundary, and
+  far animals re-enter the stream through the fresh MAPREQs a walking
+  player generates (each fresh grid delivers its own beasts).
+- The OD_REM retract is now sent IMMEDIATELY (record_unacked only
+  REGISTERS the block for the retransmit sweep - it does not send; the
+  spawn path always sent separately): a retract that waited for the
+  sweep sat behind its retry delay and the queue_full throttle, so
+  out-of-range gobs stayed spawned on the client for 30+ seconds (a
+  live trace watched a mouflon 2600 subtiles out never receive its
+  removal while the sweep logged backpressure).
 
 ### Production, feeding, and starvation
 
@@ -447,7 +478,10 @@ the WHY; this section is the WHAT that is live.
   per MILK_ACC_PER_UNIT (6000) ticks, driven by the per-animal
   prod_quantity row; sheep accrue wool at 1 per 8 real hours scaled
   linearly by quantity (WOOL_ACC_PER_UNIT = 240000 quantity-ticks; rams
-  and ewes both grow wool). Caps exactly as documented (10 L / 3 wool);
+  and ewes both grow wool - `HNH_WOOL_RATE` scales the per-tick
+  accumulator for live probes, the HNH_MILK_RATE pattern; the caps and
+  the drawn volume stay legacy-true). Caps exactly as documented (10 L /
+  3 wool);
   at the cap the accumulator stops banking time. Only adult FEMALES
   lactate (bulls sire); lambs and calves bank maturation instead of
   product while juvenile.
@@ -564,10 +598,11 @@ the WHY; this section is the WHAT that is live.
 - The intensity meter's client rendering: the bar exists only
   server-side (the legacy Fightview rendered intensity from the uimsg
   relation, which this server keeps at 0).
-- Breeding depth beyond the live vertical: sheep/wool breeding is
-  implemented in the shared pipeline but has no e2e probe (the
-  session-90 probe covers cattle only); the calf's milk-drinking
-  reservation flow (the doc's "calves drink stored milk, so
+- Breeding depth beyond the live vertical: the sheep/wool leg now has
+  its own live e2e (session 93: quell -> both-sexes morph -> scaled
+  shear -> lamb -> the honest juvenile refusal -> the v8 restart
+  persist) alongside the session-90 cattle probe; the calf's
+  milk-drinking reservation flow (the doc's "calves drink stored milk, so
   reservations matter") is NOT modeled - juveniles grow from the same
   grazing/trough feeding as adults; lactation is gated on adulthood +
   sex, NOT on having calved (the doc's "heifers produce nothing"
