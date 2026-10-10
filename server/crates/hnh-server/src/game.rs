@@ -513,7 +513,24 @@ impl Game {
                 tame.prod_acc = saved.prod_acc;
                 tame.feed_acc_nano = saved.feed_acc_nano;
                 tame.hunger = saved.hunger;
+                // Session 90 breeding rows: an out-of-range sex index
+                // falls back to Female (the persist default).
+                tame.sex =
+                    crate::state::Sex::from_index(saved.sex).unwrap_or(crate::state::Sex::Female);
+                tame.prod_quantity = saved.prod_quantity;
+                tame.breed_ql = saved.breed_ql;
+                tame.pregnant_acc = saved.pregnant_acc;
+                tame.juvenile_acc = saved.juvenile_acc;
                 world.tamed.insert(gob, tame);
+                // Session 90: remember the owner account so the row can
+                // re-bind when that player logs back in (the restore
+                // above leaves tamer gob 0 - no player gobs exist yet).
+                // An empty key is a pre-S90 save whose tamer was
+                // offline at save time: those rows stay unbound (the
+                // old contract - a fresh quell re-binds them).
+                if !saved.tamer_key.is_empty() {
+                    world.tamed_owner.insert(gob, saved.tamer_key.clone());
+                }
             }
         }
         if !save.world_state.animals.is_empty() {
@@ -918,20 +935,39 @@ impl Game {
         if !self.world.tamed.is_empty() {
             let tick = self.world.tick;
             let mut broke: Vec<GobId> = Vec::new();
-            // Follow walk (session 83): docs step 4/6 - "the animal
-            // follows the tamer (leashed)". The server POSITION must
-            // follow too, not just the client's OD_FOLLOW render:
-            // grazing/production checks read the server tile under
-            // the beast, and a beast frozen mid-field never grazes.
-            // A standing beast > LEASH_FOLLOW_DIST behind its ONLINE
-            // tamer walks toward them at its own gait (species speed);
-            // the walk stops inside the dist, so the pair settles into
-            // a leash-length follow without thrashing start_move.
-            // LOOSE rows (expired leash, banked tameness) run wild AI
-            // instead - no follow, no break re-check (session 83).
-            let mut walk: Vec<(GobId, (i32, i32))> = Vec::new();
+            // Follow walk (session 83; session 90 silent stepping): docs
+            // step 4/6 - "the animal follows the tamer (leashed)". The
+            // server POSITION must follow too, not just the client's
+            // OD_FOLLOW render: grazing/production checks read the
+            // server tile under the beast, and a beast frozen mid-field
+            // never grazes. The step covers the beast's own gait
+            // (species speed x TICK_MS, terrain-capped) and re-aims at
+            // the tamer EVERY tick - no stale LinMove targets. The step
+            // is a SILENT SoA write: the client renders a followed
+            // beast through its Following attr (Java Following.getc()
+            // = the tamer's live position), and a streamed LINBEG would
+            // REPLACE that attr mid-walk and break the rope - so no
+            // start_move here (the quell cancels any in-flight move;
+            // set_pos keeps the visidx and the delta scan truthful for
+            // new viewers). LOOSE rows (expired leash, banked tameness)
+            // run wild AI instead - no follow, no break re-check.
+            // Phase 1 (immutable): the stranded followers - the plan is
+            // collected first because tile_at may generate grids (a
+            // mutable borrow) and tamed is borrowed across the loop.
+            // (slot, beast pos, tamer pos)
+            //
+            // Session 90 diagnostics: the skip REASONS are counted per
+            // pass and cadenced into the log. A follower frozen far
+            // from its tamer (live trace: the dam stalled 395 subtiles
+            // short of the sire, dropped off grass, and the pregnancy
+            // never started) is one glance from its cause here instead
+            // of a blind guess: (loose, parked, mv_locked, in_range).
+            let mut walk_skip = (0usize, 0usize, 0usize, 0usize);
+            type Stranded = (usize, (i32, i32), (i32, i32));
+            let mut stranded: Vec<Stranded> = Vec::new();
             for (&id, tame) in self.world.tamed.iter() {
                 if tame.loose {
+                    walk_skip.0 += 1;
                     continue;
                 }
                 if tame.break_at_tick != 0 && tick >= tame.break_at_tick {
@@ -943,22 +979,99 @@ impl Game {
                 else {
                     continue;
                 };
-                if self.world.gobs.mv[bslot].is_some() {
+                // Session 90: a RESTORED row parks its tamer at gob 0
+                // until the owner logs in; slot 0 can hold ANY live gob
+                // (a tree was first to spawn). Only a live PLAYER is a
+                // tamer - everything else means the row is parked.
+                if !matches!(self.world.gobs.kind[tslot], Kind::Player { .. }) {
+                    walk_skip.1 += 1;
                     continue;
                 }
-                let (bx, by) = self.world.gobs.pos[bslot];
-                let (tx, ty) = self.world.gobs.pos[tslot];
-                if (tx - bx).abs().max((ty - by).abs()) > crate::state::LEASH_FOLLOW_DIST {
-                    walk.push((id, (tx, ty)));
+                if self.world.gobs.mv[bslot].is_some() {
+                    walk_skip.2 += 1;
+                    continue;
                 }
+                let d = (self.world.gobs.pos[tslot].0 - self.world.gobs.pos[bslot].0).abs()
+                    + (self.world.gobs.pos[tslot].1 - self.world.gobs.pos[bslot].1).abs();
+                if d > crate::state::LEASH_FOLLOW_DIST {
+                    stranded.push((
+                        bslot,
+                        self.world.gobs.pos[bslot],
+                        self.world.gobs.pos[tslot],
+                    ));
+                } else {
+                    walk_skip.3 += 1;
+                }
+            }
+            if self.world.tick.is_multiple_of(30) {
+                debug!(
+                    "follow walk: tamed={} stranded={} loose={} parked={} mv_locked={} in_range={}",
+                    self.world.tamed.len(),
+                    stranded.len(),
+                    walk_skip.0,
+                    walk_skip.1,
+                    walk_skip.2,
+                    walk_skip.3
+                );
             }
             for id in broke {
                 self.leash_expire(id);
             }
-            for (id, (tx, ty)) in walk {
-                if let Some(slot) = self.world.gobs.get(id) {
-                    self.start_move(slot, (tx, ty));
+            // Phase 2 (mutable): the silent SoA writes.
+            for (bslot, (bx, by), (tx, ty)) in stranded {
+                let d = (tx - bx).abs() + (ty - by).abs();
+                let speed = self.world.gobs.speed[bslot].max(1);
+                let pct = self
+                    .tile_at((bx, by))
+                    .and_then(crate::state::tile_speed_pct)
+                    .unwrap_or(100);
+                let eff = (speed * pct / 100).max(1);
+                let step = ((i64::from(eff) * TICK_MS as i64) / 1000)
+                    .max(1)
+                    .min(i64::from(d - crate::state::LEASH_FOLLOW_DIST))
+                    as i32;
+                // Session 90 fix: the old per-axis split (dx * step / d)
+                // truncates BOTH axis shares to zero on a DIAGONAL
+                // approach once the terrain caps the step to 1 - a
+                // follower that waded into a zero-speed tile (water)
+                // froze mid-field writing its own position back every
+                // tick (live trace: the dam stalled 379 subtiles short
+                // of the sire, dropped off grass, and the pregnancy
+                // never started). Walk the line Bresenham-style instead:
+                // each of the `step` subtiles advances exactly ONE
+                // axis, so progress is guaranteed whenever step >= 1,
+                // the path hugs the straight line, and the Manhattan
+                // budget `step <= d - LEASH_FOLLOW_DIST` can never
+                // overshoot the tamer.
+                let (mut nx, mut ny) = (bx, by);
+                {
+                    let (dx, dy) = (tx - bx, ty - by);
+                    let (sx, sy) = (dx.signum(), dy.signum());
+                    let (adx, ady) = (dx.abs(), dy.abs());
+                    let (major_x, mut err) = if adx >= ady {
+                        (true, adx / 2)
+                    } else {
+                        (false, ady / 2)
+                    };
+                    for _ in 0..step {
+                        if major_x {
+                            nx += sx;
+                            err -= ady;
+                            if err < 0 {
+                                ny += sy;
+                                err += adx;
+                            }
+                        } else {
+                            ny += sy;
+                            err -= adx;
+                            if err < 0 {
+                                nx += sx;
+                                err += ady;
+                            }
+                        }
+                    }
                 }
+                self.world.gobs.set_pos(bslot, (nx, ny));
             }
         }
         // Production sweep (session 47; session 48 adds the Food Trough;
@@ -1005,7 +1118,7 @@ impl Game {
             // pass, same shape as tick_animals).
             let mut fed: Vec<(GobId, Species)> = Vec::new();
             let mut starved: Vec<GobId> = Vec::new();
-            for (id, species, pos) in candidates {
+            for &(id, species, pos) in &candidates {
                 // 1. Trough preference: the nearest trough with fodder
                 //    inside TROUGH_RADIUS (18 tiles = 198 subtiles,
                 //    euclidean over subtile coords).
@@ -1081,17 +1194,72 @@ impl Game {
                 }
             }
             // Phase B (mutable): accrue the meters for fed animals.
-            for (id, species) in fed {
+            // (borrowed: Phase D still needs `fed` after this loop)
+            // Session 90 diagnostics: the cadenced herd snapshot -
+            // every tamed candidate with position, grazing state,
+            // follow distance and pregnancy, so probe failures name
+            // their cause in the server log. Collected AFTER the
+            // feeding pass (grids are hot in tile_at) but read from
+            // the immutable fed/tamed tables.
+            if self.world.tick.is_multiple_of(30) {
+                let rows: Vec<String> = candidates
+                    .iter()
+                    .map(|&(id, species, pos)| {
+                        let tame = self.world.tamed.get(&id)?;
+                        let follow_d = self
+                            .world
+                            .gobs
+                            .get(tame.tamer)
+                            .map(|ts| {
+                                let (tx, ty) = self.world.gobs.pos[ts];
+                                (tx - pos.0).abs() + (ty - pos.1).abs()
+                            })
+                            .unwrap_or(-1);
+                        Some(format!(
+                            "{:?}#{} {:?} pos={:?} follow_d={} preg={} fed={}",
+                            species,
+                            id & 0xFFFF,
+                            tame.sex,
+                            pos,
+                            follow_d,
+                            tame.pregnant_acc,
+                            fed.iter().any(|&(f, _)| f == id)
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap_or_default();
+                debug!(
+                    "herd sweep: fed={}/{} {}",
+                    fed.len(),
+                    candidates.len(),
+                    rows.join(" | ")
+                );
+            }
+            for &(id, species) in &fed {
                 let Some(tame) = self.world.tamed.get_mut(&id) else {
                     continue;
                 };
+                // Calves and lambs bank maturation instead of product
+                // (session 90): a fed juvenile grows toward
+                // MATURATION_TICKS at the HNH_BREED_SCALE pace.
+                if !tame.is_adult() {
+                    tame.juvenile_acc = tame
+                        .juvenile_acc
+                        .saturating_add(crate::state::breed_scale());
+                    continue;
+                }
                 match species {
                     Species::Cow => {
-                        // Session 83: HNH_MILK_RATE scales the per-tick
-                        // accumulation (see state::milk_rate); the unit
+                        // Session 90: only cows lactate (bulls sire);
+                        // the per-animal Milk Quantity row drives the
+                        // per-tick gain. HNH_MILK_RATE keeps scaling the
+                        // accumulator (see state::milk_rate); the unit
                         // threshold and bucket volume stay legacy-true.
+                        if tame.sex != crate::state::Sex::Female {
+                            continue;
+                        }
                         let gain =
-                            crate::state::MILK_QUANTITY.saturating_mul(crate::state::milk_rate());
+                            u32::from(tame.prod_quantity).saturating_mul(crate::state::milk_rate());
                         tame.prod_acc = tame.prod_acc.saturating_add(gain);
                         while tame.prod_acc >= crate::state::MILK_ACC_PER_UNIT
                             && tame.milk_units < crate::state::MILK_CAP_UNITS
@@ -1106,7 +1274,9 @@ impl Game {
                         }
                     }
                     Species::Sheep => {
-                        tame.prod_acc = tame.prod_acc.saturating_add(crate::state::WOOL_QUANTITY);
+                        // Session 90: the per-animal Wool Quantity row
+                        // drives the gain (rams and ewes both grow wool).
+                        tame.prod_acc = tame.prod_acc.saturating_add(u32::from(tame.prod_quantity));
                         while tame.prod_acc >= crate::state::WOOL_ACC_PER_UNIT
                             && tame.wool < crate::state::WOOL_CAP
                         {
@@ -1126,6 +1296,194 @@ impl Game {
             // implemented - server policy, documented in the doc).
             for id in starved {
                 self.starve_kill(id);
+            }
+            // Phase D (session 90; animals-and-husbandry.md "Domestic
+            // lifecycle and breeding"): a fed adult BULL within
+            // BREED_SEEK_RADIUS of a fed adult cow advances her
+            // pregnancy; at GESTATION_TICKS the calf is born beside its
+            // dam as a fully-tamed juvenile (domestic-born, never
+            // leashed) with INHERITED breed rows, 50/50 sex, rare
+            // twins. Cattle and sheep share the pipeline; the wild
+            // morph table supplies the parents (wild Cow/Aurochs for
+            // cattle, Mouflon for sheep).
+            if fed.len() >= 2 && crate::state::breed_scale() > 0 {
+                // D0 (immutable snapshot): the fed adults of the
+                // breeding families with their rows and positions.
+                // (id, species, sex, pos, prod_quantity, breed_ql)
+                type Adult = (GobId, Species, crate::state::Sex, (i32, i32), u8, u8);
+                // (dam, species, pos, dam_prod, dam_ql, dam_tamer)
+                type Dam = (GobId, Species, (i32, i32), u8, u8, GobId);
+                // (dam, species, pos, dam_prod, dam_ql, dam_tamer, twins)
+                type Birth = (Dam, bool);
+                let adults: Vec<Adult> = fed
+                    .iter()
+                    .filter_map(|&(id, species)| {
+                        if !matches!(species, Species::Cow | Species::Sheep) {
+                            return None;
+                        }
+                        let tame = self.world.tamed.get(&id)?;
+                        if !tame.is_adult() {
+                            return None;
+                        }
+                        let slot = self.world.gobs.get(id)?;
+                        Some((
+                            id,
+                            species,
+                            tame.sex,
+                            self.world.gobs.pos[slot],
+                            tame.prod_quantity,
+                            tame.breed_ql,
+                        ))
+                    })
+                    .collect();
+                let radius_sq = i64::from(crate::state::BREED_SEEK_RADIUS)
+                    * i64::from(crate::state::BREED_SEEK_RADIUS);
+                let in_range = |a: (i32, i32), b: (i32, i32)| {
+                    let (dx, dy) = (i64::from(b.0 - a.0), i64::from(b.1 - a.1));
+                    dx * dx + dy * dy <= radius_sq
+                };
+                let sires: Vec<&Adult> = adults
+                    .iter()
+                    .filter(|a| a.2 == crate::state::Sex::Male)
+                    .collect();
+                // Session 90 fix (runaway breeding): the scaled birth
+                // pipeline has NO natural brake - a calf matures in
+                // MATURATION/breed_scale ticks and conceives on the
+                // next Phase D pass, so a fed cluster doubles every
+                // ~30 s (live trace: a solo probe left alone melted
+                // the process into a 160 MB log with 80k+ gobs). Two
+                // guards, both local to the dam's cluster: (1) NURSING
+                // - a maturing juvenile within the seek radius
+                // postpones every birth in that cluster (the dam is
+                // raising it); (2) OVERCROWDING - past
+                // BREED_CLUSTER_CAP fed adults of the species inside
+                // the radius the cluster stops breeding outright. The
+                // juvenile scan reads the TAME TABLE, not `fed` (an
+                // unfed calf still nurses).
+                let young: Vec<((i32, i32), Species)> = self
+                    .world
+                    .tamed
+                    .iter()
+                    .filter_map(|(&yid, t)| {
+                        if t.is_adult() {
+                            return None;
+                        }
+                        let yslot = self.world.gobs.get(yid)?;
+                        match self.world.gobs.kind[yslot] {
+                            Kind::Animal { species } => Some((self.world.gobs.pos[yslot], species)),
+                            _ => None,
+                        }
+                    })
+                    .collect();
+                let nursing_near = |species: Species, pos: (i32, i32)| {
+                    young
+                        .iter()
+                        .any(|(yp, ys)| *ys == species && in_range(*yp, pos))
+                };
+                let crowd_near = |species: Species, pos: (i32, i32)| {
+                    adults
+                        .iter()
+                        .filter(|a| a.1 == species && in_range(a.3, pos))
+                        .count()
+                        >= crate::state::BREED_CLUSTER_CAP
+                };
+                // Session 90 diagnostics: a cadenced debug snapshot of
+                // the breeding inputs (fed adults, sexes, the closest
+                // sire per dam). The live probe's failures are one
+                // line away from this instead of a blind assert.
+                if self.world.tick.is_multiple_of(30) {
+                    let rows: Vec<String> = adults
+                        .iter()
+                        .map(|a| {
+                            let sire_d = sires
+                                .iter()
+                                .filter(|s| s.1 == a.1)
+                                .map(|s| (s.3 .0 - a.3 .0).abs() + (s.3 .1 - a.3 .1).abs())
+                                .min()
+                                .unwrap_or(-1);
+                            format!(
+                                "{:?}#{} {:?} pos={:?} sire_d={} preg={}",
+                                a.1,
+                                a.0 & 0xFFFF,
+                                a.2,
+                                a.3,
+                                sire_d,
+                                self.world
+                                    .tamed
+                                    .get(&a.0)
+                                    .map(|t| t.pregnant_acc)
+                                    .unwrap_or(0)
+                            )
+                        })
+                        .collect();
+                    debug!(
+                        "breeding sweep: fed={} adults={}",
+                        fed.len(),
+                        rows.join(" | ")
+                    );
+                }
+                if !sires.is_empty() {
+                    let scale = crate::state::breed_scale();
+                    // D1: advance every eligible dam's pregnancy; collect
+                    // the births (with the dam's tamer for the calf's
+                    // leash binding) as a plan, THEN mutate.
+                    let mut births: Vec<Birth> = Vec::new();
+                    let dams: Vec<Dam> = adults
+                        .iter()
+                        .filter(|a| a.2 == crate::state::Sex::Female)
+                        .map(|a| (a.0, a.1, a.3, a.4, a.5, self.world.tamed[&a.0].tamer))
+                        .collect();
+                    for (dam, species, pos, dam_prod, dam_ql, dam_tamer) in dams {
+                        // A sire of the SAME species in range.
+                        if !sires.iter().any(|s| s.1 == species && in_range(s.3, pos)) {
+                            continue;
+                        }
+                        // Session 90 runaway guards: a cluster nursing a
+                        // juvenile (or past the crowding cap) postpones
+                        // this birth - see the block comment above.
+                        if nursing_near(species, pos) || crowd_near(species, pos) {
+                            continue;
+                        }
+                        let Some(tame) = self.world.tamed.get_mut(&dam) else {
+                            continue;
+                        };
+                        tame.pregnant_acc = tame.pregnant_acc.saturating_add(scale);
+                        if tame.pregnant_acc >= crate::state::GESTATION_TICKS {
+                            tame.pregnant_acc = 0;
+                            let twins =
+                                self.world.next_ai_rand(100) < crate::state::CALF_TWINS_PCT as i32;
+                            births.push(((dam, species, pos, dam_prod, dam_ql, dam_tamer), twins));
+                        }
+                    }
+                    // D2 (mutable): spawn the calves. Inheritance rolls
+                    // through the world rng (seed-deterministic in a
+                    // fixed boot; the live probe pins the arithmetic,
+                    // not the exact rolls).
+                    for ((dam, species, pos, dam_prod, dam_ql, dam_tamer), twins) in births {
+                        let count = if twins { 2 } else { 1 };
+                        let (sire_prod, sire_ql) = sires
+                            .iter()
+                            .find(|s| s.1 == species && in_range(s.3, pos))
+                            .map(|s| (s.4, s.5))
+                            .unwrap_or((dam_prod, dam_ql));
+                        for n in 0..count {
+                            let roll = self.world.next_ai_rand(256) as u8;
+                            let prod =
+                                crate::state::breed_stat_child(dam_prod, sire_prod, sire_ql, roll);
+                            let roll = self.world.next_ai_rand(256) as u8;
+                            let ql = crate::state::breed_ql_child(dam_ql, sire_ql, roll);
+                            let sex = if self.world.next_ai_rand(2) == 0 {
+                                crate::state::Sex::Female
+                            } else {
+                                crate::state::Sex::Male
+                            };
+                            // Offset twins so two calves never stack.
+                            let calf_pos = (pos.0 + n * 5, pos.1 + n * 5);
+                            self.spawn_calf(species, dam_tamer, calf_pos, prod, ql, sex);
+                        }
+                        info!(dam, species = ?species, count, "calf born: breeding pipeline");
+                    }
+                }
             }
         }
         // The dirty set served this tick's visibility pass; spawn marks

@@ -217,14 +217,17 @@ impl Game {
             };
             let (px, py) = self.world.gobs.pos[slot];
             // The tamer's save key when it is an online character;
-            // offline tamers re-bind on the next quell (apply_quell
-            // overwrites the row's tamer).
+            // an offline owner serves from the session-90 sidecar so
+            // the binding survives restarts (rows re-bind on the
+            // owner's next login); a row with neither is a pre-S90
+            // save whose tamer was offline - a fresh quell re-binds.
             let tamer_key = self
                 .world
                 .players
                 .iter()
                 .find(|p| p.gob == tame.tamer)
                 .map(|p| crate::persist::save_key(&p.account, &p.name))
+                .or_else(|| self.world.tamed_owner.get(gob).cloned())
                 .unwrap_or_default();
             animals.push(crate::persist::SavedAnimal {
                 species: species.index(),
@@ -238,6 +241,11 @@ impl Game {
                 feed_acc_nano: tame.feed_acc_nano,
                 hunger: tame.hunger,
                 loose: tame.loose,
+                sex: tame.sex.index(),
+                prod_quantity: tame.prod_quantity,
+                breed_ql: tame.breed_ql,
+                pregnant_acc: tame.pregnant_acc,
+                juvenile_acc: tame.juvenile_acc,
             });
         }
         self.save.world_state.animals = animals;
@@ -420,6 +428,20 @@ impl Game {
                 // for the remaining members before the player vanishes.
                 self.party_leave_gob(gob);
                 self.persist_player(gob);
+                // Session 90: park the herd binding in the owner sidecar
+                // BEFORE the player row vanishes - the save loop reads it
+                // back as tamer_key while no live player holds the gob,
+                // and the rows re-bind when the owner logs in again.
+                if let Some(idx) = self.world.by_session.get(&sid).copied() {
+                    if let Some(p) = self.world.players.get(idx) {
+                        let owner_key = crate::persist::save_key(&p.account, &p.name);
+                        for (id, tame) in self.world.tamed.iter() {
+                            if tame.tamer == gob {
+                                self.world.tamed_owner.insert(*id, owner_key.clone());
+                            }
+                        }
+                    }
+                }
                 self.broadcast_retract(gob);
                 self.world.gobs.kill(gob);
             }

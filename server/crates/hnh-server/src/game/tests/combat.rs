@@ -491,6 +491,53 @@ async fn engaged_player_cannot_be_forced_into_a_second_duel() {
     );
 }
 
+/// Session 90: the idle-duel safety net. A forced duel nobody fights
+/// (no attack queued by the player, no landed blows - the live-trace
+/// case: a bear forced a duel on the tamer mid-protocol, then stood
+/// outside swing reach; no bites, no player attack, the one-Fightview
+/// rule keeping the phantom duel alive for minutes) is torn down after
+/// IDLE_DUEL_TICKS so the player can open the fight they actually
+/// want. A QUEUED attack (the quell protocol's approach pursuit)
+/// holds the duel open indefinitely - only a fight nobody is fighting
+/// ends.
+#[tokio::test]
+async fn idle_duel_torn_down_but_a_queued_attack_keeps_the_fight() {
+    let (mut g, _rx, _raw) = entered_game("s90idle");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    // 60 subtiles out: past swing reach (33), well inside DISENGAGE
+    // (300) - an open duel with nobody swinging on either side.
+    let bear = spawn_species_at(&mut g, pidx, 60, Species::Bear.max_hp(), Species::Bear);
+    g.start_fight(1, bear, Species::Bear);
+    assert!(g.world.animal_fights.contains_key(&bear));
+    // Fast-forward the quiet window to one tick before the limit.
+    g.world.animal_fights.get_mut(&bear).unwrap().idle_ticks = crate::state::IDLE_DUEL_TICKS - 1;
+    g.tick_combat();
+    assert_eq!(
+        g.world.players[pidx].fight_target, None,
+        "the idle duel is torn down at the limit"
+    );
+    assert!(
+        !g.world.animal_fights.contains_key(&bear),
+        "the fight row goes with it"
+    );
+    // The same duel with an attack QUEUED (the quell pursuit selects
+    // quell while still walking in) never idles out.
+    g.start_fight(1, bear, Species::Bear);
+    g.sessions.get_mut(&1).unwrap().fight.atk_cur = Some("paginae/atk/quell");
+    g.world.animal_fights.get_mut(&bear).unwrap().idle_ticks = crate::state::IDLE_DUEL_TICKS - 1;
+    g.tick_combat();
+    assert_eq!(
+        g.world.players[pidx].fight_target,
+        Some(bear),
+        "a queued attack holds the duel open"
+    );
+    assert_eq!(
+        g.world.animal_fights.get(&bear).unwrap().idle_ticks,
+        0,
+        "the quiet meter resets while an attack is queued"
+    );
+}
+
 /// Session-43 stale-row guard: a player knocked out during the player
 /// phase (PvP) keeps a stale engaged-animal row for the rest of the
 /// tick; the live fight_target re-check must stop the deer from

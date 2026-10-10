@@ -393,6 +393,41 @@ impl Game {
         }
         self.world.by_session.insert(sid, player_idx);
 
+        // Session 90: the herd re-binds to its owner on login. Restored
+        // tamed rows carry tamer gob 0 plus the owner account key in the
+        // tamed_owner sidecar (no player gobs exist at restore time);
+        // this character's key claims every row it owns - the beasts
+        // follow again (the follow walk walks them over, the OD_FOLLOW
+        // on the next spawn block renders the rope), the flower menus
+        // open, the milk flows. Rows whose key never matches stay
+        // parked (a fresh quell re-binds those the old way).
+        let owned: Vec<GobId> = self
+            .world
+            .tamed_owner
+            .iter()
+            .filter(|(_, k)| k.as_str() == key)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut rebound = 0usize;
+        for id in owned {
+            self.world.tamed_owner.remove(&id);
+            if let Some(tame) = self.world.tamed.get_mut(&id) {
+                tame.tamer = gob;
+                rebound += 1;
+                // Session 90: the follow owns the position now - cancel
+                // any in-flight move, then arm the leash (the OD_FOLLOW
+                // replaces the client's LinMove attr, the per-tick
+                // follow step walks the server side silently).
+                if let Some(slot) = self.world.gobs.get(id) {
+                    self.world.gobs.mv[slot] = None;
+                }
+                self.stream_follow(id, gob);
+            }
+        }
+        if rebound > 0 {
+            info!(sid, count = rebound, "herd re-bound to its owner on login");
+        }
+
         // Starter kit for fresh characters (server policy; legacy gave
         // nothing but the dev flow needs craftable ingredients on hand).
         // Labels on food keep the fep.conf identity for the eat flow.

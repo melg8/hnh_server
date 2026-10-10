@@ -28,14 +28,22 @@ impl Game {
         }
         let (option, hint) = match species {
             Species::Cow => {
-                if tame.milk_units >= crate::state::MILK_PER_BUCKET_UNITS {
+                // Session 90: bulls sire but never lactate; calves mature
+                // first. Both refusals are honest server lines.
+                if tame.sex == crate::state::Sex::Male {
+                    ("", "The bull gives no milk.")
+                } else if !tame.is_adult() {
+                    ("", "The calf is not yet grown.")
+                } else if tame.milk_units >= crate::state::MILK_PER_BUCKET_UNITS {
                     ("Milk", "")
                 } else {
                     ("", "The cow has no milk yet.")
                 }
             }
             _ => {
-                if tame.wool > 0 {
+                if !tame.is_adult() {
+                    ("", "The lamb is not yet grown.")
+                } else if tame.wool > 0 {
                     ("Shear", "")
                 } else {
                     ("", "The sheep has no wool to shear.")
@@ -107,8 +115,21 @@ impl Game {
             return;
         };
         let (milk_units, wool) = (tame.milk_units, tame.wool);
+        // Session 90: the product's quality caps at the grazing row
+        // (feed-limited) but inherits the animal's breeding quality
+        // below it - bred stock grades the milk/wool up to its row.
+        let product_ql = tame.breed_ql.min(crate::state::GRAZE_PRODUCT_QL);
+        let (sex, adult) = (tame.sex, tame.is_adult());
         match species {
             Species::Cow => {
+                if sex == crate::state::Sex::Male {
+                    self.system_line(sid, "The bull gives no milk.");
+                    return;
+                }
+                if !adult {
+                    self.system_line(sid, "The calf is not yet grown.");
+                    return;
+                }
                 if milk_units < crate::state::MILK_PER_BUCKET_UNITS {
                     self.system_line(sid, "The cow has no milk yet.");
                     return;
@@ -160,12 +181,16 @@ impl Game {
                     InvStack {
                         res: milk_res,
                         count: 1,
-                        ql: crate::state::GRAZE_PRODUCT_QL,
+                        ql: product_ql,
                         label: "",
                     },
                 );
             }
             Species::Sheep => {
+                if !adult {
+                    self.system_line(sid, "The lamb is not yet grown.");
+                    return;
+                }
                 if wool == 0 {
                     self.system_line(sid, "The sheep has no wool to shear.");
                     return;
@@ -179,7 +204,7 @@ impl Game {
                         InvStack {
                             res: wool_res,
                             count: u32::from(stored),
-                            ql: crate::state::GRAZE_PRODUCT_QL,
+                            ql: product_ql,
                             label: "",
                         },
                     );
@@ -320,7 +345,11 @@ impl Game {
                 let home = world.animal_home.get(id).copied().unwrap_or((ax, ay));
                 AnimalAction::Return(home)
             }
-            Some((pgob, dist)) if species.aggressive() && dist < aggro => AnimalAction::Chase(pgob),
+            Some((pgob, dist))
+                if species.aggressive() && dist < aggro && !crate::state::no_aggro() =>
+            {
+                AnimalAction::Chase(pgob)
+            }
             Some((pgob, dist)) if !species.aggressive() && dist < 200 => {
                 // Directional panic (session 83): hop straight AWAY from
                 // the threat. The old hop was a random ±550 scatter that
@@ -681,6 +710,47 @@ impl Game {
                 self.fight_del(sid, target);
                 continue;
             }
+            // Session 90 idle-duel safety net: a duel where the player
+            // keeps NO attack queued and neither side lands a blow is a
+            // duel nobody is fighting (the live trace: a bear forced the
+            // duel mid-taming, then just stood). Count those quiet
+            // ticks and tear the phantom fight down after
+            // IDLE_DUEL_TICKS; a queued attack (the quell protocol
+            // selects quell during the approach chase) holds the meter
+            // at zero so the taming pursuit is never interrupted.
+            let idle_over = self
+                .world
+                .animal_fights
+                .get_mut(&target)
+                .map(|af| {
+                    if self
+                        .sessions
+                        .get(&sid)
+                        .is_some_and(|o| o.fight.atk_cur.is_some())
+                    {
+                        af.idle_ticks = 0;
+                        false
+                    } else {
+                        af.idle_ticks = af.idle_ticks.saturating_add(1);
+                        af.idle_ticks >= crate::state::IDLE_DUEL_TICKS
+                    }
+                })
+                .unwrap_or(false);
+            if idle_over {
+                self.world.players[pidx].fight_target = None;
+                self.world.animal_fights.remove(&target);
+                self.fight_del(sid, target);
+                self.chat_line(
+                    sid,
+                    "The beast loses interest and the fight ends.",
+                    Some((255, 200, 128)),
+                );
+                info!(
+                    sid,
+                    target, "idle duel torn down: no attack queued, no blows landed"
+                );
+                continue;
+            }
             if (px - tx).abs() > REACH || (py - ty).abs() > REACH {
                 // In engagement range but not swinging: chase instead.
                 if self.world.gobs.mv[pslot].is_none() {
@@ -1027,6 +1097,9 @@ impl Game {
                     if let Some(af) = self.world.animal_fights.get_mut(&id) {
                         af.intensity = (af.intensity + crate::state::INTENSITY_PER_BLOW)
                             .min(crate::fight::BAR_FULL);
+                        // A biting beast is an ACTIVE beast: the idle-duel
+                        // meter restarts (session 90 teardown guard).
+                        af.idle_ticks = 0;
                     }
                     self.hurt_player(pidx, dmg, id);
                     // Attack animation: the one-shot bite FX overlay on the
@@ -1283,20 +1356,76 @@ impl Game {
         let tamer_gob = self.world.players[pidx].gob;
         // End the battle: the beast stops biting (out of animal_fights).
         self.world.animal_fights.remove(&target);
+        // The WILD kind fixes the domestic row's sex and breed stats at
+        // first contact (session 90): the aurochs IS the wild bull of the
+        // cattle family and the mouflon the wild ram of the sheep family
+        // (both morph into their domestic species at full tameness and
+        // keep the row); every other species rolls 50/50. Wild stock
+        // draws its production row within +/-1 of the legacy constant.
+        // Rolled BEFORE the tamed-entry borrow below.
+        let wild_species =
+            self.world
+                .gobs
+                .get(target)
+                .and_then(|s| match self.world.gobs.kind[s] {
+                    Kind::Animal { species } => Some(species),
+                    _ => None,
+                });
+        let wild_row = wild_species.map(|species| {
+            let sex = match species {
+                crate::state::Species::Cow | crate::state::Species::Sheep => {
+                    crate::state::Sex::Female
+                }
+                crate::state::Species::Aurochs | crate::state::Species::Mouflon => {
+                    crate::state::Sex::Male
+                }
+                _ => {
+                    if self.world.next_ai_rand(2) == 0 {
+                        crate::state::Sex::Female
+                    } else {
+                        crate::state::Sex::Male
+                    }
+                }
+            };
+            let lo_hi = match species {
+                // Sheep draw the wool row around WOOL_QUANTITY; every
+                // other producer (the milk family) around MILK_QUANTITY.
+                crate::state::Species::Sheep => {
+                    let base = crate::state::WOOL_QUANTITY as i32;
+                    (base - 1, base + 1)
+                }
+                _ => (
+                    crate::state::WILD_BREED_ROW_MIN as i32,
+                    crate::state::WILD_BREED_ROW_MAX as i32,
+                ),
+            };
+            let prod_quantity =
+                (lo_hi.0 + self.world.next_ai_rand(lo_hi.1 - lo_hi.0 + 1).abs()) as u8;
+            (sex, prod_quantity)
+        });
         // Accumulate tameness. A LOOSE row (banked progress after a
         // timer-based leash break) re-leashes in place: the entry survives
         // the break, so the five cycles stack 20 -> 40 -> ... -> 100 on
         // the SAME beast (session 83; docs step 5 "quell again").
         let (tameness, full) = {
-            let entry = self
-                .world
-                .tamed
-                .entry(target)
-                .or_insert_with(|| crate::state::TameState::new(tamer_gob, 0));
+            let entry = self.world.tamed.entry(target).or_insert_with(|| {
+                let mut fresh = crate::state::TameState::new(tamer_gob, 0);
+                if let Some((sex, prod_quantity)) = wild_row {
+                    fresh.sex = sex;
+                    fresh.prod_quantity = prod_quantity;
+                }
+                fresh
+            });
             entry.tamer = tamer_gob;
             entry.loose = false;
-            entry.tameness = (entry.tameness + crate::state::TAMENESS_PER_QUELL)
-                .min(crate::state::TAMENESS_FULL);
+            entry.tameness = if crate::state::fast_tame() {
+                // HNH_FAST_TAME (session 90): one landed quell banks full
+                // tameness - the live breeding probe's shortcut (the
+                // five-round stack stays unit-covered; see state::fast_tame).
+                crate::state::TAMENESS_FULL
+            } else {
+                (entry.tameness + crate::state::TAMENESS_PER_QUELL).min(crate::state::TAMENESS_FULL)
+            };
             // The leash-break deadline: ~10 minutes from NOW on every
             // quell below full (docs step 5; game-time based). The
             // HNH_LEASH_TICKS dev knob shrinks the live-verification
@@ -1310,6 +1439,13 @@ impl Game {
             }
         };
         // The leash: client-side following (OCache OD_FOLLOW -> Following).
+        // Session 90: cancel any in-flight panic hop FIRST - the follow
+        // owns the position now (silent per-tick stepping in the tick),
+        // and the OD_FOLLOW below replaces the client's LinMove attr so
+        // the beast renders AT the tamer from here on.
+        if let Some(slot) = self.world.gobs.get(target) {
+            self.world.gobs.mv[slot] = None;
+        }
         self.stream_follow(target, tamer_gob);
         // Clean up the session-side fight (bars + window).
         self.fight_del(sid, target);
@@ -1342,6 +1478,43 @@ impl Game {
                 Some((255, 255, 128)),
             );
         }
+    }
+
+    /// Spawn one newborn calf/lamb beside its dam (session 90): a
+    /// DOMESTIC-BORN juvenile - fully tamed from birth, never leashed
+    /// (break_at 0), carrying the inherited breed rows. It feeds and
+    /// matures through the production sweep's Phase B; the leash
+    /// follower walks it to the dam's tamer like any tamed beast.
+    /// Renders as the adult species sprite (the pack ships no calf
+    /// drawable - documented deviation in the livestock doc).
+    pub(super) fn spawn_calf(
+        &mut self,
+        species: crate::state::Species,
+        tamer: GobId,
+        pos: (i32, i32),
+        prod_quantity: u8,
+        breed_ql: u8,
+        sex: crate::state::Sex,
+    ) {
+        let res_idx = self.world.res.intern(species.resname());
+        let id = self.world.gobs.spawn(
+            Kind::Animal { species },
+            pos,
+            res_idx,
+            species.max_hp(),
+            species.speed(),
+        );
+        self.world.animal_gobs.push(id);
+        // The aggro-leash anchor: born where the calf spawns.
+        self.world.animal_home.insert(id, pos);
+        let mut tame = crate::state::TameState::new(tamer, 0);
+        tame.tameness = crate::state::TAMENESS_FULL;
+        tame.sex = sex;
+        tame.prod_quantity = prod_quantity;
+        tame.breed_ql = breed_ql;
+        tame.juvenile_acc = 0; // newborn: grows through Phase B
+        self.world.tamed.insert(id, tame);
+        self.broadcast_spawn(id);
     }
 
     /// Swap one animal's species at full tameness (session 46): rewrite
@@ -1396,7 +1569,7 @@ impl Game {
     /// ids are global (not session-relative wire ids), so the encoded
     /// block needs no per-session patching - fan out through the packed
     /// start batch like a one-shot FX (Session 44 batched fan-out).
-    fn stream_follow(&mut self, id: GobId, target: GobId) {
+    pub(super) fn stream_follow(&mut self, id: GobId, target: GobId) {
         let Some(slot) = self.world.gobs.get(id) else {
             return;
         };

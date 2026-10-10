@@ -192,6 +192,22 @@ fn main() -> anyhow::Result<()> {
         rev = ?std::env::var("HNH_REV").ok(),
         "hnh-server starting"
     );
+    // Session 90: the live probes drive the server through env knobs
+    // (HNH_NO_AGGRO, HNH_FAST_TAME, HNH_BREED_SCALE, HNH_LEASH_TICKS,
+    // HNH_MILK_RATE). A live trace showed a wolf forcing a duel on a
+    // probe whose HNH_NO_AGGRO=1 server was UP - whether the knob was
+    // actually set could no longer be verified after the fact. Every
+    // knob now logs its effective value at startup so each probe's log
+    // carries its own configuration.
+    info!(
+        no_aggro = crate::state::no_aggro(),
+        fast_tame = crate::state::fast_tame(),
+        breed_scale = ?std::env::var("HNH_BREED_SCALE").ok(),
+        leash_ticks = crate::state::leash_break_ticks(),
+        milk_rate = ?std::env::var("HNH_MILK_RATE").ok(),
+        lp_rate = ?std::env::var("HNH_LP_RATE").ok(),
+        "dev knobs"
+    );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

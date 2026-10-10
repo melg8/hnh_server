@@ -972,11 +972,14 @@ async fn panic_hops_away_and_fighting_beasts_stay_reachable() {
     );
 }
 
-/// Session 83: the tamed beast follows its tamer SERVER-side (docs
-/// step 4/6: "the animal follows the tamer (leashed)"), not just in
-/// the client's OD_FOLLOW render - grazing and production read the
-/// server tile under the beast. A beast stranded far behind walks
-/// toward the tamer; a beast already at the heel stays put.
+/// Session 83 (session 90 form): the tamed beast follows its tamer
+/// SERVER-side (docs step 4/6: "the animal follows the tamer
+/// (leashed)"), not just in the client's OD_FOLLOW render - grazing
+/// and production read the server tile under the beast. The follow
+/// step is a SILENT SoA write (no LinMove: a streamed LINBEG would
+/// replace the client's Following attr and break the rope): a beast
+/// stranded far behind closes the gap at its own gait across ticks;
+/// a beast already at the heel stays put.
 #[tokio::test]
 async fn tamed_beast_follows_the_tamer() {
     let (mut g, _rx, _raw) = entered_game("s83follow");
@@ -985,7 +988,8 @@ async fn tamed_beast_follows_the_tamer() {
     let pslot = g.world.gobs.get(pgob).expect("player gob");
     let (px, _py) = g.world.gobs.pos[pslot];
 
-    // Stranded 100 east: walks back toward the tamer's position.
+    // Stranded 100 east: walks back toward the tamer's position,
+    // silently - the mv column stays empty (no LINBEG on the wire).
     let far = spawn_species_at(&mut g, pidx, 100, Species::Cow.max_hp(), Species::Cow);
     let mut tame = crate::state::TameState::new(pgob, 0);
     tame.tameness = 40;
@@ -995,19 +999,93 @@ async fn tamed_beast_follows_the_tamer() {
     g.world
         .tamed
         .insert(near, crate::state::TameState::new(pgob, 0));
+    let fslot0 = g.world.gobs.get(far).unwrap();
+    let start_d = (g.world.gobs.pos[fslot0].0 - px).abs();
 
-    g.tick();
+    for _ in 0..15 {
+        g.tick();
+    }
     let fslot = g.world.gobs.get(far).expect("far cow gob");
-    let walk = g.world.gobs.mv[fslot].expect("the stranded cow walks");
+    let now_d = (g.world.gobs.pos[fslot].0 - px).abs();
     assert!(
-        (walk.tx - px).abs() < 100,
-        "the follow walk heads toward the tamer (tx-px={})",
-        walk.tx - px
+        now_d < start_d,
+        "the stranded cow closed the gap ({} -> {})",
+        start_d,
+        now_d
+    );
+    assert!(
+        g.world.gobs.mv[fslot].is_none(),
+        "the follow step is silent: no LinMove on the wire"
     );
     let nslot = g.world.gobs.get(near).expect("near cow gob");
+    let (nx, _ny) = g.world.gobs.pos[nslot];
     assert!(
-        g.world.gobs.mv[nslot].is_none(),
-        "a cow at the heel does not thrash start_move"
+        (nx - px).abs() <= 20,
+        "a cow at the heel stays at the heel (dx={})",
+        nx - px
+    );
+}
+
+/// Session 90 regression (live breeding probe, run 3): a stranded
+/// follower on a DIAGONAL line with a terrain-capped step of ONE
+/// subtile must still make progress. The old per-axis split
+/// (dx * step / d) truncated both axis shares to zero - the follower
+/// wrote its own position back every tick and froze mid-field (the
+/// dam waded into water, stalled 379 subtiles short of the sire, and
+/// the pregnancy never started). The Bresenham follow walk advances
+/// exactly one axis per subtile of the step budget, so every tick
+/// with step >= 1 closes the Manhattan gap by step.
+#[tokio::test]
+async fn stranded_follower_advances_on_diagonal_slow_tiles() {
+    let (mut g, _rx, _raw) = entered_game("s90diag");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    let pslot = g.world.gobs.get(pgob).expect("player gob");
+    let (px, py) = g.world.gobs.pos[pslot];
+
+    // A diagonal stranding: 60 east + 80 south (Manhattan 140). The
+    // gob speed is pinned to 1 so the per-tick step budget is exactly
+    // ONE subtile - the truncating split moved it zero.
+    let far = spawn_species_at(&mut g, pidx, 0, Species::Cow.max_hp(), Species::Cow);
+    let fslot = g.world.gobs.get(far).unwrap();
+    g.world.gobs.set_pos(fslot, (px + 60, py + 80));
+    g.world.gobs.speed[fslot] = 1;
+    let mut tame = crate::state::TameState::new(pgob, 0);
+    tame.tameness = crate::state::TAMENESS_FULL;
+    g.world.tamed.insert(far, tame);
+
+    let start_d = {
+        let (bx, by) = g.world.gobs.pos[fslot];
+        (bx - px).abs() + (by - py).abs()
+    };
+    for _ in 0..15 {
+        g.tick();
+    }
+    let now_d = {
+        let slot = g.world.gobs.get(far).expect("diagonal cow gob");
+        let (bx, by) = g.world.gobs.pos[slot];
+        (bx - px).abs() + (by - py).abs()
+    };
+    assert!(
+        now_d < start_d,
+        "the diagonal slow-tile follower closed the gap ({} -> {})",
+        start_d,
+        now_d
+    );
+    // The step budget is 1 subtile per tick: 15 ticks must close at
+    // least 12 (the walk re-aims every tick; no other writer moves
+    // the gob).
+    assert!(
+        start_d - now_d >= 12,
+        "the progress matched the step budget (closed {} in 15 ticks)",
+        start_d - now_d
+    );
+    // The walk must never overshoot the leash ring: the distance
+    // never drops below LEASH_FOLLOW_DIST.
+    assert!(
+        now_d > crate::state::LEASH_FOLLOW_DIST,
+        "the follower keeps its leash ring distance (d={})",
+        now_d
     );
 }
 
@@ -1145,5 +1223,404 @@ async fn aggro_leash_surrenders_the_chase_and_releases_the_duel() {
     assert!(
         (mv.tx - (home.0 + 230)).abs() + (mv.ty - home.1).abs() < 100,
         "the march target is the player again"
+    );
+}
+
+/// Session 90: bulls never lactate. A fully-tamed bull standing on
+/// prime grazing accrues NO milk - the milk meter is a female-only
+/// organ and the per-animal row only scales the cows that have one.
+#[tokio::test]
+async fn bulls_do_not_lactate() {
+    let (mut g, _rx, _raw) = entered_game("s90bull");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    let bull = spawn_species_at(&mut g, pidx, 300, Species::Cow.max_hp(), Species::Cow);
+    full_tame(&mut g, bull, pgob);
+    let slot = g.world.gobs.get(bull).unwrap();
+    let sub = g.world.gobs.pos[slot];
+    force_tile(&mut g, sub, hnh_world::gen::tile::GRASS);
+    {
+        let tame = g.world.tamed.get_mut(&bull).unwrap();
+        tame.sex = crate::state::Sex::Male;
+        tame.prod_acc = crate::state::MILK_ACC_PER_UNIT; // pre-fed a unit
+    }
+    for _ in 0..600 {
+        g.tick();
+    }
+    let tame = g.world.tamed.get(&bull).unwrap();
+    assert_eq!(tame.milk_units, 0, "a bull accrues no milk");
+    assert_eq!(
+        tame.prod_acc,
+        crate::state::MILK_ACC_PER_UNIT,
+        "the accumulator stays frozen: no gain was ever added"
+    );
+}
+
+/// Session 90: a bred calf matures through the fed accumulator and
+/// starts lactating only as an ADULT female. The calf is 3 ticks from
+/// maturity; while juvenile it banks growth (no product), and the
+/// first adult tick lets the pre-seeded milk row flow.
+#[tokio::test]
+async fn calves_mature_then_lactate() {
+    let (mut g, _rx, _raw) = entered_game("s90calfgrow");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    let calf = spawn_species_at(&mut g, pidx, 300, Species::Cow.max_hp(), Species::Cow);
+    full_tame(&mut g, calf, pgob);
+    let slot = g.world.gobs.get(calf).unwrap();
+    let sub = g.world.gobs.pos[slot];
+    force_tile(&mut g, sub, hnh_world::gen::tile::GRASS);
+    {
+        let tame = g.world.tamed.get_mut(&calf).unwrap();
+        tame.sex = crate::state::Sex::Female;
+        tame.juvenile_acc = crate::state::MATURATION_TICKS - 3;
+        tame.prod_quantity = 10;
+    }
+    // Still a calf: two ticks of growth, no product, no banked time.
+    for _ in 0..2 {
+        g.tick();
+    }
+    {
+        let tame = g.world.tamed.get(&calf).unwrap();
+        assert!(!tame.is_adult());
+        assert_eq!(tame.milk_units, 0, "a calf gives no milk");
+        assert_eq!(tame.prod_acc, 0, "no production while juvenile");
+    }
+    // Third tick: maturation lands (the growth branch runs first and
+    // `continue`s the tick - production starts on the NEXT tick, the
+    // tick-granularity boundary between the phases).
+    g.tick();
+    let tame = g.world.tamed.get(&calf).unwrap();
+    assert!(tame.is_adult(), "maturation landed");
+    assert_eq!(tame.prod_acc, 0, "the maturing tick itself banks nothing");
+    // Fourth tick: the first adult tick banks the first quantity-ticks.
+    g.tick();
+    let tame = g.world.tamed.get(&calf).unwrap();
+    assert!(tame.prod_acc > 0, "the first adult tick banks production");
+}
+
+/// Session 90: the full breeding pipeline. A fed cow one tick from
+/// term, a fed bull in range: the tick births the calf as a NEW
+/// fully-tamed juvenile with inherited rows, resets the dam's
+/// pregnancy, and leaves the herd one head larger.
+#[tokio::test]
+async fn breeding_births_an_inherited_calf() {
+    let (mut g, _rx, _raw) = entered_game("s90breed");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    let cow = spawn_species_at(&mut g, pidx, 200, Species::Cow.max_hp(), Species::Cow);
+    let bull = spawn_species_at(&mut g, pidx, 240, Species::Cow.max_hp(), Species::Cow);
+    full_tame(&mut g, cow, pgob);
+    full_tame(&mut g, bull, pgob);
+    let cslot = g.world.gobs.get(cow).unwrap();
+    let cow_sub = g.world.gobs.pos[cslot];
+    let bslot = g.world.gobs.get(bull).unwrap();
+    let bull_sub = g.world.gobs.pos[bslot];
+    force_tile(&mut g, cow_sub, hnh_world::gen::tile::GRASS);
+    force_tile(&mut g, bull_sub, hnh_world::gen::tile::GRASS);
+    {
+        let tame = g.world.tamed.get_mut(&cow).unwrap();
+        tame.sex = crate::state::Sex::Female;
+        tame.prod_quantity = 10;
+        tame.breed_ql = 10;
+        tame.pregnant_acc = crate::state::GESTATION_TICKS - 1;
+    }
+    {
+        let tame = g.world.tamed.get_mut(&bull).unwrap();
+        tame.sex = crate::state::Sex::Male;
+        tame.prod_quantity = 12;
+        tame.breed_ql = 10;
+    }
+    let before = g.world.animal_gobs.len();
+    g.tick();
+    assert_eq!(
+        g.world.animal_gobs.len(),
+        before + 1,
+        "one calf joined the herd"
+    );
+    // The dam's pregnancy reset.
+    let dam = g.world.tamed.get(&cow).unwrap();
+    assert_eq!(dam.pregnant_acc, 0, "the pregnancy reset at birth");
+    // The calf: domestic-born (full tameness), juvenile, inherited
+    // rows inside the contract bounds (avg 11 with the spread, capped
+    // by the sire's breeding quality 10).
+    let calf = g.world.animal_gobs.last().copied().unwrap();
+    let tame = g
+        .world
+        .tamed
+        .get(&calf)
+        .expect("the calf is tame from birth");
+    assert_eq!(tame.tameness, crate::state::TAMENESS_FULL);
+    assert!(!tame.is_adult(), "born a juvenile");
+    assert!(
+        (9..=12).contains(&tame.prod_quantity),
+        "the inherited milk row {} stays in the contract bounds",
+        tame.prod_quantity
+    );
+    assert!(tame.breed_ql >= 1 && tame.breed_ql <= 10);
+    // The calf spawned beside its dam (twins offset excluded: the
+    // 5% roll is rng-seeded, the single birth lands within 55 of it).
+    let slot = g.world.gobs.get(calf).unwrap();
+    let (cx, cy) = g.world.gobs.pos[slot];
+    let (dx, dy) = (cx - cow_sub.0, cy - cow_sub.1);
+    assert!(dx * dx + dy * dy <= 55 * 55, "born beside the dam");
+    // Domestic-born rows are never leashed.
+    assert_eq!(tame.break_at_tick, 0);
+}
+
+/// Session 90: no bull in range, no pregnancy. A lone fed cow on
+/// grass banks NOTHING into the pregnancy accumulator.
+#[tokio::test]
+async fn lone_cows_never_conceive() {
+    let (mut g, _rx, _raw) = entered_game("s90lonecow");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    let cow = spawn_species_at(&mut g, pidx, 300, Species::Cow.max_hp(), Species::Cow);
+    full_tame(&mut g, cow, pgob);
+    let slot = g.world.gobs.get(cow).unwrap();
+    let sub = g.world.gobs.pos[slot];
+    force_tile(&mut g, sub, hnh_world::gen::tile::GRASS);
+    {
+        let tame = g.world.tamed.get_mut(&cow).unwrap();
+        tame.sex = crate::state::Sex::Female;
+    }
+    for _ in 0..10 {
+        g.tick();
+    }
+    let tame = g.world.tamed.get(&cow).unwrap();
+    assert_eq!(tame.pregnant_acc, 0, "no sire, no conception");
+}
+
+/// Session 90 (runaway breeding): a cluster nursing a maturing calf
+/// postpones every birth inside the seek radius. A fed dam one tick
+/// from term and a fed bull in range bank NOTHING while a juvenile
+/// stands within BREED_SEEK_RADIUS of the dam - the guard that keeps
+/// a scaled breed run linear instead of exponential (live trace: an
+/// unguarded solo probe doubled the herd every ~30 s and melted the
+/// server into a 160 MB log).
+#[tokio::test]
+async fn nursing_calf_blocks_rebreeding() {
+    let (mut g, _rx, _raw) = entered_game("s90nurse");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    // All three inside LEASH_FOLLOW_DIST of the tamer (the follow walk
+    // never moves them) and inside one seek radius of each other.
+    let cow = spawn_species_at(&mut g, pidx, 10, Species::Cow.max_hp(), Species::Cow);
+    let calf = spawn_species_at(&mut g, pidx, 20, Species::Cow.max_hp(), Species::Cow);
+    let bull = spawn_species_at(&mut g, pidx, 30, Species::Cow.max_hp(), Species::Cow);
+    full_tame(&mut g, cow, pgob);
+    full_tame(&mut g, calf, pgob);
+    full_tame(&mut g, bull, pgob);
+    for gob in [cow, calf, bull] {
+        let slot = g.world.gobs.get(gob).unwrap();
+        let sub = g.world.gobs.pos[slot];
+        force_tile(&mut g, sub, hnh_world::gen::tile::GRASS);
+    }
+    {
+        let tame = g.world.tamed.get_mut(&cow).unwrap();
+        tame.sex = crate::state::Sex::Female;
+        tame.prod_quantity = 10;
+        tame.pregnant_acc = crate::state::GESTATION_TICKS - 1;
+    }
+    {
+        let tame = g.world.tamed.get_mut(&bull).unwrap();
+        tame.sex = crate::state::Sex::Male;
+        tame.prod_quantity = 12;
+    }
+    // The third head stays a juvenile: nursing inside the radius.
+    {
+        let tame = g.world.tamed.get_mut(&calf).unwrap();
+        tame.juvenile_acc = 0;
+    }
+    let before = g.world.animal_gobs.len();
+    for _ in 0..3 {
+        g.tick();
+    }
+    assert_eq!(
+        g.world.animal_gobs.len(),
+        before,
+        "no birth while a calf nurses inside the seek radius"
+    );
+    let dam = g.world.tamed.get(&cow).unwrap();
+    assert_eq!(
+        dam.pregnant_acc,
+        crate::state::GESTATION_TICKS - 1,
+        "the dam stays at term, unbirthed"
+    );
+}
+
+/// Session 90 (runaway breeding): past BREED_CLUSTER_CAP fed adults of
+/// the species inside the seek radius the cluster stops breeding
+/// outright - the hard ceiling behind the nursing guard. Moving the
+/// surplus cows far away re-opens the pipeline on the next tick.
+#[tokio::test]
+async fn overcrowded_cluster_stops_breeding() {
+    let (mut g, _rx, _raw) = entered_game("s90crowd");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    let cow = spawn_species_at(&mut g, pidx, 10, Species::Cow.max_hp(), Species::Cow);
+    let bull = spawn_species_at(&mut g, pidx, 30, Species::Cow.max_hp(), Species::Cow);
+    full_tame(&mut g, cow, pgob);
+    full_tame(&mut g, bull, pgob);
+    {
+        let tame = g.world.tamed.get_mut(&cow).unwrap();
+        tame.sex = crate::state::Sex::Female;
+        tame.prod_quantity = 10;
+        tame.pregnant_acc = crate::state::GESTATION_TICKS - 1;
+    }
+    {
+        let tame = g.world.tamed.get_mut(&bull).unwrap();
+        tame.sex = crate::state::Sex::Male;
+        tame.prod_quantity = 12;
+    }
+    // Fill the cluster to the cap: the dam + the bull + (cap - 2)
+    // cows, every head within LEASH_FOLLOW_DIST of the tamer (the
+    // follow walk never moves it) and inside one seek radius of the
+    // dam, every standing tile forced to grass.
+    let mut fillers = Vec::new();
+    for i in 0..(crate::state::BREED_CLUSTER_CAP - 2) {
+        let gob = spawn_species_at(
+            &mut g,
+            pidx,
+            11 + i as i32 * 2,
+            Species::Cow.max_hp(),
+            Species::Cow,
+        );
+        full_tame(&mut g, gob, pgob);
+        let slot = g.world.gobs.get(gob).unwrap();
+        let sub = g.world.gobs.pos[slot];
+        force_tile(&mut g, sub, hnh_world::gen::tile::GRASS);
+        let tame = g.world.tamed.get_mut(&gob).unwrap();
+        tame.sex = crate::state::Sex::Female;
+        fillers.push(gob);
+    }
+    for gob in [cow, bull] {
+        let slot = g.world.gobs.get(gob).unwrap();
+        let sub = g.world.gobs.pos[slot];
+        force_tile(&mut g, sub, hnh_world::gen::tile::GRASS);
+    }
+    let before = g.world.animal_gobs.len();
+    for _ in 0..3 {
+        g.tick();
+    }
+    assert_eq!(
+        g.world.animal_gobs.len(),
+        before,
+        "a cluster at the cap births nothing"
+    );
+    let dam = g.world.tamed.get(&cow).unwrap();
+    assert_eq!(
+        dam.pregnant_acc,
+        crate::state::GESTATION_TICKS - 1,
+        "no conception at the crowding cap"
+    );
+    // Move the surplus cows far away: the very next tick completes
+    // the term and the calf is born.
+    for gob in &fillers {
+        let slot = g.world.gobs.get(*gob).unwrap();
+        let (fx, fy) = g.world.gobs.pos[slot];
+        g.world.gobs.set_pos(slot, (fx + 4000, fy));
+    }
+    let before = g.world.animal_gobs.len();
+    g.tick();
+    assert_eq!(
+        g.world.animal_gobs.len(),
+        before + 1,
+        "the birth fires once the crowd disperses"
+    );
+}
+
+/// Session 90: the herd binding survives logout+restart. A tamed row
+/// bound to an online owner parks its account key in the tamed_owner
+/// sidecar on disconnect; the world save writes it as tamer_key (the
+/// online lookup fails once the player row is gone, so the sidecar
+/// serves); a fresh boot restores the sidecar; the owner's login
+/// re-binds the row to the FRESH gob - the follow walk, the flower
+/// menus and Phase D breeding all key off the tamer gob. A parked row
+/// (tamer gob 0, no sidecar match) never follows a non-player gob.
+#[tokio::test]
+async fn herd_rebinds_to_owner_across_restart() {
+    // A failed earlier run leaves its flushed rows behind: start clean.
+    let _ = std::fs::remove_file(std::env::temp_dir().join("hnh-equip-test-s90rebind.json"));
+    // Boot 1: tame a cow, log out, save.
+    let (mut g, _rx, _raw) = entered_game("s90rebind");
+    let pidx = *g.world.by_session.get(&1).unwrap();
+    let pgob = g.world.players[pidx].gob;
+    let cow = spawn_species_at(&mut g, pidx, 300, Species::Cow.max_hp(), Species::Cow);
+    full_tame(&mut g, cow, pgob);
+    g.on_session_closed(1);
+    // The disconnect parked the binding in the owner sidecar BEFORE
+    // the player row vanished.
+    let key = g.world.tamed_owner.get(&cow).cloned();
+    assert_eq!(
+        key.as_deref(),
+        Some("acct:s90rebind"),
+        "the owner key parks on disconnect"
+    );
+    g.save_all_and_flush();
+    drop(g);
+    // Boot 2, step 1: the restore parks the row BEFORE any login
+    // (Game::new with no session - the rebind fires on entry).
+    let (_cmd2, cmd_rx2) = tokio::sync::mpsc::unbounded_channel();
+    let (_net2, net_rx2) = tokio::sync::mpsc::unbounded_channel();
+    let mut g2 = Game::new(
+        42,
+        cmd_rx2,
+        net_rx2,
+        false,
+        std::env::temp_dir().join("hnh-equip-test-s90rebind.json"),
+    );
+    assert_eq!(g2.world.tamed.len(), 1, "one tamed row restores");
+    let cow2 = *g2.world.tamed.keys().next().unwrap();
+    assert_eq!(
+        g2.world.tamed[&cow2].tamer, 0,
+        "restore leaves the row unbound (gob 0)"
+    );
+    assert!(
+        g2.world.tamed_owner.contains_key(&cow2),
+        "the restored row parks its owner key"
+    );
+    // Step 2: the owner's login re-binds the row to the fresh gob.
+    let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+    let (raw_tx2, _raw2) = tokio::sync::mpsc::channel::<crate::state::BlockBytes>(512);
+    g2.session_connected(1, "acct".to_owned(), tx2, raw_tx2);
+    let wid = g2
+        .sessions
+        .get(&1)
+        .unwrap()
+        .widgets
+        .iter()
+        .find(|(_, t)| t.as_str() == "charlist")
+        .map(|(k, _)| *k)
+        .expect("charlist widget");
+    g2.on_wdgmsg(
+        1,
+        wid,
+        "play",
+        vec![hnh_proto::ListArg::Str("s90rebind".to_owned())],
+    );
+    for _ in 0..3 {
+        g2.tick();
+    }
+    let newgob = g2.world.players[0].gob;
+    let tame = g2.world.tamed.get(&cow2).expect("the row restored");
+    assert_eq!(tame.tamer, newgob, "the owner's login re-binds the row");
+    assert!(
+        !g2.world.tamed_owner.contains_key(&cow2),
+        "the sidecar entry is consumed"
+    );
+    assert!(tame.tameness >= crate::state::TAMENESS_FULL);
+    // The spawn block carries the leash attr for the re-bound beast:
+    // [OD_FOLLOW][tamer i32][int8 0][i32 0][i32 0] - a new viewer gets
+    // the rope with the LIVE tamer (encode_gob_block reads the same
+    // gate the follow walk does).
+    let block = g2
+        .encode_gob_block(1, cow2, false)
+        .expect("the cow block encodes");
+    let mut needle = vec![OD_FOLLOW];
+    needle.extend_from_slice(&newgob.to_le_bytes());
+    assert!(
+        block.windows(needle.len()).any(|w| w == needle),
+        "the spawn block carries OD_FOLLOW with the re-bound tamer"
     );
 }

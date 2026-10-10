@@ -93,6 +93,25 @@ impl Game {
         let hp = self.world.gobs.hp[slot];
         let max_hp = self.world.gobs.max_hp[slot];
         let mv = self.world.gobs.mv[slot];
+        // Session 90: the leash render rides the spawn block for tamed
+        // beasts - a NEW viewer gets the rope (the quell-time broadcast
+        // covers viewers already online; re-login rebinds rebroadcast
+        // the same way). Only a live PLAYER tamer counts: a restored
+        // row parks its tamer at gob 0, and slot 0 can hold any live
+        // gob (a tree was first to spawn). LOOSE rows run wild AI and
+        // never follow.
+        let follow = match kind {
+            Kind::Animal { .. } => self
+                .world
+                .tamed
+                .get(&id)
+                .filter(|t| !t.loose)
+                .and_then(|t| {
+                    let ts = self.world.gobs.get(t.tamer)?;
+                    matches!(self.world.gobs.kind[ts], Kind::Player { .. }).then_some(t.tamer)
+                }),
+            _ => None,
+        };
         // Equipped pieces read before the session borrow (the names feed
         // both the world drawable and the doll attribute below).
         let equip: Vec<&'static str> = match kind {
@@ -232,6 +251,11 @@ impl Game {
         // Health tint.
         let quarters = ((hp * 4) / max_hp.max(1)).clamp(0, 4) as u8;
         m.uint8(OD_HEALTH).uint8(quarters);
+        // Leash (session 90; same wire shape as animals::stream_follow:
+        // tgt i32, then int8 zero + two int32 zeros = the 9-byte tail).
+        if let Some(t) = follow {
+            m.uint8(OD_FOLLOW).int32(t).int8(0).int32(0).int32(0);
+        }
         m.uint8(OD_END);
         Some(m.finish())
     }

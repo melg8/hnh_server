@@ -44,6 +44,7 @@ impl Game {
                     off: 0,
                     def: crate::fight::BAR_FULL,
                     intensity: 0,
+                    idle_ticks: 0,
                 },
             );
             info!(sid, target, ?species, "relay fight started");
@@ -61,6 +62,7 @@ impl Game {
                 off: 0,
                 def: crate::fight::BAR_FULL,
                 intensity: 0,
+                idle_ticks: 0,
             });
         info!(sid, target, ?species, "fight started");
     }
@@ -103,6 +105,7 @@ impl Game {
                     off: 0,
                     def: crate::fight::BAR_FULL,
                     intensity: 0,
+                    idle_ticks: 0,
                 });
             self.chat_line(sid, &format!("You attack {vname}!"), Some((255, 200, 128)));
             info!(sid, target, "pvp relay duel started");

@@ -228,13 +228,44 @@ pub struct SavedAnimal {
     /// quell re-leashes it (session 83; docs: "unless quelled again").
     #[serde(default)]
     pub loose: bool,
+    /// Sex index (session 90; state::Sex::index). Default Female -
+    /// every pre-v8 save predates sex and the milk chain only ever
+    /// produced from cows.
+    #[serde(default)]
+    pub sex: u8,
+    /// Per-animal breed stat row: Milk Quantity (cows) / Wool Quantity
+    /// (sheep) - session 90. Default: the legacy constant.
+    #[serde(default = "default_breed_row")]
+    pub prod_quantity: u8,
+    /// Breeding quality (session 90). Default: the grazing row.
+    #[serde(default = "default_breed_ql")]
+    pub breed_ql: u8,
+    /// Pregnancy accumulator (session 90; 0 = not pregnant).
+    #[serde(default)]
+    pub pregnant_acc: u64,
+    /// Juvenile accumulator (session 90; >= MATURATION_TICKS = adult).
+    /// Default adult: pre-v8 rows were all wild-tamed grown stock.
+    #[serde(default = "default_adult")]
+    pub juvenile_acc: u64,
+}
+
+fn default_breed_row() -> u8 {
+    crate::state::MILK_QUANTITY.min(255) as u8
+}
+
+fn default_breed_ql() -> u8 {
+    crate::state::GRAZE_PRODUCT_QL
+}
+
+fn default_adult() -> u64 {
+    crate::state::MATURATION_TICKS
 }
 
 impl SaveData {
-    /// v7: trough fodder + animal feeding/starvation fields (session
-    /// 48). Additive only - older files load through the per-field
-    /// serde defaults.
-    pub const VERSION: u32 = 7;
+    /// v8: breeding fields on tamed animals (session 90) - sex, the
+    /// breed stat rows, pregnancy and juvenile accumulators. Additive
+    /// only - older files load through the per-field serde defaults.
+    pub const VERSION: u32 = 8;
 
     pub fn new(seed: u64) -> Self {
         SaveData {
@@ -438,6 +469,51 @@ impl SaveStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Session 90: a pre-v8 save (no breeding fields) loads with the
+    /// documented defaults - female (the milk chain only ever produced
+    /// from cows), the legacy breed row, the grazing quality, not
+    /// pregnant, adult. Additive-only versioning: old worlds keep
+    /// their herds.
+    #[test]
+    fn pre_v8_animal_rows_load_with_breeding_defaults() {
+        let legacy = serde_json::json!({
+            "species": 4,
+            "tile": [11, 7],
+            "hp": 50,
+            "tameness": 100,
+            "tamer_key": "acct:cow",
+            "milk_units": 300,
+            "wool": 0,
+            "prod_acc": 42,
+            "feed_acc_nano": 0,
+            "hunger": 0,
+            "loose": false
+        });
+        let a: SavedAnimal = serde_json::from_value(legacy).unwrap();
+        assert_eq!(a.sex, crate::state::Sex::index(crate::state::Sex::Female));
+        assert_eq!(a.prod_quantity, crate::state::MILK_QUANTITY.min(255) as u8);
+        assert_eq!(a.breed_ql, crate::state::GRAZE_PRODUCT_QL);
+        assert_eq!(a.pregnant_acc, 0);
+        assert!(
+            a.juvenile_acc >= crate::state::MATURATION_TICKS,
+            "old rows are adult"
+        );
+        // The v8 row roundtrips its own values verbatim.
+        let v8 = serde_json::json!({
+            "species": 4, "tile": [11, 7], "hp": 50, "tameness": 100,
+            "tamer_key": "", "milk_units": 0, "wool": 0, "prod_acc": 0,
+            "feed_acc_nano": 0, "hunger": 0, "loose": false,
+            "sex": 1, "prod_quantity": 12, "breed_ql": 11,
+            "pregnant_acc": 7, "juvenile_acc": 3
+        });
+        let a: SavedAnimal = serde_json::from_value(v8).unwrap();
+        assert_eq!(a.sex, crate::state::Sex::index(crate::state::Sex::Male));
+        assert_eq!(a.prod_quantity, 12);
+        assert_eq!(a.breed_ql, 11);
+        assert_eq!(a.pregnant_acc, 7);
+        assert_eq!(a.juvenile_acc, 3);
+    }
 
     #[test]
     fn roundtrip_preserves_players() {
@@ -754,6 +830,11 @@ mod tests {
                         feed_acc_nano: 0,
                         hunger: 0,
                         loose: false,
+                        sex: (i % 2) as u8,
+                        prod_quantity: 10,
+                        breed_ql: 10,
+                        pregnant_acc: 0,
+                        juvenile_acc: crate::state::MATURATION_TICKS,
                     })
                     .collect(),
             }

@@ -518,6 +518,7 @@ impl Game {
                     off: 0,
                     def: crate::fight::BAR_FULL,
                     intensity: 0,
+                    idle_ticks: 0,
                 }
             });
             let breaking = af.def <= crate::fight::OPENING_THRESHOLD;
