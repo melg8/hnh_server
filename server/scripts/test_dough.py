@@ -21,6 +21,14 @@ Drives the new forage/apple/hive/raisin legs against a live server:
      craft Blueberry Pie Dough (flour + bucket-water + the foraged
      blueberries), build the oven, bake the pie, verify the baked
      label/resource, and eat it (the Blueberry Pie=INT:4 PER:3 row).
+  7. HONEYBUN (session 83): the first no-butter dough with TWO
+     filled-bucket inputs - flour x2 + bucket-water + the hive leg's
+     bucket-honey -> Honeybun Dough x2 + both buckets back empty;
+     baked in the SAME oven -> Honey Bun -> eaten (AGI:5).
+  8. PIROZHKI (session 83): the savory dough over the forage legs -
+     flour x2 + bucket-water + chantrelles x2 + onions x2 ->
+     Pirozhki Dough x2; baked -> Chantrelle & Onion Pirozhki ->
+     eaten (CON:4 DEX:4).
 
 Prints "DOUGH: OK ..." on success.
 
@@ -49,6 +57,7 @@ from hnhlib import (  # noqa: E402
 # (same directory; imported for reuse, not re-implemented).
 from test_bake import (  # noqa: E402
     FLOUR_INV,
+    GRIST_INV,
     OVEN_RES,
     QUERN_RES,
     BakeClient,
@@ -101,6 +110,20 @@ PIE_DOUGH_INV = "gfx/invobjs/dough-pie-blueberry"
 PIE_INV = "gfx/invobjs/pie-blueberry"
 PIE_WORLD = "gfx/terobjs/items/pie-blueberry"
 PIE_LABEL = "Blueberry Pie"
+
+# Session 83: the two no-butter doughs whose ingredients the probe
+# already produced (honey off the hive leg, chantrelles + onions off
+# the forage legs). BAKE_MAP keys their baked outputs; fep.conf keys
+# the eat rows (Honey Bun=AGI:5, Chantrelle & Onion Pirozhki=CON:4
+# DEX:4).
+HONEY_DOUGH_INV = "gfx/invobjs/dough-bun-honey"
+HONEYBUN_INV = "gfx/invobjs/honeybun"
+HONEYBUN_WORLD = "gfx/terobjs/items/honeybun"
+HONEYBUN_LABEL = "Honey Bun"
+PIRO_DOUGH_INV = "gfx/invobjs/dough-pirozhki"
+PIRO_INV = "gfx/invobjs/feast-pirozhki"
+PIRO_WORLD = "gfx/terobjs/items/feast-pirozhki"
+PIRO_LABEL = "Chantrelle & Onion Pirozhki"
 
 
 class DoughClient(BakeClient):
@@ -432,11 +455,28 @@ def walk_to_grass(c):
     print("at the grass field: %s" % (grass,))
 
 
+def ensure_flour(c, quern, qmc, want=2):
+    """Grind flour at the standing quern until `want` units sit in the
+    inventory; re-farm wheat when the leftover grist runs dry (the
+    mature harvest rolls 1-2 grist per crop, so five crops can leave
+    the third dough leg one unit short - the fast crop clock makes the
+    re-farm seconds, not hours)."""
+    while inv_total(c, FLOUR_INV) < want:
+        if inv_total(c, GRIST_INV) == 0:
+            walk_to_grass(c)
+            plant_and_harvest(c)
+        grind_flour(c, quern, qmc)
+    assert inv_total(c, FLOUR_INV) >= want, "flour quota unmet"
+    print("flour ground (%d in inventory)" % inv_total(c, FLOUR_INV))
+
+
 def blueberry_pie_leg(c):
     """The full bake cycle over a session-81 dough: farm -> grind ->
     craft -> build -> bake -> eat. Every ingredient is produced by
     this probe run (flour from the starter seeds, water from the
-    second crafted bucket, blueberries off the forage leg)."""
+    second crafted bucket, blueberries off the forage leg).
+    Returns the built stations (quern, oven) so the session-83 dough
+    legs reuse them instead of building their own."""
     # Fuel headroom: one branch more than the station demands.
     gather_branches(c, inv_total(c, BRANCH_INV) + 2)
     # The water bucket (the hive leg's bucket went into the honey).
@@ -454,7 +494,6 @@ def blueberry_pie_leg(c):
     )
     while inv_total(c, FLOUR_INV) < 2:
         grind_flour(c, quern, qmc)
-    assert inv_total(c, FLOUR_INV) >= 2, "flour quota unmet"
     print("flour ground (%d in inventory)" % inv_total(c, FLOUR_INV))
 
     # The dough craft itself: flour x2 + bucket-water + blueberry x3
@@ -472,16 +511,82 @@ def blueberry_pie_leg(c):
         c, "oven", OVEN_RES,
         [("gfx/invobjs/stone", 2), ("gfx/invobjs/branch", 1)],
     )
-    bake_pie(c, oven, omc)
+    bake_dough(
+        c, oven, omc, PIE_DOUGH_INV, PIE_WORLD, PIE_LABEL, "blueberry pie")
 
     # The eat verdict: the baked label resolves its fep.conf row.
     eat_item(c, PIE_LABEL, "blueberry pie")
     print("EAT PIE: food uimsg seen (Blueberry Pie=INT:4 PER:3 row live)")
+    return (quern, qmc), (oven, omc)
 
 
-def bake_pie(c, oven, mc):
-    """Fuel one branch, load one blueberry dough, Light, catch the
-    pie drop, pick it up, and verify the baked label + resource."""
+def honeybun_leg(c, quern, oven):
+    """Session 83, leg 7: the honeybun dough (the one recipe with TWO
+    filled-bucket inputs). The hive leg's Bucket of Honey + one
+    water fill + ground flour -> dough x2 + both buckets back."""
+    qmc, omc = quern[1], oven[1]
+    quern, oven = quern[0], oven[0]
+    # Fuel for this leg's bake.
+    gather_branches(c, inv_total(c, BRANCH_INV) + 2)
+    # The water bucket: the blueberry dough craft returned one empty.
+    assert inv_total(c, BUCKETE_INV) >= 1, (
+        "no empty bucket returned from the pie dough craft")
+    find_and_fill_water(c)
+    assert inv_total(c, HONEY_INV) >= 1, (
+        "the hive leg's honey is gone (items=%s)" % (
+            [(i["res"], i["tt"]) for i in c.item_info.values()],))
+    ensure_flour(c, quern, qmc)
+
+    craft_once(c, "hbdough", HONEY_DOUGH_INV)
+    assert inv_total(c, HONEY_DOUGH_INV) >= 2, "the honeybun dough made < 2"
+    assert inv_total(c, BUCKETE_INV) >= 2, (
+        "both buckets must return empty (got %d)" % inv_total(c, BUCKETE_INV))
+    print("HONEYBUN DOUGH: crafted x%d (both buckets returned)" % (
+        inv_total(c, HONEY_DOUGH_INV)))
+
+    bake_dough(
+        c, oven, omc, HONEY_DOUGH_INV, HONEYBUN_WORLD, HONEYBUN_LABEL,
+        "honeybun")
+    eat_item(c, HONEYBUN_LABEL, "honey bun")
+    print("EAT HONEYBUN: food uimsg seen (Honey Bun=AGI:5 row live)")
+
+
+def pirozhki_leg(c, quern, oven):
+    """Session 83, leg 8: the savory pirozhki dough over the forage
+    legs' chantrelles and onions (flour x2 + water + shrooms x2 +
+    onion x2 -> dough x2)."""
+    qmc, omc = quern[1], oven[1]
+    quern, oven = quern[0], oven[0]
+    gather_branches(c, inv_total(c, BRANCH_INV) + 2)
+    assert inv_total(c, BUCKETE_INV) >= 1, "no empty bucket for the water fill"
+    find_and_fill_water(c)
+    assert inv_total(c, CHANT_INV) >= 2, "chantrelles short (forage leg)"
+    assert inv_total(c, ONION_INV) >= 2, "onions short (forage leg)"
+    ensure_flour(c, quern, qmc)
+
+    craft_once(c, "dough_pirozhki", PIRO_DOUGH_INV)
+    assert inv_total(c, PIRO_DOUGH_INV) >= 2, "the pirozhki dough made < 2"
+    # The savory inputs are consumed by the craft (2 of each).
+    assert inv_total(c, CHANT_INV) == 1, (
+        "the craft left %d chantrelles (want 1: 3 foraged - 2 consumed)"
+        % inv_total(c, CHANT_INV))
+    assert inv_total(c, ONION_INV) == 1, (
+        "the craft left %d onions (want 1: 3 foraged - 2 consumed)"
+        % inv_total(c, ONION_INV))
+    print("PIROZHKI DOUGH: crafted x%d (2 shrooms + 2 onions consumed)"
+          % inv_total(c, PIRO_DOUGH_INV))
+
+    bake_dough(
+        c, oven, omc, PIRO_DOUGH_INV, PIRO_WORLD, PIRO_LABEL, "pirozhki")
+    eat_item(c, PIRO_LABEL, "pirozhki")
+    print("EAT PIROZHKI: food uimsg seen"
+          " (Chantrelle & Onion Pirozhki=CON:4 DEX:4 row live)")
+
+
+def bake_dough(c, oven, mc, dough_inv, world_res, label, what):
+    """Fuel one branch, load one dough, Light, catch the baked drop,
+    pick it up, and verify the baked label + resource (the bake_bread
+    choreography, keyed to any BAKE_MAP dough)."""
     branch = c.find_item_by_res(BRANCH_INV)
     assert branch is not None, "no branch left for fuel"
     c.take_item(branch)
@@ -491,7 +596,7 @@ def bake_pie(c, oven, mc):
     assert c.return_cursor(), "cursor return after fuel"
     c.pump(0.3)
 
-    dough_wid = c.find_item_by_res(PIE_DOUGH_INV)
+    dough_wid = c.find_item_by_res(dough_inv)
     assert dough_wid is not None, "dough input missing"
     c.take_item(dough_wid)
     c.pump(0.3)
@@ -501,7 +606,7 @@ def bake_pie(c, oven, mc):
     c.pump(0.3)
 
     seen = {g for g, info in c.gobs.items()
-            if info["res"] == PIE_WORLD and not info.get("removed")}
+            if info["res"] == world_res and not info.get("removed")}
     c.click_gob(oven, mc)
     ok = c.wait_for(lambda: c.sm_wid is not None and c.sm_opts == ["Light"], 4)
     assert ok, "oven Light menu missing (opts=%s)" % (c.sm_opts,)
@@ -509,27 +614,29 @@ def bake_pie(c, oven, mc):
     ok = c.wait_for(lambda: c.gobs[oven]["sdt"] == b"\x01", 4)
     assert ok, "oven never re-rendered as lit (sdt=%r lines=%r)" % (
         c.gobs[oven]["sdt"], c.chat_lines[-6:],)
-    print("oven lit; waiting out the bake...")
+    print("oven lit; waiting out the %s bake..." % what)
 
     ok = c.wait_for(
         lambda: any(
             g not in seen and not info.get("removed")
             for g, info in c.gobs.items()
-            if info["res"] == PIE_WORLD), 15)
-    assert ok, "no pie drop appeared beside the oven"
+            if info["res"] == world_res), 15)
+    assert ok, "no %s drop appeared beside the oven" % what
     drop_id = sorted(
         g for g, info in c.gobs.items()
-        if info["res"] == PIE_WORLD and not info.get("removed")
+        if info["res"] == world_res and not info.get("removed")
         and g not in seen)[0]
     c.click_gob(drop_id, c.gobs[drop_id]["pos"])
     ok = c.wait_for(
-        lambda: c.find_item_by_tooltip(PIE_LABEL) is not None, 6)
-    assert ok, "the pie never reached the inventory (items=%s)" % (
-        [(i["res"], i["tt"]) for i in c.item_info.values()],)
-    out_wid = c.find_item_by_tooltip(PIE_LABEL)
+        lambda: c.find_item_by_tooltip(label) is not None, 6)
+    assert ok, "the %s never reached the inventory (items=%s)" % (
+        what, [(i["res"], i["tt"]) for i in c.item_info.values()],)
+    out_wid = c.find_item_by_tooltip(label)
     info = c.item_info[out_wid]
-    assert info["res"] == PIE_INV, "pie picked up as %s" % info["res"]
-    print("PIE BAKED: %s q%d" % (PIE_LABEL, info["ql"]))
+    assert info["tt"] == label, "%s label %r (want %r)" % (
+        what, info["tt"], label)
+    print("%s BAKED: %s q%d" % (what.upper(), label, info["ql"]))
+    return out_wid
 
 
 def main():
@@ -568,11 +675,21 @@ def main():
 
         # 6. PIE: the full farm -> grind -> craft -> bake -> eat cycle
         # over a session-81 dough (the fast-crop server this probe
-        # boots makes the wheat leg minutes, not hours).
-        blueberry_pie_leg(c)
+        # boots makes the wheat leg minutes, not hours). The leg hands
+        # its quern + oven back for the session-83 doughs.
+        quern, oven = blueberry_pie_leg(c)
+
+        # 7. HONEYBUN: the no-butter dough over the hive chain (water +
+        # honey buckets), baked in the same oven, eaten (AGI:5).
+        honeybun_leg(c, quern, oven)
+
+        # 8. PIROZHKI: the savory dough over the forage legs (shrooms +
+        # onions), baked in the same oven, eaten (CON:4 DEX:4).
+        pirozhki_leg(c, quern, oven)
 
         print("DOUGH: OK (%s: 3 grapes, 5 apples, honey, raisins,"
-              " apple eat, blueberry pie baked + eaten)" % username)
+              " apple eat, blueberry pie + honeybun + pirozhki baked"
+              " + eaten)" % username)
     finally:
         from hnhlib import stop_server
         if proc is not None:
