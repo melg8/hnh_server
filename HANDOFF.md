@@ -282,7 +282,7 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
 48=3, 49=2, 50=4, 51=3, 52=5, 53=0, 54=1, 55=2, 56=4, 57=5, 58=3, 59=5,
 60=3, 61=2, 62=3, 63=4, 64=1, 65=5, 66=3, 67=4, 68=5, 69=3, 70=2, 71=3,
 72=4, 73=5, 74=0, 75=1, 76=2, 77=3, 78=5, 79=3, 80=4, 81=3, 82=5, 83=3,
-84=4.
+84=4, 85=5, 86=3, 87=4, 88=0, 89=4. Pick type freely - NOT 4 next.
 
 ## Session index (one line each; full entries in the archive)
 
@@ -431,87 +431,14 @@ the same type as the previous session. Recorded tail: 45=3, 46=3, 47=3,
   duel torn down server-side); the dairy e2e probe with fightview
   tracking.
 - S84 (type 4): the dairy chain green end to end - 0.25 s pursuit
+- S85 (type 5): the vis delta-scan (gap #10b closed) - per-CELL deltas, not per-gob.
+- S86 (type 3): the multi-machine cluster profile - cluster-up.sh + two e2e gates.
+- S87 (type 4): remote-profile e2e + Java-exact move semantics for probes (OCache parity).
+- S88 (type 0): the cluster surfaces land in AGENTS/README + the handoff header points at the gates.
+- S89: true 60s session timeout + own-address game bind (Java source filter); real GL client e2e over the REMOTE profile, staged run-remote-e2e.sh; -Dhaven.authport/gameport client overrides.
   slices, milk draw <-> butter churn alternation, raisins quota,
   streamed-map grass spirals, tree-exhaustion switching; 338
   tests green.
-## 2026-10-10 - Session 87 (type 4: the remote-profile e2e + the client move-semantics fix)
-
-SESSION TYPE ROTATION LOG: 84=4, 85=5, 86=3, 87=4. Pick the next
-type freely - just not 4.
-
-GOAL: the carried "remote-CLUSTER_SPEC smoke on two loopback
-addresses" - prove `cluster-up.sh remote` (the real per-machine
-deployment shape) end to end inside the sandbox. The smoke failed on
-its FIRST run; the session turned into root-causing that failure, and
-the root cause was a genuine semantics bug in the probe client
-library, not in the cluster code.
-
-DONE:
-
-- test_remote_cluster.sh (server/scripts): the REMOTE-profile e2e
-  gate. machine A = 127.0.0.1, machine B = 127.0.0.2; each runs the
-  exact operator command (`CLUSTER_SPEC=127.0.0.1:18790,127.0.0.2:
-  18791 SELF=i cluster-up.sh remote`). Legs: REMOTE MESH (dial link
-  up on both), GUEST WALK through machine A over machine B's cells
-  (probe_guest_walk), and REMOTE MIGRATION - the character is created
-  through machine A, then re-entered through machine B's OWN address
-  (127.0.0.2:1873/1874; probe_cluster_entry.py gained the host
-  argument): A serves the snapshot, B receives the migration.
-  Verdict line: REMOTE CLUSTER: OK.
-- THE BUG (first run): leg 1 of the guest walk reported "never
-  started" - no LINBEG for the player gob - while legs 2-4 arrived.
-  The one-shot instrumented dump (diag87_dump.py, since deleted with
-  its runner scripts) captured the wire truth: LINBEG (frame 1) DID
-  arrive 100 ms after the click - and 200 ms later a RETRANSMITTED
-  entry block (frame 0, OD_MOVE) arrived after it, and hnhlib's
-  on_objdata wiped "linbeg" on every OD_MOVE. The movement was
-  therefore deleted client-side the moment it started; legs 2-4
-  survived only because by then the retransmit wave had drained. The
-  retransmits existed at all because probes never echoed OBJACK, so
-  the ~700 bootstrap blocks stayed unconfirmed for the full 10 s
-  retirement window.
-- THE FIX (hnhlib.py, matched to the Java client, verified in
-  src/haven/OCache.java): OD_MOVE updates the base pos only and NEVER
-  cancels a live LinMove (OCache.move() sets rc, nothing else); the
-  FINAL LINSTEP (l >= c) is the arrival marker and ends the move
-  (OCache.linstep -> delattr(Moving)) - it now snaps pos to the
-  target and clears "linbeg". And send_objacks now defaults True:
-  the real client's SWorker acks within <=320 ms, so the server's
-  unacked table drains and the retransmit sweep stays idle - probes
-  model the real client instead of pathological silence.
-- Diagnostics cleaned up: diag87.sh / diag87b.sh / diag87_dump.py
-  were one-shot and are deleted (root cause closed); the permanent
-  artifacts are test_remote_cluster.sh + the hnhlib fix.
-
-MEASURED/EVIDENCE: REMOTE CLUSTER: OK under RUST_LOG=debug (mesh
-machineA=1 machineB=1, guest walk 4/4 legs, guest ingested=2 on
-machine B, migration served=1 received=1) - and the failure mode is
-now pinned by a gate, not just observed. Regressions green: CLUSTER
-E2E: OK (test_cluster.sh, all 4 legs + migration), MOVE PROBE: OK
-(probe_walk: LINBEG seen right after the click, arrival snap exactly
-on the clicked target), WORLD ENTRY: OK + CATTR ORDER: OK
-(test_client.py), DIRECTION WIRE: OK (probe_direction). Rust
-untouched: 339 workspace tests green (11 proto + 309 unit [2 ign] +
-7 wire [1 ign] + 12 world).
-
-OPERATIONAL NOTES: a canceled bash tool call does NOT kill the
-script-wrapper shape (test_remote_cluster.sh finished as an orphan
-and its output file held the full green verdict) - poll the output
-file with short calls instead of relaunching. HANDOFF hygiene: this
-session found S81/S82/S85 still living in HANDOFF.md above the
-keep-last-two window; they moved verbatim to the archive in
-chronological order (S81/S82 inserted before S83, S85 appended) -
-grep the archive for them from now on.
-
-NOT DONE / next session carries (S88 must NOT be type 4): GL e2e +
-Windows smoke of the fresh release binary; CI push retry (the PAT
-still lacks the workflow scope); the remaining NOT-DONE dough legs
-from S79/S82 if any surface on a fresh world; a Java-client live
-pass over the REMOTE profile (the hnhlib fix mirrors OCache, but the
-real client has not walked the 127.0.0.2 leg yet).
-
-COMMITS: (this session) scripts: the remote-profile e2e gate + the
-Java-exact move semantics for probes, this handoff.
 
 ## 2026-10-10 - Session 88 (type 0: the cluster surfaces land in the agent/user docs)
 
@@ -571,3 +498,76 @@ task.
 
 COMMITS: 8490fc3 (docs: the cluster surfaces land in AGENTS/README,
 the handoff header points at the gates), this handoff.
+
+## 2026-10-10 - Session 89 (type 4: the real GL client e2e over the REMOTE profile + two server fixes it forced)
+
+SESSION TYPE ROTATION LOG: 86=3, 87=4, 88=0, 89=4. Pick the next
+type freely - just NOT 4 (0/1/2/3/5 all open).
+
+GOAL: the carried "Java-client live pass over the REMOTE profile" -
+the actual GL render path through the two-machine deployment shape,
+which is the last unverified cell of the cluster matrix (S87 proved
+it with wire probes; the real client had never entered through
+machine B's own address). The gate failed twice; both failures were
+genuine server bugs, found and fixed in the same session.
+
+DONE:
+
+- scripts/jogl/run-remote-e2e.sh: the REAL GL client against the
+  REMOTE profile. STAGED (up / legA / legB / down / all) because this
+  sandbox evicts long-lived idle wrapper processes (an unmodified
+  monolithic runner died on a bare `sleep 1` twice); every stage is
+  one short foreground call, the Xvfb+JVM pair lives exactly as long
+  as the client renders through it, the nodes survive detached
+  (cluster-up.sh nohup+setsid). Subshell gotcha documented in-source:
+  `cd build && Xvfb &` backgrounds the WHOLE chain - java then runs
+  from the repo root and the relative classpath dies.
+- Server fix 1 - session timeout was fiction: the old loop bumped
+  last_recv +4 s on every server beat, so the silence clock
+  oscillated 1..5 s forever and 60 s was unreachable; a crashed
+  client kept its character "online" until restart, NACKing every
+  re-login. last_beat now only throttles our beats;
+  HNH_SESSION_TIMEOUT_SECS overrides (net.rs).
+- Server fix 2 - clustered nodes bound the game UDP socket to
+  0.0.0.0: machine B's replies carried the primary route address
+  (127.0.0.1) as source, and the real Java client (Session.java
+  RWorker: `!p.getAddress().equals(server) -> continue`) silently
+  dropped ALL of B's traffic - leg B hung at the character list
+  while python probes (no source filter) stayed green, which is
+  exactly the class of bug only the REAL client catches. net::spawn
+  now binds the node's OWN CLUSTER_SPEC address; single-node keeps
+  the wildcard contract (bots, local clients).
+- Client: -Dhaven.authport (default 1871) / -Dhaven.gameport
+  (default 1870) - entering through any node's own address needs
+  only the port overrides. DriveAgent: -Dhaven.drivequick (stop
+  after MOVEMENT) and -Dhaven.driveexit (WINDOW_CLOSING -> MSG_CLOSE
+  -> instant persist). hnhlib.WireClient mirrors the Java sworker
+  5 s idle beat through one _send() funnel - the server's 60 s
+  timeout is live now, so long pumps must look idle-but-alive.
+- AGENTS.md: the staged gate joins the mandatory cluster surfaces;
+  the own-address bind contract is spelled out next to the port
+  formula.
+
+MEASURED/EVIDENCE (all through the real client, REMOTE profile):
+REMOTE GL MESH: OK. leg A (machine A entry, full corpus): MOVEMENT
+MOVED, SPEED VERDICT OK (3.43 tiles/s), NO TELEPORT OK, 5/5 walk
+directions ARRIVED, EQUIPVIS OK, CURSOR OK, GROUNDDROP OK, CLUSTER
+VERDICT OK (foreign-authority gobs render), guest-ingested-on-B=5,
+clean exit -> "session closed" persist on A. leg B (machine B's own
+address 127.0.0.2:1873/1874): charlist renders, char pick, A serves
+the snapshot (served=1), B receives the migration (received=1), the
+character re-enters ON ITS PERSISTED POSITION and walks ->
+REMOTE GL MIGRATION: OK, REMOTE GL CLIENT: OK. Regressions: 339
+rust tests green; REMOTE CLUSTER: OK and CLUSTER E2E: OK (probe
+gates); WORLD ENTRY + CATTR: OK. RELAYFIGHT reported NO-TARGET (the
+chased kritter roamed out of reach) - not a gate line, logged as-is.
+
+NOT DONE / next session carries (S90 must NOT be type 4): GL e2e +
+Windows smoke of the fresh release binary on the WINDOWS port side;
+the remaining NOT-DONE dough legs (S79/S82); CI push still blocked
+on the PAT workflow scope (human action); the loadtest one-command
+demo could adopt the staged-gate pattern for sandbox-hostile CI.
+
+COMMITS: 1db150a (server: true 60s session timeout + own-address
+game bind), 751b812 (client+gate: per-node port overrides, agent
+quick/exit modes, staged remote GL e2e), this handoff.

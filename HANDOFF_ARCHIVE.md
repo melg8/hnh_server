@@ -6151,3 +6151,82 @@ the remote code path end to end in the sandbox.
 COMMITS: 7cd65c1 (cluster: the multi-machine profile, one command -
 cluster-up.sh, test_cluster.sh, probe_cluster_entry.py, WireClient
 node binding, the MSG_CLOSE migration fix, README), this handoff.
+
+## 2026-10-10 - Session 87 (type 4: the remote-profile e2e + the client move-semantics fix)
+
+SESSION TYPE ROTATION LOG: 84=4, 85=5, 86=3, 87=4. Pick the next
+type freely - just not 4.
+
+GOAL: the carried "remote-CLUSTER_SPEC smoke on two loopback
+addresses" - prove `cluster-up.sh remote` (the real per-machine
+deployment shape) end to end inside the sandbox. The smoke failed on
+its FIRST run; the session turned into root-causing that failure, and
+the root cause was a genuine semantics bug in the probe client
+library, not in the cluster code.
+
+DONE:
+
+- test_remote_cluster.sh (server/scripts): the REMOTE-profile e2e
+  gate. machine A = 127.0.0.1, machine B = 127.0.0.2; each runs the
+  exact operator command (`CLUSTER_SPEC=127.0.0.1:18790,127.0.0.2:
+  18791 SELF=i cluster-up.sh remote`). Legs: REMOTE MESH (dial link
+  up on both), GUEST WALK through machine A over machine B's cells
+  (probe_guest_walk), and REMOTE MIGRATION - the character is created
+  through machine A, then re-entered through machine B's OWN address
+  (127.0.0.2:1873/1874; probe_cluster_entry.py gained the host
+  argument): A serves the snapshot, B receives the migration.
+  Verdict line: REMOTE CLUSTER: OK.
+- THE BUG (first run): leg 1 of the guest walk reported "never
+  started" - no LINBEG for the player gob - while legs 2-4 arrived.
+  The one-shot instrumented dump (diag87_dump.py, since deleted with
+  its runner scripts) captured the wire truth: LINBEG (frame 1) DID
+  arrive 100 ms after the click - and 200 ms later a RETRANSMITTED
+  entry block (frame 0, OD_MOVE) arrived after it, and hnhlib's
+  on_objdata wiped "linbeg" on every OD_MOVE. The movement was
+  therefore deleted client-side the moment it started; legs 2-4
+  survived only because by then the retransmit wave had drained. The
+  retransmits existed at all because probes never echoed OBJACK, so
+  the ~700 bootstrap blocks stayed unconfirmed for the full 10 s
+  retirement window.
+- THE FIX (hnhlib.py, matched to the Java client, verified in
+  src/haven/OCache.java): OD_MOVE updates the base pos only and NEVER
+  cancels a live LinMove (OCache.move() sets rc, nothing else); the
+  FINAL LINSTEP (l >= c) is the arrival marker and ends the move
+  (OCache.linstep -> delattr(Moving)) - it now snaps pos to the
+  target and clears "linbeg". And send_objacks now defaults True:
+  the real client's SWorker acks within <=320 ms, so the server's
+  unacked table drains and the retransmit sweep stays idle - probes
+  model the real client instead of pathological silence.
+- Diagnostics cleaned up: diag87.sh / diag87b.sh / diag87_dump.py
+  were one-shot and are deleted (root cause closed); the permanent
+  artifacts are test_remote_cluster.sh + the hnhlib fix.
+
+MEASURED/EVIDENCE: REMOTE CLUSTER: OK under RUST_LOG=debug (mesh
+machineA=1 machineB=1, guest walk 4/4 legs, guest ingested=2 on
+machine B, migration served=1 received=1) - and the failure mode is
+now pinned by a gate, not just observed. Regressions green: CLUSTER
+E2E: OK (test_cluster.sh, all 4 legs + migration), MOVE PROBE: OK
+(probe_walk: LINBEG seen right after the click, arrival snap exactly
+on the clicked target), WORLD ENTRY: OK + CATTR ORDER: OK
+(test_client.py), DIRECTION WIRE: OK (probe_direction). Rust
+untouched: 339 workspace tests green (11 proto + 309 unit [2 ign] +
+7 wire [1 ign] + 12 world).
+
+OPERATIONAL NOTES: a canceled bash tool call does NOT kill the
+script-wrapper shape (test_remote_cluster.sh finished as an orphan
+and its output file held the full green verdict) - poll the output
+file with short calls instead of relaunching. HANDOFF hygiene: this
+session found S81/S82/S85 still living in HANDOFF.md above the
+keep-last-two window; they moved verbatim to the archive in
+chronological order (S81/S82 inserted before S83, S85 appended) -
+grep the archive for them from now on.
+
+NOT DONE / next session carries (S88 must NOT be type 4): GL e2e +
+Windows smoke of the fresh release binary; CI push retry (the PAT
+still lacks the workflow scope); the remaining NOT-DONE dough legs
+from S79/S82 if any surface on a fresh world; a Java-client live
+pass over the REMOTE profile (the hnhlib fix mirrors OCache, but the
+real client has not walked the 127.0.0.2 leg yet).
+
+COMMITS: (this session) scripts: the remote-profile e2e gate + the
+Java-exact move semantics for probes, this handoff.
