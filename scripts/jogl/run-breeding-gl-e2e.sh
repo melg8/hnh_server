@@ -54,7 +54,7 @@ fi
 cd "$REPO/build"
 CP="haven.jar:../lib/jogl.jar:../lib/gluegen-rt.jar:../lib/haven-res.jar:../lib/js-14.jar:../lib/jogg.jar:../lib/jorbis.jar:../lib/antlr-3.2.jar:../lib/jnlp.jar"
 DISPLAY=:99 LD_LIBRARY_PATH=$JOGL:$X11 LIBGL_ALWAYS_SOFTWARE=1 \
-  $J8/bin/java -Dhaven.avadebug=1 -cp "$CP" \
+  $J8/bin/java -Dhaven.avadebug=1 -Dhaven.drivelivestock=true -cp "$CP" \
   -Djava.library.path=$JOGL \
   -Dhaven.resdir=$REPO/gameres \
   -Dhaven.driveuser=$USERNAME \
@@ -82,9 +82,17 @@ echo "=== server: breeding evidence (v8 restore + calf born on the live path) ==
 rg "restore|calf born|breeding sweep|herd" /tmp/server_$TAG.log | head -15
 echo "=== verdict ==="
 if rg -q "ANIMALS SCREENSHOT: saved kritter" /tmp/client_$TAG.log; then
-  echo "HERD RENDERS: OK"
+  echo "HERD RENDERS: OK (agent saw the kritter in the viewport)"
 else
   echo "HERD RENDERS: FALLBACK (no kritter in viewport)"
+fi
+# Strict pixel proof: template-match the cow standing sprite against
+# the captured frame (VLM eyeballing of 27x43 px sprites is NOT
+# reliable - horns read as ears; pixels are).
+if python3 "$REPO/scripts/verify_cow_pixels.py" /tmp/client_animals.png 2>/dev/null | rg -q "COW PIXEL MATCH: OK"; then
+  echo "COW PIXELS: OK (sprite rendered pixel-exact on the frame)"
+else
+  echo "COW PIXELS: no pixel-exact cow found on the frame"
 fi
 if rg -q "calf born" /tmp/server_$TAG.log; then
   echo "LIVE BIRTH: OK"

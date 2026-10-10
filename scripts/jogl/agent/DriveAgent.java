@@ -519,6 +519,11 @@ public class DriveAgent {
             // re-census after arrival.
             try {
                 boolean shot = false;
+                // Livestock mode (breeding e2e): hunt the HERD instead of
+                // predators. Tamed animals FOLLOW the player, so they walk
+                // into the viewport on their own; predators are absent
+                // around a breeding save site anyway.
+                boolean livestock = Boolean.getBoolean("haven.drivelivestock");
                 for (int round = 0; round < 5 && !shot; round++) {
                     Object sess = get(ui, "sess");
                     Object glob = get(sess, "glob");
@@ -546,7 +551,15 @@ public class DriveAgent {
                             // player (their flee radius exceeds the
                             // viewport), while wolves and boars CHASE the
                             // player into view and stay within reach.
-                            if (n != null && (n.contains("/wolf/") || n.contains("/boar/"))) {
+                            // Livestock mode adds the tamed herd species
+                            // (cow/aurochs/sheep + juvenile calves) to the
+                            // target set: they follow instead of flee.
+                            if (n != null && (n.contains("/wolf/") || n.contains("/boar/")
+                                    || (livestock && (n.contains("/cow/")
+                                            || n.contains("/bull/")
+                                            || n.contains("/calf/")
+                                            || n.contains("/sheep/")
+                                            || n.contains("/aurochs/"))))) {
                                 kritter = true;
                                 break;
                             }

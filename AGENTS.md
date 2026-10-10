@@ -311,8 +311,13 @@ scripts/jogl/verify_charlist_portrait.sh <tag>
 # Breeding herd on the live GL path: boots the server ON a v8 breeding
 # save (the session-90 herd the probe bred), the client re-enters AS the
 # persisted character beside the herd, and HNH_BREED_SCALE=20000 speeds
-# gestation so a calf is born WHILE the client renders. Verdicts:
-# HERD RENDERS + LIVE BIRTH. Needs
+# gestation so a calf is born WHILE the client renders. The DriveAgent
+# runs in livestock mode (-Dhaven.drivelivestock=true): the ANIMALS
+# phase targets the herd itself (cows follow the player into view)
+# instead of predators. Verdicts: HERD RENDERS + COW PIXELS (the
+# scripts/verify_cow_pixels.py template match proves the cow sprite is
+# rendered pixel-exact - VLM eyeballing of 27x43 px sprites reads horns
+# as ears, pixels do not lie) + LIVE BIRTH. Needs
 # server/target/breeding-test-save-14642.json (from test_breeding.py
 # --keep-save or a prior run):
 scripts/jogl/run-breeding-gl-e2e.sh <tag>
