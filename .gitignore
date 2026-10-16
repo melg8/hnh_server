@@ -20,6 +20,12 @@ docs/javadoc/
 
 # Runtime logs and bug reports (windows/collect-logs.bat)
 /logs/
+
+# Client runtime config files, written at the repo root when the
+# client is launched by a Windows .bat from the working directory.
+/haven.conf
+/windows.conf
+/toolbars.conf
 __pycache__/
 *.pyc
 build-classes/
